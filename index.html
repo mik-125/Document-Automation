@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Brightline Reports</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Fraunces:opsz,wght@9..144,600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#dashboard" data-nav="dashboard" aria-label="Brightline Reports home">
+          <span class="brand-mark">B</span><span>brightline</span>
+        </a>
+        <div class="academy-switcher">
+          <span class="academy-avatar">HG</span>
+          <div><strong>Haneul Academy</strong><small>Seoul · 3 classes</small></div>
+          <span class="chevron">⌄</span>
+        </div>
+        <nav class="main-nav" aria-label="Primary navigation">
+          <a href="#dashboard" class="active" data-nav="dashboard"><span>▦</span>Overview</a>
+          <a href="#classes" data-nav="classes"><span>◇</span>Classes</a>
+          <a href="#students" data-nav="students"><span>♧</span>Students</a>
+          <a href="#inbox" data-nav="inbox"><span>⇩</span>Data inbox <b id="inbox-badge">3</b></a>
+          <a href="#reports" data-nav="reports"><span>▤</span>Reports</a>
+          <a href="#templates" data-nav="templates"><span>▧</span>Templates</a>
+        </nav>
+        <div class="sidebar-bottom">
+          <button class="text-button" id="reset-demo"><span>↻</span> Reset demo data</button>
+          <button class="account"><span class="user-avatar">JY</span><span><strong>Jiyoon Yoo</strong><small>Administrator</small></span><span>⋮</span></button>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobile-menu" aria-label="Open navigation">☰</button>
+          <div class="crumb"><span id="page-kicker">REPORTING PERIOD</span><strong id="page-title">Week 8 reports</strong></div>
+          <div class="top-actions"><button class="icon-button" title="Notifications">◌</button><button class="help-button">? Help</button></div>
+        </header>
+
+        <section class="page active" id="dashboard">
+          <div class="period-bar">
+            <div><span class="eyebrow">August 10–16, 2026</span><p>Review data, resolve exceptions, then generate student reports.</p></div>
+            <button class="secondary-button" id="period-button">⌄ Week 8</button>
+          </div>
+          <div class="hero-grid">
+            <article class="readiness-card">
+              <div class="card-label">REPORT READINESS <span class="live-dot">● Live</span></div>
+              <div class="readiness-stat"><span id="ready-count">5</span><span class="of">/ <span id="total-count">8</span> students ready</span></div>
+              <div class="progress"><i id="readiness-progress"></i></div>
+              <p id="readiness-copy">3 records need your attention before the batch is complete.</p>
+              <button class="primary-button" id="generate-ready">Generate 5 ready reports <span>→</span></button>
+            </article>
+            <article class="next-card">
+              <span class="next-icon">✦</span><div><span class="eyebrow">NEXT BEST ACTION</span><h2 id="next-action-title">Resolve data issues</h2><p>Finish the review to unlock every student in this week's batch.</p><button class="link-button" data-go="inbox">Open review queue →</button></div>
+            </article>
+          </div>
+
+          <section class="section-block">
+            <div class="section-heading"><div><span class="eyebrow">DATA COVERAGE</span><h2>Everything your reports need</h2></div><button class="link-button" data-go="inbox">View data inbox →</button></div>
+            <div class="coverage-grid" id="coverage-grid"></div>
+          </section>
+
+          <section class="section-block split-section">
+            <div class="class-health"><div class="section-heading"><div><span class="eyebrow">CLASS HEALTH</span><h2>Where attention is needed</h2></div><button class="link-button" data-go="classes">All classes →</button></div><div id="class-health-list" class="class-health-list"></div></div>
+            <div class="activity"><div class="section-heading"><div><span class="eyebrow">ACTIVITY</span><h2>Latest updates</h2></div></div><div class="activity-list" id="activity-list"></div></div>
+          </section>
+        </section>
+
+        <section class="page" id="classes">
+          <div class="page-intro"><div><span class="eyebrow">CLASS DIRECTORY</span><h1>Classes</h1><p>Manage the people, data structure, and report workflow for each class.</p></div><button class="primary-button" id="add-class">+ New class</button></div>
+          <div class="class-grid" id="class-grid"></div>
+        </section>
+
+        <section class="page" id="students">
+          <div class="page-intro"><div><span class="eyebrow">PEOPLE</span><h1>Students</h1><p>One normalized student record, regardless of where their data came from.</p></div><button class="primary-button" id="add-student">+ Add student</button></div>
+          <div class="toolbar"><label class="search"><span>⌕</span><input id="student-search" placeholder="Search students" /></label><select id="student-class-filter"><option value="all">All classes</option></select><button class="secondary-button" id="export-students">Export CSV</button></div>
+          <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Homework</th><th>Weekly test</th><th>Comment</th><th>Readiness</th><th></th></tr></thead><tbody id="students-table"></tbody></table></div>
+        </section>
+
+        <section class="page" id="inbox">
+          <div class="page-intro"><div><span class="eyebrow">AUTOMATION LAYER</span><h1>Data inbox</h1><p>Drop the files your academy already uses. We classify, match, and flag only the exceptions.</p></div><button class="primary-button" id="open-upload">+ Upload files</button></div>
+          <input type="file" id="file-input" accept=".csv,.txt,.xlsx,.xls,.pdf,.docx" multiple hidden />
+          <div class="inbox-layout">
+            <div>
+              <div class="drop-zone" id="drop-zone"><span class="drop-icon">⇪</span><div><strong>Drop files here</strong><p>CSV, Excel, PDF, Word, or text · Upload several at once</p></div><button class="secondary-button" id="browse-files">Browse files</button></div>
+              <div class="inbox-list-card"><div class="card-title-row"><h2>Uploaded data</h2><span id="upload-count" class="muted"></span></div><div id="file-list" class="file-list"></div></div>
+            </div>
+            <aside class="review-queue"><div><span class="eyebrow">REVIEW QUEUE</span><h2><span id="issue-count">3</span> items need a decision</h2><p>We never silently guess when a student record is ambiguous.</p></div><div id="issue-list" class="issue-list"></div><button class="primary-button full-width" id="review-all">Review all issues →</button></aside>
+          </div>
+        </section>
+
+        <section class="page" id="reports">
+          <div class="page-intro"><div><span class="eyebrow">GENERATED OUTPUT</span><h1>Reports</h1><p>PDF-ready student reports are stored here after generation.</p></div><button class="primary-button" id="generate-all">Generate ready reports</button></div>
+          <div class="report-summary"><div><span id="report-count">0</span><small>reports generated</small></div><div><span id="report-ready-count">5</span><small>students ready now</small></div><div><span>Week 8</span><small>active reporting period</small></div></div>
+          <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Generated</th><th>Template</th><th>Status</th><th></th></tr></thead><tbody id="reports-table"></tbody></table></div>
+        </section>
+
+        <section class="page" id="templates">
+          <div class="page-intro"><div><span class="eyebrow">REPORT DESIGN</span><h1>Templates</h1><p>Use the academy's familiar report design and bind dynamic student data to it.</p></div><button class="primary-button" id="save-template">Save changes</button></div>
+          <div class="template-layout"><aside class="template-elements"><span class="eyebrow">DATA ELEMENTS</span><h3>Week 8 report</h3><button class="element-chip active">Student details</button><button class="element-chip">Homework trend</button><button class="element-chip">Test score trend</button><button class="element-chip">Teacher comment</button><button class="element-chip">Next week goal</button><hr /><p>Changes are saved locally in this MVP and used in the next batch.</p></aside><div class="report-canvas" id="report-canvas"></div><aside class="template-properties"><span class="eyebrow">ELEMENT PROPERTIES</span><h3>Teacher comment</h3><label>Label<input id="template-comment-label" value="Teacher's note" /></label><label>Fallback text<textarea id="template-fallback">No teacher comment submitted yet.</textarea></label><label class="toggle-row"><span>Show homework trend</span><input id="template-show-homework" type="checkbox" checked /></label></aside></div>
+        </section>
+      </main>
+    </div>
+    <div class="modal-backdrop hidden" id="modal-backdrop"><div class="modal" id="modal"></div></div>
+    <div class="toast hidden" id="toast"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
