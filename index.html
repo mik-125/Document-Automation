@@ -72,7 +72,7 @@
 
         <section class="page active" id="dashboard">
           <div class="period-bar">
-            <div><span class="eyebrow" id="period-date">August 10–16, 2026</span><p>Review data, resolve exceptions, then generate student reports.</p></div>
+            <div><span class="eyebrow" id="period-date">August 10–16, 2026</span><p>WORKSPACE</p></div>
             <div class="period-selector"><button class="secondary-button period-button" id="period-button" aria-expanded="false">Select Week <span>⌄</span></button><div class="week-menu" id="week-menu"></div></div>
           </div>
           <div class="hero-grid">
@@ -100,14 +100,14 @@
         </section>
 
         <section class="page" id="classes">
-          <div class="page-intro"><div><span class="eyebrow">CLASS DIRECTORY</span><h1>Classes</h1><p>Manage the people, data structure, and report workflow for each class.</p></div><button class="primary-button" id="add-class">+ New class</button></div>
+          <div class="page-intro"><div><span class="eyebrow">CLASS DIRECTORY</span><h1>Classes</h1><p>STATUS</p></div><button class="primary-button" id="add-class">+ New class</button></div>
           <div class="class-grid" id="class-grid"></div>
         </section>
 
         <section class="page" id="students">
-          <div class="page-intro"><div><span class="eyebrow">PEOPLE</span><h1>Students</h1><p>One normalized student record, regardless of where their data came from.</p></div><button class="primary-button" id="add-student">+ Add student</button></div>
-          <div class="toolbar"><label class="search"><span>⌕</span><input id="student-search" placeholder="Search students" /></label><select id="student-class-filter"><option value="all">All classes</option></select><button class="secondary-button" id="export-students">Export CSV</button></div>
-          <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Report completion</th><th></th></tr></thead><tbody id="students-table"></tbody></table></div>
+          <div class="page-intro"><div><span class="eyebrow">PEOPLE</span><h1>Students</h1><p>STATUS</p></div><button class="primary-button" id="add-student">+ Add student</button></div>
+          <div class="toolbar"><label class="search"><span>⌕</span><input id="student-search" placeholder="Search students" /></label><select id="student-class-filter"><option value="all">All classes</option></select><button class="secondary-button" id="delete-selected-students" disabled>Delete</button></div>
+          <div class="table-card"><table><thead><tr><th><input class="student-select" id="select-all-students" type="checkbox" aria-label="Select all visible students" /></th><th>Student</th><th>Class</th><th>Report completion</th><th></th></tr></thead><tbody id="students-table"></tbody></table></div>
         </section>
 
         <section class="page" id="inbox">
