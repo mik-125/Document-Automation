@@ -1,0 +1,722 @@
+from __future__ import annotations
+
+import copy
+import csv
+import html
+import io
+import json
+import re
+import unicodedata
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any
+
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import NameObject
+from reportlab.lib.colors import Color, HexColor, white
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen import canvas
+
+
+BASE_WIDTH = 540.0
+BASE_HEIGHT = 780.0
+ROYAL_BLUE = HexColor("#3E58C6")
+SECTION_BLUE = HexColor("#D8E1F5")
+SHADOW_BLUE = HexColor("#213477")
+INK = HexColor("#172126")
+MUTED = HexColor("#59646A")
+GRID = HexColor("#D7DDE8")
+GREEN = HexColor("#4B9B79")
+RED = HexColor("#C86355")
+AMBER = HexColor("#D79B47")
+
+FONT_CANDIDATES = (
+    Path("/System/Library/Fonts/Supplemental/AppleGothic.ttf"),
+    Path("/System/Library/Fonts/Supplemental/NotoSansGothic-Regular.ttf"),
+    Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+)
+APP_FONT = "Helvetica"
+
+
+class ValidationError(ValueError):
+    pass
+
+
+def register_fonts() -> str:
+    global APP_FONT
+    if APP_FONT != "Helvetica":
+        return APP_FONT
+    for path in FONT_CANDIDATES:
+        if not path.exists():
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont("RoyalIBUnicode", str(path)))
+            APP_FONT = "RoyalIBUnicode"
+            return APP_FONT
+        except Exception:
+            continue
+    return APP_FONT
+
+
+def normalize_spaces(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "")
+    normalized = re.sub(r"[\t\r\n]+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def normalized_header(value: str) -> str:
+    return re.sub(r"[^0-9a-z가-힣]", "", unicodedata.normalize("NFKC", value or "").lower())
+
+
+def parse_date_label(value: str, year: int | None = None) -> date | None:
+    clean = unicodedata.normalize("NFKC", value or "").strip()
+    if not clean:
+        return None
+    year = year or datetime.now().year
+    for pattern, order in (
+        (r"^(\d{4})[-./](\d{1,2})[-./](\d{1,2})$", "ymd"),
+        (r"^(\d{1,2})[-./](\d{1,2})$", "md"),
+        (r"^(\d{1,2})월\s*(\d{1,2})일?$", "md"),
+    ):
+        match = re.match(pattern, clean)
+        if not match:
+            continue
+        try:
+            if order == "ymd":
+                return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            return date(year, int(match.group(1)), int(match.group(2)))
+        except ValueError:
+            return None
+    return None
+
+
+def _find_header_index(row: list[str], names: set[str]) -> int | None:
+    for index, value in enumerate(row):
+        if normalized_header(value) in names:
+            return index
+    return None
+
+
+def inspect_homework_csv(text: str) -> dict[str, Any]:
+    rows = list(csv.reader(io.StringIO(text.lstrip("\ufeff"))))
+    if not rows:
+        raise ValidationError("The CSV is empty.")
+
+    header_index = None
+    required = {"과목명", "학생", "학년", "학교"}
+    for index, row in enumerate(rows[:20]):
+        present = {normalized_header(cell) for cell in row}
+        if required.issubset(present):
+            header_index = index
+            break
+    if header_index is None or header_index + 1 >= len(rows):
+        raise ValidationError("Could not find the class, student, grade, and school columns.")
+
+    headers = rows[header_index]
+    date_headers = rows[header_index + 1]
+    class_index = _find_header_index(headers, {"과목명", "class", "classname", "course", "subject"})
+    teacher_index = _find_header_index(headers, {"담당자이름", "담당자", "teacher", "teachername"})
+    name_index = _find_header_index(headers, {"학생", "학생명", "student", "studentname", "name"})
+    grade_index = _find_header_index(headers, {"학년", "grade"})
+    school_index = _find_header_index(headers, {"학교", "school"})
+    if None in (class_index, name_index, grade_index, school_index):
+        raise ValidationError("The required student identity columns are incomplete.")
+
+    dates: list[dict[str, Any]] = []
+    seen_dates: set[str] = set()
+    for column, label in enumerate(date_headers):
+        parsed = parse_date_label(label)
+        if not parsed or parsed.isoformat() in seen_dates:
+            continue
+        seen_dates.add(parsed.isoformat())
+        dates.append({"column": column, "label": label.strip(), "iso": parsed.isoformat()})
+    if not dates:
+        raise ValidationError("No homework dates were found in the CSV header.")
+
+    records = []
+    class_names: set[str] = set()
+    for row in rows[header_index + 2 :]:
+        row = row + [""] * max(0, len(headers) - len(row))
+        class_name = row[class_index].strip() if class_index is not None else ""
+        student_name = row[name_index].strip() if name_index is not None else ""
+        if not class_name or not student_name or normalized_header(class_name) == "과목명":
+            continue
+        class_names.add(class_name)
+        records.append(
+            {
+                "class_name": class_name,
+                "teacher": row[teacher_index].strip() if teacher_index is not None else "",
+                "name": student_name,
+                "grade": row[grade_index].strip() if grade_index is not None else "",
+                "school": row[school_index].strip() if school_index is not None else "",
+                "row": row,
+            }
+        )
+
+    if not records:
+        raise ValidationError("No student records were found in the CSV.")
+    return {
+        "header_index": header_index,
+        "indices": {
+            "class": class_index,
+            "teacher": teacher_index,
+            "name": name_index,
+            "grade": grade_index,
+            "school": school_index,
+        },
+        "dates": dates,
+        "records": records,
+        "record_count": len(records),
+        "class_count": len(class_names),
+    }
+
+
+def homework_records(text: str, period_start: str, period_end: str) -> list[dict[str, Any]]:
+    inspected = inspect_homework_csv(text)
+    try:
+        start = date.fromisoformat(period_start)
+        end = date.fromisoformat(period_end)
+    except ValueError as exc:
+        raise ValidationError("The reporting period is invalid.") from exc
+    if start > end:
+        raise ValidationError("The reporting period start must be before its end.")
+
+    selected_dates = [
+        item for item in inspected["dates"] if start <= date.fromisoformat(item["iso"]) <= end
+    ]
+    if not selected_dates:
+        raise ValidationError("The selected reporting period contains no homework dates.")
+
+    parsed_records: list[dict[str, Any]] = []
+    for record in inspected["records"]:
+        raw_name = record["name"].strip()
+        online_match = re.match(r"^\s*\(\s*ON\s*\)\s*", raw_name, flags=re.IGNORECASE)
+        display_name = re.sub(
+            r"^\s*\(\s*ON\s*\)\s*", "", raw_name, flags=re.IGNORECASE
+        ).strip()
+        entries: list[dict[str, Any]] = []
+        completed = 0
+        incomplete = 0
+        excluded = 0
+        for date_item in selected_dates:
+            column = int(date_item["column"])
+            value = record["row"][column].strip() if column < len(record["row"]) else ""
+            upper = unicodedata.normalize("NFKC", value).upper().strip()
+            category = "excluded"
+            chart_score: int | None = None
+            if upper.startswith("A"):
+                category = "completed"
+                chart_score = 100
+                completed += 1
+            elif upper.startswith("B"):
+                category = "completed"
+                chart_score = 75
+                completed += 1
+            elif upper.startswith("F"):
+                category = "incomplete"
+                chart_score = 25
+                incomplete += 1
+            else:
+                excluded += 1
+            entries.append(
+                {
+                    "date": date_item["iso"],
+                    "label": date_item["label"],
+                    "value": value,
+                    "category": category,
+                    "score": chart_score,
+                }
+            )
+        attempted = completed + incomplete
+        percent = round(completed / attempted * 100, 1) if attempted else None
+        parsed_records.append(
+            {
+                "class_name": record["class_name"],
+                "teacher": record["teacher"],
+                "name": display_name,
+                "school": record["school"],
+                "grade": record["grade"],
+                "attendance_mode": "online" if online_match else "in-person",
+                "entries": entries,
+                "completed": completed,
+                "incomplete": incomplete,
+                "excluded": excluded,
+                "percent": percent,
+            }
+        )
+    return parsed_records
+
+
+def _cover_name(page_text: str) -> str | None:
+    text = normalize_spaces(page_text)
+    if not text or len(text) > 110 or "총점" in text or re.search(r"\bQ\d+\b", text):
+        return None
+    candidate = text.split("(", 1)[0].strip(" -:：")
+    candidate = re.sub(r"\s+", " ", candidate)
+    if not 2 <= len(candidate) <= 40:
+        return None
+    if not re.search(r"[A-Za-z가-힣]", candidate):
+        return None
+    return candidate
+
+
+def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[dict[str, Any]]:
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+    except Exception as exc:
+        raise ValidationError("The comments PDF could not be read.") from exc
+    if reader.is_encrypted:
+        raise ValidationError("Encrypted comments PDFs are not supported.")
+    texts = [page.extract_text() or "" for page in reader.pages]
+    if not any(text.strip() for text in texts):
+        raise ValidationError("The comments PDF has no searchable text. Scanned PDFs need OCR.")
+
+    covers = [(index, name) for index, text in enumerate(texts) if (name := _cover_name(text))]
+    if not covers:
+        raise ValidationError("No student cover pages were found in the comments PDF.")
+
+    records: list[dict[str, Any]] = []
+    for cover_index, (page_index, name) in enumerate(covers):
+        next_page = covers[cover_index + 1][0] if cover_index + 1 < len(covers) else len(texts)
+        body = normalize_spaces(" ".join(texts[page_index + 1 : next_page]))
+        if not body:
+            records.append(
+                {
+                    "name": name,
+                    "label": label,
+                    "score": None,
+                    "max_score": None,
+                    "sections": [],
+                    "comment": "",
+                    "source_name": source_name,
+                }
+            )
+            continue
+
+        score_match = re.search(r"총점\s*[:：]\s*([\d.]+)\s*/\s*([\d.]+)", body)
+        score = float(score_match.group(1)) if score_match else None
+        max_score = float(score_match.group(2)) if score_match else None
+        section_matches = list(
+            re.finditer(
+                r"Q\s*(\d+)\s*\(([^)]+)\)\s*[:：]\s*([\d.]+)\s*/\s*([\d.]+)(?:\s*\([^)]*\))?",
+                body,
+                flags=re.IGNORECASE,
+            )
+        )
+        sections = [
+            {
+                "question": f"Q{match.group(1)}",
+                "topic": normalize_spaces(match.group(2)),
+                "score": float(match.group(3)),
+                "max_score": float(match.group(4)),
+            }
+            for match in section_matches
+        ]
+        comment_start = 0
+        if section_matches:
+            comment_start = section_matches[-1].end()
+        elif score_match:
+            comment_start = score_match.end()
+        comment = body[comment_start:].strip(" -")
+        records.append(
+            {
+                "name": name,
+                "label": label,
+                "score": score,
+                "max_score": max_score,
+                "sections": sections,
+                "comment": comment,
+                "source_name": source_name,
+            }
+        )
+    return records
+
+
+def _draw_template_header(c: canvas.Canvas, *, continuation: bool = False) -> None:
+    c.setFillColor(ROYAL_BLUE)
+    c.rect(0, 0, BASE_WIDTH, BASE_HEIGHT, stroke=0, fill=1)
+    c.setFillColor(white)
+    c.setFont("Helvetica-Bold", 27 if not continuation else 22)
+    if continuation:
+        c.drawString(45, 716, "STUDENT REPORT CARD")
+    else:
+        c.drawString(45, 715, "STUDENT")
+        c.drawString(45, 682, "REPORT")
+        c.drawString(45, 649, "CARD")
+    c.setFont("Times-Roman", 13)
+    c.drawCentredString(BASE_WIDTH / 2, 17, "ROYAL IB")
+
+
+def _draw_section(c: canvas.Canvas, x: float, y: float, width: float, height: float, title: str) -> None:
+    register_fonts()
+    c.setFillColor(white)
+    c.rect(x, y, width, height, stroke=0, fill=1)
+    c.setFillColor(SECTION_BLUE)
+    c.rect(x, y + height - 19, width, 19, stroke=0, fill=1)
+    c.setFillColor(white)
+    c.setFont(APP_FONT, 10)
+    c.drawCentredString(x + width / 2, y + height - 14, title)
+
+
+def _draw_first_page_base(c: canvas.Canvas, *, with_fields: bool) -> None:
+    _draw_template_header(c)
+    register_fonts()
+    labels = (("과 목", 712), ("성 명", 676), ("학교 / 학년", 640))
+    for label, y in labels:
+        c.setFillColor(SHADOW_BLUE)
+        c.rect(271, y - 8, 242, 29, stroke=0, fill=1)
+        c.setFillColor(white)
+        c.rect(277, y - 3, 230, 24, stroke=0, fill=1)
+        c.setFillColor(INK)
+        c.setFont(APP_FONT, 8)
+        c.drawString(288, y + 5, label)
+    _draw_section(c, 31, 399, 478, 173, "과제 이행도")
+    _draw_section(c, 31, 218, 478, 165, "WEEKLY TEST")
+    _draw_section(c, 31, 38, 478, 164, "담당 선생님 COMMENT")
+    c.setStrokeColor(GRID)
+    c.rect(43, 420, 218, 125, stroke=1, fill=0)
+    c.rect(43, 240, 218, 115, stroke=1, fill=0)
+
+    if not with_fields:
+        return
+    field_specs = (
+        ("class_name", 338, 712, 160, 20, False),
+        ("student_name", 338, 676, 160, 20, False),
+        ("school_grade", 338, 640, 160, 20, False),
+        ("homework_summary", 275, 414, 222, 132, True),
+        ("weekly_test_summary", 275, 233, 222, 123, True),
+        ("teacher_comment_1", 42, 50, 456, 125, True),
+    )
+    for name, x, y, width, height, multiline in field_specs:
+        c.acroForm.textfield(
+            name=name,
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            borderWidth=0,
+            fillColor=Color(1, 1, 1, alpha=0),
+            textColor=INK,
+            fontName="Helvetica",
+            fontSize=7,
+            fieldFlags="multiline" if multiline else "",
+            forceBorder=False,
+        )
+
+
+def _draw_continuation_base(c: canvas.Canvas, *, with_fields: bool, page_number: int = 2) -> None:
+    _draw_template_header(c, continuation=True)
+    _draw_section(c, 35, 50, 470, 635, "담당 선생님 COMMENT")
+    c.setFillColor(white)
+    c.setFont("Helvetica", 8)
+    c.drawRightString(500, 28, f"PAGE {page_number}")
+    if with_fields:
+        c.acroForm.textfield(
+            name="teacher_comment_2",
+            x=46,
+            y=66,
+            width=448,
+            height=590,
+            borderWidth=0,
+            fillColor=Color(1, 1, 1, alpha=0),
+            textColor=INK,
+            fontName="Helvetica",
+            fontSize=8,
+            fieldFlags="multiline",
+            forceBorder=False,
+        )
+
+
+def create_fillable_template(output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    c = canvas.Canvas(str(output_path), pagesize=(BASE_WIDTH, BASE_HEIGHT), pageCompression=1)
+    c.setTitle("Royal IB Student Report Card - Fillable Template")
+    _draw_first_page_base(c, with_fields=True)
+    c.showPage()
+    _draw_continuation_base(c, with_fields=True)
+    c.save()
+
+
+def inspect_template(path: Path) -> dict[str, Any]:
+    try:
+        reader = PdfReader(path)
+    except Exception as exc:
+        raise ValidationError("The report template is not a readable PDF.") from exc
+    if reader.is_encrypted:
+        raise ValidationError("Encrypted report templates are not supported.")
+    if not reader.pages:
+        raise ValidationError("The report template has no pages.")
+    first = reader.pages[0].mediabox
+    width, height = float(first.width), float(first.height)
+    if width >= height:
+        raise ValidationError("The report template must use a portrait page.")
+    fields = sorted((reader.get_fields() or {}).keys())
+    return {"pages": len(reader.pages), "fields": fields, "width": width, "height": height}
+
+
+def _wrap_lines(text: str, font_name: str, font_size: float, max_width: float) -> list[str]:
+    lines: list[str] = []
+    for raw_paragraph in str(text or "").splitlines() or [""]:
+        paragraph = normalize_spaces(raw_paragraph)
+        if not paragraph:
+            lines.append("")
+            continue
+        current = ""
+        for character in paragraph:
+            candidate = current + character
+            if current and pdfmetrics.stringWidth(candidate, font_name, font_size) > max_width:
+                lines.append(current.rstrip())
+                current = character.lstrip()
+            else:
+                current = candidate
+        lines.append(current.rstrip())
+    return lines
+
+
+def _draw_lines(
+    c: canvas.Canvas,
+    lines: list[str],
+    *,
+    x: float,
+    top_y: float,
+    font_size: float,
+    leading: float,
+) -> None:
+    text = c.beginText(x, top_y)
+    text.setFont(APP_FONT, font_size)
+    text.setFillColor(INK)
+    text.setLeading(leading)
+    for line in lines:
+        text.textLine(line)
+    c.drawText(text)
+
+
+def _draw_line_chart(
+    c: canvas.Canvas,
+    points: list[dict[str, Any]],
+    *,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    value_key: str,
+    label_key: str,
+) -> None:
+    c.setStrokeColor(GRID)
+    c.setLineWidth(0.5)
+    for ratio in (0, 0.25, 0.5, 0.75, 1):
+        line_y = y + height * ratio
+        c.line(x, line_y, x + width, line_y)
+    valid = [item for item in points if item.get(value_key) is not None]
+    if not valid:
+        c.setFillColor(MUTED)
+        c.setFont(APP_FONT, 7)
+        c.drawCentredString(x + width / 2, y + height / 2, "No data in this period")
+        return
+    if len(valid) > 12:
+        step = (len(valid) - 1) / 11
+        valid = [valid[round(index * step)] for index in range(12)]
+    coordinates: list[tuple[float, float]] = []
+    for index, item in enumerate(valid):
+        point_x = x + (width * index / max(1, len(valid) - 1))
+        point_y = y + height * max(0, min(100, float(item[value_key]))) / 100
+        coordinates.append((point_x, point_y))
+    c.setStrokeColor(GREEN)
+    c.setLineWidth(1.5)
+    for first, second in zip(coordinates, coordinates[1:]):
+        c.line(first[0], first[1], second[0], second[1])
+    for (point_x, point_y), item in zip(coordinates, valid):
+        c.setFillColor(GREEN)
+        c.circle(point_x, point_y, 2.3, stroke=0, fill=1)
+        c.setFillColor(MUTED)
+        c.setFont(APP_FONT, 5.5)
+        label = str(item.get(label_key, ""))[-10:]
+        c.saveState()
+        c.translate(point_x - 2, y - 7)
+        c.rotate(40)
+        c.drawString(0, 0, label)
+        c.restoreState()
+
+
+def _format_number(value: Any) -> str:
+    if value is None:
+        return "-"
+    number = float(value)
+    return str(int(number)) if number.is_integer() else f"{number:.1f}"
+
+
+def _student_comment(student: dict[str, Any]) -> str:
+    exams = student.get("exams", [])
+    for exam in reversed(exams):
+        if exam.get("comment"):
+            return str(exam["comment"])
+    return "No teacher comment was supplied for this reporting period."
+
+
+def _build_overlay_pages(student: dict[str, Any], width: float, height: float) -> list[bytes]:
+    register_fonts()
+    scale_x, scale_y = width / BASE_WIDTH, height / BASE_HEIGHT
+    comment = _student_comment(student)
+    comment_lines = _wrap_lines(comment, APP_FONT, 7.2, 440)
+    first_lines = comment_lines[:13]
+    remaining = comment_lines[13:]
+    continuation_chunks = [remaining[index : index + 55] for index in range(0, len(remaining), 55)]
+    pages: list[bytes] = []
+
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=(width, height), pageCompression=1)
+    c.saveState()
+    c.scale(scale_x, scale_y)
+    c.setFillColor(INK)
+    c.setFont(APP_FONT, 8.5)
+    c.drawString(343, 719, str(student.get("class_name", ""))[:36])
+    c.setFont(APP_FONT, 10)
+    c.drawString(343, 683, str(student.get("name", ""))[:30])
+    c.setFont(APP_FONT, 8.5)
+    school_grade = " · ".join(
+        value for value in (str(student.get("school", "")), str(student.get("grade", ""))) if value
+    )
+    c.drawString(343, 647, school_grade[:42])
+
+    homework = student.get("homework", [])
+    _draw_line_chart(
+        c,
+        homework,
+        x=51,
+        y=441,
+        width=200,
+        height=87,
+        value_key="score",
+        label_key="label",
+    )
+    completed = int(student.get("homework_completed") or 0)
+    incomplete = int(student.get("homework_incomplete") or 0)
+    excluded = int(student.get("homework_excluded") or 0)
+    percent = student.get("homework_percent")
+    homework_copy = (
+        f"기간: {student.get('period_start') or '-'} ~ {student.get('period_end') or '-'}\n"
+        f"과제 이행률: {_format_number(percent)}%\n"
+        f"A/B 완료: {completed}   F 미완료: {incomplete}\n"
+        f"X 또는 공란 제외: {excluded}"
+    )
+    _draw_lines(
+        c,
+        _wrap_lines(homework_copy, APP_FONT, 7.2, 218),
+        x=278,
+        top_y=535,
+        font_size=7.2,
+        leading=11,
+    )
+
+    exams = student.get("exams", [])
+    test_points = [
+        {
+            "label": exam.get("label", "Exam"),
+            "percent": (
+                float(exam["score"]) / float(exam["max_score"]) * 100
+                if exam.get("score") is not None and exam.get("max_score")
+                else None
+            ),
+        }
+        for exam in exams
+    ]
+    _draw_line_chart(
+        c,
+        test_points,
+        x=51,
+        y=260,
+        width=200,
+        height=78,
+        value_key="percent",
+        label_key="label",
+    )
+    latest = exams[-1] if exams else None
+    if latest:
+        section_copy = ", ".join(
+            f"{item.get('question')}: {_format_number(item.get('score'))}/{_format_number(item.get('max_score'))}"
+            for item in latest.get("sections", [])
+        )
+        test_copy = (
+            f"{latest.get('label', 'Weekly exam')}: "
+            f"{_format_number(latest.get('score'))}/{_format_number(latest.get('max_score'))}\n"
+            f"{section_copy or 'Section scores were not included.'}"
+        )
+    else:
+        test_copy = "No weekly exam has been matched to this student."
+    _draw_lines(
+        c,
+        _wrap_lines(test_copy, APP_FONT, 7, 218),
+        x=278,
+        top_y=344,
+        font_size=7,
+        leading=10,
+    )
+    _draw_lines(c, first_lines, x=43, top_y=177, font_size=7.2, leading=8.8)
+    c.restoreState()
+    c.save()
+    pages.append(buffer.getvalue())
+
+    for page_number, chunk in enumerate(continuation_chunks, start=2):
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=(width, height), pageCompression=1)
+        c.saveState()
+        c.scale(scale_x, scale_y)
+        _draw_lines(c, chunk, x=47, top_y=650, font_size=7.2, leading=9.5)
+        c.setFillColor(white)
+        c.setFont("Helvetica", 8)
+        c.drawRightString(500, 28, f"PAGE {page_number}")
+        c.restoreState()
+        c.save()
+        pages.append(buffer.getvalue())
+    return pages
+
+
+def _generated_continuation_page(width: float, height: float, page_number: int) -> Any:
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=(width, height), pageCompression=1)
+    c.saveState()
+    c.scale(width / BASE_WIDTH, height / BASE_HEIGHT)
+    _draw_continuation_base(c, with_fields=False, page_number=page_number)
+    c.restoreState()
+    c.save()
+    return PdfReader(io.BytesIO(buffer.getvalue())).pages[0]
+
+
+def generate_student_pdf(student: dict[str, Any], template_path: Path, output_path: Path) -> Path:
+    template_reader = PdfReader(template_path)
+    if template_reader.is_encrypted or not template_reader.pages:
+        raise ValidationError("The active report template is unavailable.")
+    first_box = template_reader.pages[0].mediabox
+    width, height = float(first_box.width), float(first_box.height)
+    overlays = _build_overlay_pages(student, width, height)
+    writer = PdfWriter()
+    for index, overlay_bytes in enumerate(overlays):
+        if index == 0:
+            background = copy.deepcopy(template_reader.pages[0])
+        elif len(template_reader.pages) > 1:
+            background = copy.deepcopy(template_reader.pages[1])
+        else:
+            background = _generated_continuation_page(width, height, index + 1)
+        overlay = PdfReader(io.BytesIO(overlay_bytes)).pages[0]
+        background.merge_page(overlay)
+        background.pop(NameObject("/Annots"), None)
+        writer.add_page(background)
+    writer.add_metadata(
+        {
+            "/Title": f"Student Report - {student.get('name', '')}",
+            "/Author": "Royal IB",
+            "/Subject": str(student.get("class_name", "")),
+        }
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("wb") as stream:
+        writer.write(stream)
+    return output_path
+
+
+def student_payload(student: dict[str, Any], exams: list[dict[str, Any]]) -> dict[str, Any]:
+    payload = dict(student)
+    payload["homework"] = json.loads(payload.pop("homework_json") or "[]")
+    payload["exams"] = exams
+    return payload
