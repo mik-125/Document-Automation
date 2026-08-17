@@ -40,7 +40,7 @@
         <header class="topbar">
           <button class="mobile-menu" id="mobile-menu" aria-label="Open navigation">☰</button>
           <div class="crumb"><span id="page-kicker">REPORTING PERIOD</span><strong id="page-title">Report overview</strong></div>
-          <div class="top-actions"><span class="server-status"><i></i> Local service connected</span></div>
+          <div class="top-actions"><label class="period-selector">Active period<select id="global-period-select" aria-label="Active reporting period"><option value="">No period yet</option></select></label><span class="server-status"><i></i> Local service connected</span></div>
         </header>
 
         <section class="page active" id="dashboard">
@@ -84,7 +84,7 @@
             <label class="search"><span>⌕</span><input id="student-search" placeholder="Search name or school" /></label>
             <select id="student-class-filter"><option value="all">All classes</option></select>
           </div>
-          <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Homework</th><th>Latest test</th><th>Comment</th><th>Readiness</th></tr></thead><tbody id="students-table"></tbody></table></div>
+          <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Class period</th><th>Homework</th><th>Latest test</th><th>Comment</th><th>Readiness</th></tr></thead><tbody id="students-table"></tbody></table></div>
         </section>
 
         <section class="page" id="inbox">
@@ -120,6 +120,7 @@
           </div>
           <div class="report-summary"><div><span id="report-class-count">0</span><small>classes imported</small></div><div><span id="report-ready-count">0</span><small>students ready</small></div><div><span id="report-period">—</span><small>active reporting period</small></div></div>
           <div class="reports-by-class" id="reports-by-class"></div>
+          <section class="section-block report-history-block"><div class="section-heading"><div><span class="eyebrow">PRESERVED OUTPUT</span><h2>Report history</h2><p>Generated reports stay available even after newer periods are imported.</p></div><span class="muted" id="report-history-count">0 archived</span></div><div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Period</th><th>Revision</th><th>Generated</th><th></th></tr></thead><tbody id="report-history-table"></tbody></table></div></section>
         </section>
 
         <section class="page" id="templates">

@@ -71,11 +71,13 @@ def decode_base64(value: Any, label: str) -> bytes:
     return result
 
 
-def get_ready_student(student_id: str) -> dict[str, Any]:
-    student = DB.get_student(student_id)
+def get_ready_student(student_id: str, period_id: str | None = None) -> dict[str, Any]:
+    student = DB.get_student_for_period(student_id, period_id)
     if not student:
         raise ValidationError("Student not found.")
-    exams = DB.get_exams(student_id)
+    if not student.get("period_id"):
+        raise ValidationError("Choose a reporting period for this class.")
+    exams = DB.get_exams(student_id, student["period_id"])
     payload = student_payload(student, exams)
     attempted = int(payload.get("homework_completed") or 0) + int(
         payload.get("homework_incomplete") or 0
@@ -85,12 +87,16 @@ def get_ready_student(student_id: str) -> dict[str, Any]:
     return payload
 
 
-def generate_report(student_id: str) -> Path:
-    student = get_ready_student(student_id)
+def generate_report(
+    student_id: str, period_id: str | None = None, *, archive: bool = True
+) -> Path:
+    student = get_ready_student(student_id, period_id)
     template_path = Path(DB.get_setting("template_path", str(ACTIVE_TEMPLATE)))
-    output = REPORT_DIR / f"{student_id}.pdf"
+    period_folder = safe_filename(student.get("period_label", "period"), "period")
+    output = REPORT_DIR / period_folder / f"{student_id}-{uuid.uuid4().hex[:8]}.pdf"
     generate_student_pdf(student, template_path, output)
-    DB.mark_report_generated(student_id)
+    if archive:
+        DB.archive_report(student, student["period_id"], output)
     return output
 
 
@@ -115,7 +121,7 @@ def generate_zip(class_id: str | None = None) -> Path:
     class_names = {item["id"]: item["name"] for item in state["classes"]}
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for student in students:
-            report_path = generate_report(student["id"])
+            report_path = generate_report(student["id"], student.get("period_id"))
             report_name = f"{safe_filename(student['name'], student['id'])}.pdf"
             if class_id is None:
                 report_name = f"{safe_filename(class_names.get(student['class_id'], 'Unassigned'))}/{report_name}"
@@ -201,6 +207,9 @@ class AppHandler(BaseHTTPRequestHandler):
     def _path(self) -> str:
         return urllib.parse.urlparse(self.path).path
 
+    def _query(self) -> dict[str, list[str]]:
+        return urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
     def do_GET(self) -> None:
         try:
             path = self._path()
@@ -222,14 +231,24 @@ class AppHandler(BaseHTTPRequestHandler):
             if student_match:
                 student_id = student_match.group(1)
                 student = DB.get_student(student_id)
-                report_path = generate_report(student_id)
+                period_id = self._query().get("period_id", [None])[0]
+                report_path = generate_report(student_id, period_id)
                 filename = f"{safe_filename(student['name'] if student else 'student')}-report.pdf"
                 self._send_file(report_path, "application/pdf", filename)
                 return
             student_preview = re.fullmatch(r"/api/reports/student/([a-f0-9]+)/preview", path)
             if student_preview:
-                report_path = generate_report(student_preview.group(1))
+                period_id = self._query().get("period_id", [None])[0]
+                report_path = generate_report(student_preview.group(1), period_id, archive=False)
                 self._send_file(report_path, "application/pdf")
+                return
+            archived_match = re.fullmatch(r"/api/reports/archive/([a-f0-9]+)", path)
+            if archived_match:
+                report = DB.get_archived_report(archived_match.group(1))
+                if not report:
+                    raise ValidationError("Archived report not found.")
+                filename = f"{safe_filename(report['student_name'])}-{safe_filename(report['period_label'])}.pdf"
+                self._send_file(Path(report["pdf_path"]), "application/pdf", filename)
                 return
             class_match = re.fullmatch(r"/api/reports/class/([a-f0-9]+)\.zip", path)
             if class_match:
@@ -242,7 +261,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._send_file(archive, "application/zip", archive.name)
                 return
             self._serve_static(path)
-        except ValidationError as exc:
+        except (ValidationError, ValueError) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except (BrokenPipeError, ConnectionResetError):
             return
@@ -285,6 +304,17 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/comments/import":
                 self._import_comments(payload)
                 return
+            if path == "/api/periods/select":
+                DB.select_period(str(payload.get("period_id") or ""))
+                self._send_json({"ok": True, "state": DB.state()})
+                return
+            class_period_match = re.fullmatch(r"/api/classes/([a-f0-9]+)/period", path)
+            if class_period_match:
+                DB.select_class_period(
+                    class_period_match.group(1), str(payload.get("period_id") or "")
+                )
+                self._send_json({"ok": True, "state": DB.state()})
+                return
             if path == "/api/template/upload":
                 self._upload_template(payload)
                 return
@@ -299,7 +329,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True})
                 return
             self._send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
-        except ValidationError as exc:
+        except (ValidationError, ValueError) as exc:
             self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except (BrokenPipeError, ConnectionResetError):
             return
@@ -312,13 +342,18 @@ class AppHandler(BaseHTTPRequestHandler):
         filename = str(payload.get("filename") or "homework.csv")
         period_start = str(payload.get("period_start") or "")
         period_end = str(payload.get("period_end") or "")
+        period_label = str(payload.get("period_label") or "").strip()
         if not isinstance(text, str):
             raise ValidationError("CSV text is required.")
         records = homework_records(text, period_start, period_end)
+        period = DB.ensure_period(period_start, period_end, period_label)
+        DB.select_period(period["id"])
         created = 0
         updated = 0
+        class_ids: set[str] = set()
         for record in records:
             class_record = DB.upsert_class(record["class_name"], record["teacher"])
+            class_ids.add(class_record["id"])
             student, was_created = DB.upsert_student(
                 class_id=class_record["id"],
                 class_name=class_record["name"],
@@ -336,23 +371,27 @@ class AppHandler(BaseHTTPRequestHandler):
                 record["percent"],
                 period_start,
                 period_end,
+                period["id"],
             )
             created += int(was_created)
             updated += int(not was_created)
-        DB.set_setting("period_start", period_start)
-        DB.set_setting("period_end", period_end)
+        for class_id in class_ids:
+            DB.select_class_period(class_id, period["id"])
         summary = f"{len(records)} records matched · {created} added · {updated} updated"
-        DB.add_import(filename, "homework_csv", "complete", summary)
+        DB.add_import(filename, "homework_csv", "complete", summary, period["id"])
         self._send_json({"ok": True, "summary": summary, "state": DB.state()})
 
     def _import_comments(self, payload: dict[str, Any]) -> None:
         filename = str(payload.get("filename") or "teacher-comments.pdf")
         class_id = str(payload.get("class_id") or "")
+        period_id = str(payload.get("period_id") or DB.period_id_for_class(class_id) or "")
         label = str(payload.get("label") or "").strip()
         if not DB.get_class(class_id):
             raise ValidationError("Choose the class represented by this PDF.")
         if not label:
             raise ValidationError("Enter a weekly exam label.")
+        if not DB.get_period(period_id):
+            raise ValidationError("Choose the reporting period represented by this PDF.")
         pdf_bytes = decode_base64(payload.get("pdf_base64"), "Comments PDF")
         records = parse_comment_pdf(pdf_bytes, label, filename)
         matched = 0
@@ -360,7 +399,7 @@ class AppHandler(BaseHTTPRequestHandler):
         for record in records:
             candidates = DB.find_students_by_name(class_id, record["name"])
             if len(candidates) == 1:
-                DB.upsert_exam(candidates[0]["id"], class_id, record)
+                DB.upsert_exam(candidates[0]["id"], class_id, record, period_id)
                 matched += 1
             else:
                 DB.add_issue(
@@ -370,11 +409,12 @@ class AppHandler(BaseHTTPRequestHandler):
                     subject_name=record["name"],
                     payload=record,
                     candidate_ids=[candidate["id"] for candidate in candidates],
+                    period_id=period_id,
                 )
                 review += 1
         state = "review" if review else "complete"
         summary = f"{matched} comments matched · {review} need review"
-        DB.add_import(filename, "comments_pdf", state, summary)
+        DB.add_import(filename, "comments_pdf", state, summary, period_id)
         self._send_json({"ok": True, "summary": summary, "state": DB.state()})
 
     def _resolve_issue(self, issue_id: str, payload: dict[str, Any]) -> None:
@@ -385,7 +425,7 @@ class AppHandler(BaseHTTPRequestHandler):
         student = DB.get_student(student_id)
         if not student or student["class_id"] != issue["class_id"]:
             raise ValidationError("Choose a student from the selected class.")
-        DB.upsert_exam(student_id, issue["class_id"], issue["payload"])
+        DB.upsert_exam(student_id, issue["class_id"], issue["payload"], issue.get("period_id"))
         DB.resolve_issue(issue_id)
         self._send_json({"ok": True, "state": DB.state()})
 

@@ -3,8 +3,11 @@ let state = {
   students: [],
   files: [],
   issues: [],
+  periods: [],
+  reports: [],
+  selected_period_id: "",
   template: { name: "Royal IB report template", ready: false, pages: 0, fields: [] },
-  reporting_period: { start: "", end: "" }
+  reporting_period: { id: "", label: "", start: "", end: "" }
 };
 
 let currentPage = "dashboard";
@@ -28,7 +31,7 @@ function formatNumber(value) {
 function formatPeriod() {
   const { start, end } = state.reporting_period;
   if (!start || !end) return "No reporting period selected";
-  return `${start} to ${end}`;
+  return state.reporting_period.label || `${start} to ${end}`;
 }
 
 function formatDateTime(value) {
@@ -46,6 +49,14 @@ function initials(name = "") {
 
 function classById(id) {
   return state.classes.find(item => item.id === id);
+}
+
+function periodById(id) {
+  return state.periods.find(item => item.id === id);
+}
+
+function periodOptions(selectedId = "") {
+  return state.periods.map(period => `<option value="${period.id}" ${period.id === selectedId ? "selected" : ""}>${escapeHtml(period.label)} · ${period.start_date} to ${period.end_date}</option>`).join("");
 }
 
 function studentsForClass(classId) {
@@ -134,6 +145,9 @@ function render() {
   $("#inbox-badge").textContent = issueCount;
   $("#issue-count").textContent = issueCount;
   $("#period-label").textContent = formatPeriod();
+  const periodSelect = $("#global-period-select");
+  periodSelect.innerHTML = state.periods.length ? periodOptions(state.selected_period_id) : `<option value="">No period yet</option>`;
+  periodSelect.disabled = !state.periods.length;
   $("#academy-summary").textContent = `${state.classes.length} classes · ${total} students`;
   $("#next-action-title").textContent = !total ? "Import academy data" : issueCount ? `Resolve ${issueCount} uncertain match${issueCount === 1 ? "" : "es"}` : ready < total ? "Add comments for each class" : "Reports are ready";
   $("#next-action-copy").textContent = !total ? "Start with the multi-class homework CSV." : issueCount ? "Confirm the correct school and grade before reporting." : ready < total ? "Upload each class's weekly exam PDF." : "Download by student, class, or academy.";
@@ -199,8 +213,8 @@ function renderStudents() {
     const exam = student.latest_exam;
     const homework = student.homework_percent === null ? "Missing" : `${formatNumber(student.homework_percent)}%`;
     const test = exam ? `${escapeHtml(exam.label)} · ${formatNumber(exam.score)}/${formatNumber(exam.max_score)}` : "Missing";
-    return `<tr><td><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span>${escapeHtml(student.name)}<small>${escapeHtml(student.school || "School missing")} · ${escapeHtml(student.grade || "Grade missing")}</small></span></div></td><td>${escapeHtml(student.class_name)}</td><td>${homework}</td><td>${test}</td><td>${exam?.comment ? "Complete" : "Missing"}</td><td><span class="status-pill ${student.ready ? "" : "warn"}">${student.ready ? "Ready" : "Needs data"}</span></td></tr>`;
-  }).join("") : `<tr><td colspan="6">${emptyState("No matching students", state.students.length ? "Try a different search or class." : "Import the homework CSV to create student records.")}</td></tr>`;
+    return `<tr><td><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span>${escapeHtml(student.name)}<small>${escapeHtml(student.school || "School missing")} · ${escapeHtml(student.grade || "Grade missing")}</small></span></div></td><td>${escapeHtml(student.class_name)}</td><td>${escapeHtml(student.period_label || "Not selected")}</td><td>${homework}</td><td>${test}</td><td>${exam?.comment ? "Complete" : "Missing"}</td><td><span class="status-pill ${student.ready ? "" : "warn"}">${student.ready ? "Ready" : "Needs data"}</span></td></tr>`;
+  }).join("") : `<tr><td colspan="7">${emptyState("No matching students", state.students.length ? "Try a different search or class." : "Import the homework CSV to create student records.")}</td></tr>`;
 }
 
 function renderFiles() {
@@ -211,7 +225,7 @@ function renderFiles() {
   }
   const labels = { homework_csv: "Student and homework data", comments_pdf: "Teacher comments", report_template: "Report template" };
   const icons = { homework_csv: "CSV", comments_pdf: "PDF", report_template: "PDF" };
-  $("#file-list").innerHTML = state.files.map(file => `<div class="file-row"><span class="file-icon">${icons[file.kind] || "FILE"}</span><div class="file-info"><strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(labels[file.kind] || file.kind)} · ${escapeHtml(file.summary)}</small></div><div class="file-meta"><span class="status-pill ${file.state === "review" ? "warn" : ""}">${file.state === "review" ? "Review" : "Imported"}</span><time>${escapeHtml(formatDateTime(file.created_at))}</time></div></div>`).join("");
+  $("#file-list").innerHTML = state.files.map(file => `<div class="file-row"><span class="file-icon">${icons[file.kind] || "FILE"}</span><div class="file-info"><strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(labels[file.kind] || file.kind)} · ${escapeHtml(file.summary)}${file.period_label ? ` · ${escapeHtml(file.period_label)}` : ""}</small></div><div class="file-meta"><span class="status-pill ${file.state === "review" ? "warn" : ""}">${file.state === "review" ? "Review" : "Imported"}</span><time>${escapeHtml(formatDateTime(file.created_at))}</time></div></div>`).join("");
 }
 
 function renderIssues() {
@@ -219,15 +233,17 @@ function renderIssues() {
     $("#issue-list").innerHTML = `<div class="review-empty"><span>✓</span><strong>All clear</strong><p>No uncertain student matches are waiting.</p></div>`;
     return;
   }
-  $("#issue-list").innerHTML = state.issues.map(issue => `<button class="issue-item" data-issue="${issue.id}"><strong>${escapeHtml(issue.subject_name)}</strong><span>${issue.kind === "ambiguous_comment" ? `${issue.candidates.length} possible students` : "No exact student match"} · ${escapeHtml(issue.source_name)}</span><b>Review →</b></button>`).join("");
+  $("#issue-list").innerHTML = state.issues.map(issue => `<button class="issue-item" data-issue="${issue.id}"><strong>${escapeHtml(issue.subject_name)}</strong><span>${issue.kind === "ambiguous_comment" ? `${issue.candidates.length} possible students` : "No exact student match"} · ${escapeHtml(issue.source_name)}${issue.period_label ? ` · ${escapeHtml(issue.period_label)}` : ""}</span><b>Review →</b></button>`).join("");
 }
 
 function renderReports() {
   const ready = state.students.filter(student => student.ready).length;
   $("#report-class-count").textContent = state.classes.length;
   $("#report-ready-count").textContent = ready;
-  $("#report-period").textContent = state.reporting_period.start ? `${state.reporting_period.start.slice(5)} – ${state.reporting_period.end.slice(5)}` : "—";
+  $("#report-period").textContent = state.reporting_period.label || "Class-specific";
   $("#download-all").classList.toggle("disabled", ready === 0);
+  $("#report-history-count").textContent = `${state.reports.length} archived`;
+  $("#report-history-table").innerHTML = state.reports.length ? state.reports.map(report => `<tr><td>${escapeHtml(report.student_name)}</td><td>${escapeHtml(report.class_name)}</td><td>${escapeHtml(report.period_label)}</td><td>Revision ${report.revision}</td><td>${escapeHtml(formatDateTime(report.generated_at))}</td><td><a class="table-action button-link" href="/api/reports/archive/${report.id}">Download</a></td></tr>`).join("") : `<tr><td colspan="6">${emptyState("No archived reports", "Downloaded student and class reports will appear here.")}</td></tr>`;
   if (!state.classes.length) {
     $("#reports-by-class").innerHTML = emptyState("No report classes yet", "Import the homework CSV, then add each class's comments PDF.", true);
     return;
@@ -237,9 +253,10 @@ function renderReports() {
     const rows = stats.students.map(student => {
       const exam = student.latest_exam;
       const reason = !student.homework.length ? "Homework missing" : !exam ? "Weekly test missing" : !exam.comment ? "Comment missing" : "Ready";
-      return `<div class="report-student-row"><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span>${escapeHtml(student.name)}<small>${escapeHtml(student.school)} · ${escapeHtml(student.grade)}</small></span></div><div class="report-data"><span>Homework <b>${student.homework_percent === null ? "—" : `${formatNumber(student.homework_percent)}%`}</b></span><span>Latest test <b>${exam ? `${formatNumber(exam.score)}/${formatNumber(exam.max_score)}` : "—"}</b></span></div><span class="status-pill ${student.ready ? "" : "warn"}">${escapeHtml(reason)}</span><div class="row-actions">${student.ready ? `<button class="table-action" data-preview-student="${student.id}">Preview</button><a class="table-action button-link" href="/api/reports/student/${student.id}">Download PDF</a>` : `<button class="table-action disabled" data-go="inbox">Add data</button>`}</div></div>`;
+      const query = student.period_id ? `?period_id=${encodeURIComponent(student.period_id)}` : "";
+      return `<div class="report-student-row"><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span>${escapeHtml(student.name)}<small>${escapeHtml(student.school)} · ${escapeHtml(student.grade)}</small></span></div><div class="report-data"><span>Homework <b>${student.homework_percent === null ? "—" : `${formatNumber(student.homework_percent)}%`}</b></span><span>Latest test <b>${exam ? `${formatNumber(exam.score)}/${formatNumber(exam.max_score)}` : "—"}</b></span></div><span class="status-pill ${student.ready ? "" : "warn"}">${escapeHtml(reason)}</span><div class="row-actions">${student.ready ? `<button class="table-action" data-preview-student="${student.id}" data-period-id="${student.period_id}">Preview</button><a class="table-action button-link" href="/api/reports/student/${student.id}${query}">Download PDF</a>` : `<button class="table-action disabled" data-go="inbox">Add data</button>`}</div></div>`;
     }).join("");
-    return `<section class="report-class-section" id="report-class-${classItem.id}"><header><div><span class="eyebrow">${escapeHtml(classItem.subject || "CLASS REPORTS")}</span><h2>${escapeHtml(classItem.name)}</h2><p>${stats.ready} of ${stats.students.length} students ready · ${escapeHtml(classItem.teacher || "Teacher not specified")}</p></div><a class="secondary-button button-link ${stats.ready ? "" : "disabled"}" href="/api/reports/class/${classItem.id}.zip">Download class ZIP</a></header><div class="report-student-list">${rows || emptyState("No students in this class", "Import an updated CSV to add students.")}</div></section>`;
+    return `<section class="report-class-section" id="report-class-${classItem.id}"><header><div><span class="eyebrow">${escapeHtml(classItem.subject || "CLASS REPORTS")}</span><h2>${escapeHtml(classItem.name)}</h2><p>${stats.ready} of ${stats.students.length} students ready · ${escapeHtml(classItem.teacher || "Teacher not specified")}</p></div><div class="class-report-actions"><label>Class period<select data-class-period="${classItem.id}" ${state.periods.length ? "" : "disabled"}>${periodOptions(classItem.selected_period_id)}</select></label><a class="secondary-button button-link ${stats.ready ? "" : "disabled"}" href="/api/reports/class/${classItem.id}.zip">Download class ZIP</a></div></header><div class="report-student-list">${rows || emptyState("No students in this class", "Import an updated CSV to add students.")}</div></section>`;
   }).join("");
 }
 
@@ -276,7 +293,8 @@ async function chooseHomeworkCsv(file) {
     const text = await file.text();
     const inspection = await api("/api/csv/inspect", { method: "POST", body: JSON.stringify({ filename: file.name, text }) });
     const options = inspection.dates.map(item => `<option value="${item.iso}">${escapeHtml(item.label)} · ${item.iso}</option>`).join("");
-    openModal(`<span class="eyebrow">CSV IMPORT</span><h2>Select the reporting period</h2><p><strong>${escapeHtml(file.name)}</strong> contains ${inspection.record_count} student-class records across ${inspection.class_count} classes.</p><form id="csv-import-form"><div class="form-grid"><label>Start date<select id="period-start" required>${options}</select></label><label>End date<select id="period-end" required>${options}</select></label></div><div class="calculation-note"><strong>Homework rule</strong><span>A and B = completed · F = incomplete · X and blank = excluded</span></div><div class="modal-footer"><button type="button" class="secondary-button" id="cancel-import">Cancel</button><button class="primary-button">Import and update students</button></div></form>`);
+    const suggestedLabel = `Week ${state.periods.length + 1}`;
+    openModal(`<span class="eyebrow">CSV IMPORT</span><h2>Select the reporting period</h2><p><strong>${escapeHtml(file.name)}</strong> contains ${inspection.record_count} student-class records across ${inspection.class_count} classes.</p><form id="csv-import-form"><label>Period name<input id="period-name" value="${escapeHtml(suggestedLabel)}" placeholder="Week 8" required /></label><div class="form-grid"><label>Start date<select id="period-start" required>${options}</select></label><label>End date<select id="period-end" required>${options}</select></label></div><div class="calculation-note"><strong>Homework rule</strong><span>A and B = completed · F = incomplete · X and blank = excluded</span></div><div class="modal-footer"><button type="button" class="secondary-button" id="cancel-import">Cancel</button><button class="primary-button">Import and update students</button></div></form>`);
     $("#period-end").value = inspection.dates.at(-1).iso;
     $("#cancel-import").onclick = closeModal;
     $("#csv-import-form").onsubmit = async event => {
@@ -285,7 +303,7 @@ async function chooseHomeworkCsv(file) {
       const periodEnd = $("#period-end").value;
       if (periodStart > periodEnd) return toast("The start date must be before the end date.", "error");
       try {
-        const result = await api("/api/csv/import", { method: "POST", body: JSON.stringify({ filename: file.name, text, period_start: periodStart, period_end: periodEnd }) });
+        const result = await api("/api/csv/import", { method: "POST", body: JSON.stringify({ filename: file.name, text, period_label: $("#period-name").value.trim(), period_start: periodStart, period_end: periodEnd }) });
         state = result.state;
         closeModal();
         render();
@@ -316,15 +334,24 @@ async function chooseCommentsPdf(file) {
     $("#comments-file-input").value = "";
     return;
   }
+  if (!state.periods.length) {
+    toast("Import the homework CSV to create a reporting period first.", "error");
+    $("#comments-file-input").value = "";
+    return;
+  }
   const classOptions = state.classes.map(item => `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("");
   const defaultLabel = file.name.replace(/\.pdf$/i, "").trim();
-  openModal(`<span class="eyebrow">COMMENTS PDF</span><h2>Identify this weekly exam</h2><p>Each comments PDF must represent one class. Names will only be matched inside the class you select.</p><form id="comments-import-form"><label>Class<select id="comments-class" required><option value="">Choose a class</option>${classOptions}</select></label><label>Exam label<input id="comments-label" value="${escapeHtml(defaultLabel)}" placeholder="Weekly Exam 1" required /></label><div class="safety-note">Duplicate or missing names will be sent to the review queue with school and grade options.</div><div class="modal-footer"><button type="button" class="secondary-button" id="cancel-import">Cancel</button><button class="primary-button">Match comments</button></div></form>`);
+  openModal(`<span class="eyebrow">COMMENTS PDF</span><h2>Identify this weekly exam</h2><p>Each comments PDF must represent one class and one reporting period. Names will only be matched inside the selected class.</p><form id="comments-import-form"><div class="form-grid"><label>Class<select id="comments-class" required><option value="">Choose a class</option>${classOptions}</select></label><label>Reporting period<select id="comments-period" required><option value="">Choose a period</option>${periodOptions()}</select></label></div><label>Exam label<input id="comments-label" value="${escapeHtml(defaultLabel)}" placeholder="Weekly Exam 1" required /></label><div class="safety-note">Duplicate or missing names will be sent to the review queue with school and grade options.</div><div class="modal-footer"><button type="button" class="secondary-button" id="cancel-import">Cancel</button><button class="primary-button">Match comments</button></div></form>`);
+  $("#comments-class").onchange = event => {
+    const selectedClass = classById(event.target.value);
+    if (selectedClass?.selected_period_id) $("#comments-period").value = selectedClass.selected_period_id;
+  };
   $("#cancel-import").onclick = closeModal;
   $("#comments-import-form").onsubmit = async event => {
     event.preventDefault();
     try {
       const pdfBase64 = arrayBufferToBase64(await file.arrayBuffer());
-      const result = await api("/api/comments/import", { method: "POST", body: JSON.stringify({ filename: file.name, class_id: $("#comments-class").value, label: $("#comments-label").value.trim(), pdf_base64: pdfBase64 }) });
+      const result = await api("/api/comments/import", { method: "POST", body: JSON.stringify({ filename: file.name, class_id: $("#comments-class").value, period_id: $("#comments-period").value, label: $("#comments-label").value.trim(), pdf_base64: pdfBase64 }) });
       state = result.state;
       closeModal();
       render();
@@ -391,10 +418,31 @@ function bindEvents() {
     const issue = event.target.closest("[data-issue]");
     if (issue) { reviewIssue(issue.dataset.issue); return; }
     const preview = event.target.closest("[data-preview-student]");
-    if (preview) { window.open(`/api/reports/student/${preview.dataset.previewStudent}/preview`, "_blank", "noopener"); return; }
+    if (preview) { window.open(`/api/reports/student/${preview.dataset.previewStudent}/preview?period_id=${encodeURIComponent(preview.dataset.periodId || "")}`, "_blank", "noopener"); return; }
     const disabled = event.target.closest(".disabled");
     if (disabled?.matches("a")) event.preventDefault();
     if (event.target === $("#modal-backdrop")) closeModal();
+  });
+
+  document.addEventListener("change", async event => {
+    try {
+      if (event.target.matches("#global-period-select")) {
+        const result = await api("/api/periods/select", { method: "POST", body: JSON.stringify({ period_id: event.target.value }) });
+        state = result.state;
+        render();
+        toast("Active reporting period changed. Class selections were preserved.");
+      }
+      if (event.target.matches("[data-class-period]")) {
+        const classId = event.target.dataset.classPeriod;
+        const result = await api(`/api/classes/${classId}/period`, { method: "POST", body: JSON.stringify({ period_id: event.target.value }) });
+        state = result.state;
+        render();
+        toast(`${classById(classId)?.name || "Class"} now shows ${periodById(event.target.value)?.label || "the selected period"}.`);
+      }
+    } catch (error) {
+      toast(error.message, "error");
+      await loadState();
+    }
   });
 
   $("#upload-homework").onclick = $("#guide-upload-csv").onclick = () => $("#homework-file-input").click();
