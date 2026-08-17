@@ -14,6 +14,27 @@
         .sidebar-close { display: grid; place-items: center; position: absolute; top: 20px; right: 16px; width: 30px; height: 30px; border: 1px solid #d8e1dd; border-radius: 7px; background: #fff; color: #526267; font-size: 22px; line-height: 1; cursor: pointer; }
         .sidebar-close:hover { background: #eef5f1; color: #174c49; }
       }
+      .period-selector { position: relative; }
+      .period-button { display: flex; align-items: center; gap: 9px; }
+      .week-menu { display: none; position: absolute; z-index: 4; right: 0; top: calc(100% + 7px); width: 250px; padding: 6px; border: 1px solid #d9e2de; border-radius: 8px; background: #fff; box-shadow: 0 12px 28px rgba(18,43,42,.14); }
+      .week-menu.open { display: grid; gap: 2px; }
+      .week-option { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 9px 10px; border: 0; border-radius: 5px; background: transparent; color: #405156; font: 500 12px "DM Sans", sans-serif; text-align: left; cursor: pointer; }
+      .week-option:hover, .week-option.active { background: #e9f2ed; color: #17635e; }
+      .week-option.add-week { margin-top: 4px; border-top: 1px solid #e5ebe7; border-radius: 0; color: #17635e; font-weight: 700; }
+      .week-menu-row { display: grid; grid-template-columns: 1fr 28px 28px; align-items: center; }
+      .week-option small { display: block; margin-top: 2px; color: #829093; font-size: 9px; font-weight: 400; }
+      .week-edit { display: grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 5px; background: transparent; color: #688084; font-size: 14px; cursor: pointer; }
+      .week-edit:hover { background: #e9f2ed; color: #17635e; }
+      .week-delete { display: grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 5px; background: transparent; color: #8a9799; font-size: 17px; cursor: pointer; }
+      .week-delete:hover { background: #fae9e5; color: #aa493a; }
+      .week-empty { padding: 10px; color: #728084; font-size: 12px; }
+      .danger-button { margin-right: auto; padding: 9px 12px; border: 1px solid #e5bbb2; border-radius: 7px; background: #fff; color: #a84334; font: 600 12px "DM Sans", sans-serif; cursor: pointer; }
+      .danger-button:hover { background: #fae9e5; border-color: #d99586; }
+      .class-modal-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 16px; }
+      .class-modal-heading h2 { margin-bottom: 4px; }
+      .class-week-picker { min-width: 170px; color: #66747b; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+      .class-week-picker select { display: block; width: 100%; margin-top: 5px; padding: 8px 28px 8px 9px; border: 1px solid #d9e2de; border-radius: 6px; background: #fff; color: #33464b; font: 500 12px "DM Sans", sans-serif; }
+      @media (max-width: 560px) { .class-modal-heading { display: block; } .class-week-picker { display: block; margin-top: 14px; } }
     </style>
   </head>
   <body>
@@ -25,7 +46,7 @@
         <button class="sidebar-close" id="sidebar-close" aria-label="Hide sidebar">×</button>
         <div class="academy-switcher">
           <span class="academy-avatar">HG</span>
-          <div><strong>Haneul Academy</strong><small>Seoul · 3 classes</small></div>
+          <div><strong>Haneul Academy</strong><small id="academy-class-count">Seoul · 3 classes</small></div>
           <span class="chevron">⌄</span>
         </div>
         <nav class="main-nav" aria-label="Primary navigation">
@@ -51,8 +72,8 @@
 
         <section class="page active" id="dashboard">
           <div class="period-bar">
-            <div><span class="eyebrow">August 10–16, 2026</span><p>Review data, resolve exceptions, then generate student reports.</p></div>
-            <button class="secondary-button" id="period-button">⌄ Week 8</button>
+            <div><span class="eyebrow" id="period-date">August 10–16, 2026</span><p>Review data, resolve exceptions, then generate student reports.</p></div>
+            <div class="period-selector"><button class="secondary-button period-button" id="period-button" aria-expanded="false">Select Week <span>⌄</span></button><div class="week-menu" id="week-menu"></div></div>
           </div>
           <div class="hero-grid">
             <article class="readiness-card">
@@ -86,7 +107,7 @@
         <section class="page" id="students">
           <div class="page-intro"><div><span class="eyebrow">PEOPLE</span><h1>Students</h1><p>One normalized student record, regardless of where their data came from.</p></div><button class="primary-button" id="add-student">+ Add student</button></div>
           <div class="toolbar"><label class="search"><span>⌕</span><input id="student-search" placeholder="Search students" /></label><select id="student-class-filter"><option value="all">All classes</option></select><button class="secondary-button" id="export-students">Export CSV</button></div>
-          <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Homework</th><th>Weekly test</th><th>Comment</th><th>Readiness</th><th></th></tr></thead><tbody id="students-table"></tbody></table></div>
+          <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Report completion</th><th></th></tr></thead><tbody id="students-table"></tbody></table></div>
         </section>
 
         <section class="page" id="inbox">
@@ -103,13 +124,13 @@
 
         <section class="page" id="reports">
           <div class="page-intro"><div><span class="eyebrow">GENERATED OUTPUT</span><h1>Reports</h1><p>PDF-ready student reports are stored here after generation.</p></div><button class="primary-button" id="generate-all">Generate ready reports</button></div>
-          <div class="report-summary"><div><span id="report-count">0</span><small>reports generated</small></div><div><span id="report-ready-count">5</span><small>students ready now</small></div><div><span>Week 8</span><small>active reporting period</small></div></div>
+          <div class="report-summary"><div><span id="report-count">0</span><small>reports generated</small></div><div><span id="report-ready-count">5</span><small>students ready now</small></div><div><span id="active-week-summary">Week 8</span><small>active reporting period</small></div></div>
           <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Generated</th><th>Template</th><th>Status</th><th></th></tr></thead><tbody id="reports-table"></tbody></table></div>
         </section>
 
         <section class="page" id="templates">
           <div class="page-intro"><div><span class="eyebrow">REPORT DESIGN</span><h1>Templates</h1><p>Use the academy's familiar report design and bind dynamic student data to it.</p></div><button class="primary-button" id="save-template">Save changes</button></div>
-          <div class="template-layout"><aside class="template-elements"><span class="eyebrow">DATA ELEMENTS</span><h3>Week 8 report</h3><button class="element-chip active">Student details</button><button class="element-chip">Homework trend</button><button class="element-chip">Test score trend</button><button class="element-chip">Teacher comment</button><button class="element-chip">Next week goal</button><hr /><p>Changes are saved locally in this MVP and used in the next batch.</p></aside><div class="report-canvas" id="report-canvas"></div><aside class="template-properties"><span class="eyebrow">ELEMENT PROPERTIES</span><h3>Teacher comment</h3><label>Label<input id="template-comment-label" value="Teacher's note" /></label><label>Fallback text<textarea id="template-fallback">No teacher comment submitted yet.</textarea></label><label class="toggle-row"><span>Show homework trend</span><input id="template-show-homework" type="checkbox" checked /></label></aside></div>
+          <div class="template-layout"><aside class="template-elements"><span class="eyebrow">DATA ELEMENTS</span><h3 id="template-week-title">Week 8 report</h3><button class="element-chip active">Student details</button><button class="element-chip">Homework trend</button><button class="element-chip">Test score trend</button><button class="element-chip">Teacher comment</button><button class="element-chip">Next week goal</button><hr /><p>Changes are saved locally in this MVP and used in the next batch.</p></aside><div class="report-canvas" id="report-canvas"></div><aside class="template-properties"><span class="eyebrow">ELEMENT PROPERTIES</span><h3>Teacher comment</h3><label>Label<input id="template-comment-label" value="Teacher's note" /></label><label>Fallback text<textarea id="template-fallback">No teacher comment submitted yet.</textarea></label><label class="toggle-row"><span>Show homework trend</span><input id="template-show-homework" type="checkbox" checked /></label></aside></div>
         </section>
       </main>
     </div>
