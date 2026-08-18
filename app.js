@@ -13,6 +13,8 @@ let state = {
 let currentPage = "dashboard";
 let activeRequests = 0;
 let selectedStudentIds = new Set();
+let selectedClassIds = new Set();
+let selectedImportIds = new Set();
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -72,6 +74,55 @@ function classStats(classId) {
     homework: students.filter(student => Number(student.homework_completed) + Number(student.homework_incomplete) > 0).length,
     comments: students.filter(student => student.latest_exam?.comment).length
   };
+}
+
+const classClassificationRules = [
+  ["IB Math AA", [/\b(?:MATH|MATHEMATICS)\s*AA\b/, /ANALYSIS\s+(?:AND|&)\s+APPROACHES/]],
+  ["IB Math AI", [/\b(?:MATH|MATHEMATICS)\s*AI\b/, /APPLICATIONS?\s+(?:AND|&)\s+INTERPRETATION/]],
+  ["ESS", [/\bESS\b/, /ENVIRONMENTAL\s+SYSTEMS?\s+(?:AND|&)\s+SOCIET(?:Y|IES)/]],
+  ["Algebra 1", [/\bALGEBRA\s*(?:1|I)\b/]],
+  ["Algebra 2", [/\bALGEBRA\s*(?:2|II)\b/]],
+  ["Precalculus", [/\bPRE[ -]?CALCULUS\b/]],
+  ["Calculus", [/\bCALCULUS\b/]],
+  ["Statistics", [/\bSTATISTICS?\b/]],
+  ["Geometry", [/\bGEOMETRY\b/]],
+  ["Physics", [/\bPHYSICS?\b/]],
+  ["Chemistry", [/\bCHEM(?:ISTRY)?\b/]],
+  ["Biology", [/\bBIO(?:LOGY)?\b/]],
+  ["Economics", [/\bECON(?:OMICS)?\b/]],
+  ["Business Management", [/\b(?:BM|BUSINESS\s+MANAGEMENT)\b/]],
+  ["Computer Science", [/\b(?:CS|COMPUTER\s+SCIENCE)\b/]],
+  ["English A: Language & Literature", [/\b(?:ENG|ENGLISH)\s*A\s*(?:LAL|LANGUAGE\s+(?:AND|&)\s+LITERATURE)\b/]],
+  ["English Literature", [/\bSHAKESPEARE\b/, /셰익스피어/, /\b(?:ENG|ENGLISH)\s+(?:LIT|LITERATURE)\b/]],
+  ["Creative Writing", [/\bCEW\b/, /CREATIVE\s+(?:AND|&)\s+EXPOSITORY\s+WRITING/, /CREATIVE\s+WRITING/]],
+  ["Korean Literature", [/고전문학/, /한국문학/, /국어/]],
+  ["Mathematics", [/\b(?:MATH|MATHEMATICS)\b/]],
+  ["Psychology", [/\bPSYCHOLOGY\b/]],
+  ["History", [/\bHISTORY\b/]],
+  ["Geography", [/\bGEOGRAPHY\b/]],
+  ["Global Politics", [/\bGLOBAL\s+POLITICS\b/]],
+  ["Theory of Knowledge", [/\bTOK\b/, /THEORY\s+OF\s+KNOWLEDGE/]],
+  ["Visual Arts", [/\bVISUAL\s+ARTS?\b/]],
+  ["Design Technology", [/\bDESIGN\s+TECHNOLOGY\b/]],
+  ["SAT Preparation", [/\bSAT\b/]]
+];
+
+function normalizedClassText(value = "") {
+  return String(value).normalize("NFKC").toUpperCase().replace(/[‐‑‒–—]/g, "-").replace(/&/g, " AND ").replace(/[^A-Z0-9가-힣+ -]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function fallbackClassClassification(classItem) {
+  let value = String(classItem.subject || classItem.name || "Other");
+  value = value.replace(/^\([^)]*\)\s*/, "").replace(/^\d{1,2}:\d{2}\s*/, "").replace(/\[[^\]]*\]/g, " ").replace(/\([^)]*\)/g, " ");
+  value = value.replace(/\b(?:DP|MYP|IB|IGCSE|AP|G)\s*\d+(?:\s*[-+]\s*\d+)?\b/gi, " ").replace(/\b(?:HL|SL|H|S)\b/gi, " ").replace(/\bON\s*(?:ONLY|전용)?\b/gi, " ").replace(/\s*\+\s*/g, " ").replace(/\s+/g, " ").trim();
+  if (!value) return "Other";
+  return value.split(" ").map(word => /^[A-Z0-9]{2,4}$/.test(word) ? word : word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(" ");
+}
+
+function classifyClass(classItem) {
+  const text = normalizedClassText(`${classItem.subject || ""} ${classItem.name || ""}`);
+  const match = classClassificationRules.find(([, patterns]) => patterns.some(pattern => pattern.test(text)));
+  return match ? match[0] : fallbackClassClassification(classItem);
 }
 
 function setLoading(loading) {
@@ -187,7 +238,7 @@ function renderCoverage() {
 
 function renderClassHealth() {
   if (!state.classes.length) {
-    $("#class-health-list").innerHTML = emptyState("No classes yet", "Classes appear after the homework CSV is imported.");
+    $("#class-health-list").innerHTML = emptyState("No classes yet", "Add a class manually or import the homework CSV.");
     return;
   }
   $("#class-health-list").innerHTML = state.classes.map((classItem, index) => {
@@ -197,15 +248,86 @@ function renderClassHealth() {
 }
 
 function renderClasses() {
+  selectedClassIds = new Set([...selectedClassIds].filter(id => state.classes.some(classItem => classItem.id === id)));
+  const categoryFilter = $("#class-category-filter");
+  const selectedCategory = categoryFilter.value || "all";
+  const classifiedClasses = state.classes.map(classItem => ({ classItem, classification: classifyClass(classItem) }));
+  const classifications = [...new Set(classifiedClasses.map(item => item.classification))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  categoryFilter.innerHTML = `<option value="all">All classifications</option>${classifications.map(classification => `<option value="${escapeHtml(classification)}">${escapeHtml(classification)}</option>`).join("")}`;
+  categoryFilter.value = classifications.includes(selectedCategory) ? selectedCategory : "all";
+  const query = $("#class-search").value.trim().toLowerCase();
+  const visibleClasses = classifiedClasses.filter(({ classItem, classification }) => {
+    const categoryMatch = categoryFilter.value === "all" || classification === categoryFilter.value;
+    const searchMatch = `${classItem.name} ${classItem.subject} ${classItem.teacher} ${classification}`.toLowerCase().includes(query);
+    return categoryMatch && searchMatch;
+  }).sort((left, right) => {
+    const byName = left.classItem.name.localeCompare(right.classItem.name, undefined, { numeric: true, sensitivity: "base" });
+    if ($("#class-sort").value === "name") return byName;
+    return left.classification.localeCompare(right.classification, undefined, { numeric: true, sensitivity: "base" }) || byName;
+  });
+  const selectionCount = $("#class-selection-count");
+  const selectAll = $("#select-all-classes");
+  const deleteSelected = $("#delete-selected-classes");
+  const selectedVisibleCount = visibleClasses.filter(({ classItem }) => selectedClassIds.has(classItem.id)).length;
+  selectionCount.textContent = `${selectedClassIds.size} selected`;
+  selectAll.checked = Boolean(visibleClasses.length && selectedVisibleCount === visibleClasses.length);
+  selectAll.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleClasses.length;
+  selectAll.disabled = visibleClasses.length === 0;
+  deleteSelected.disabled = selectedClassIds.size === 0;
   if (!state.classes.length) {
-    $("#class-grid").innerHTML = emptyState("Import your first class list", "The multi-class CSV creates these sections automatically.", true);
+    $("#class-grid").innerHTML = emptyState("Add or import your first class", "Create one manually or import the multi-class CSV.", true);
     return;
   }
-  $("#class-grid").innerHTML = state.classes.map(classItem => {
+  if (!visibleClasses.length) {
+    $("#class-grid").innerHTML = emptyState("No matching classes", "Try another search or classification.", true);
+    return;
+  }
+  $("#class-grid").innerHTML = visibleClasses.map(({ classItem, classification }) => {
     const stats = classStats(classItem.id);
     const allReady = stats.students.length > 0 && stats.ready === stats.students.length;
-    return `<article class="class-card" data-report-class="${classItem.id}"><div class="class-card-top"><span class="subject">${escapeHtml(classItem.subject || "Academy class")}</span><span class="status-pill ${allReady ? "" : "warn"}">${allReady ? "Ready" : `${stats.students.length - stats.ready} pending`}</span></div><h2>${escapeHtml(classItem.name)}</h2><p>${escapeHtml(classItem.teacher || "Teacher not specified")} · ${stats.students.length} students</p><div class="class-stats"><div><b>${stats.ready}/${stats.students.length}</b><small>reports ready</small></div><div><b>${stats.homework}/${stats.students.length}</b><small>homework</small></div><div><b>${stats.comments}/${stats.students.length}</b><small>comments</small></div></div></article>`;
+    return `<article class="class-card ${selectedClassIds.has(classItem.id) ? "selected" : ""}" data-report-class="${classItem.id}"><div class="class-card-top"><label class="class-select"><input type="checkbox" data-select-class="${classItem.id}" aria-label="Select ${escapeHtml(classItem.name)}" ${selectedClassIds.has(classItem.id) ? "checked" : ""} /><span>Select</span></label><span class="status-pill ${allReady ? "" : "warn"}">${allReady ? "Ready" : `${stats.students.length - stats.ready} pending`}</span></div><span class="subject">${escapeHtml(classification)}</span><h2>${escapeHtml(classItem.name)}</h2><p>${escapeHtml(classItem.teacher || "Teacher not specified")} · ${stats.students.length} students</p><div class="class-stats"><div><b>${stats.ready}/${stats.students.length}</b><small>reports ready</small></div><div><b>${stats.homework}/${stats.students.length}</b><small>homework</small></div><div><b>${stats.comments}/${stats.students.length}</b><small>comments</small></div></div><div class="class-card-actions"><button class="table-action" data-open-class="${classItem.id}">Open reports</button><button class="table-action danger-action" data-delete-class="${classItem.id}">Delete</button></div></article>`;
   }).join("");
+  selectAll.onchange = event => {
+    visibleClasses.forEach(({ classItem }) => event.target.checked ? selectedClassIds.add(classItem.id) : selectedClassIds.delete(classItem.id));
+    renderClasses();
+  };
+  $$("[data-select-class]").forEach(input => input.onchange = event => {
+    event.target.checked ? selectedClassIds.add(event.target.dataset.selectClass) : selectedClassIds.delete(event.target.dataset.selectClass);
+    renderClasses();
+  });
+}
+
+function openClassModal() {
+  openModal(`<span class="eyebrow">NEW CLASS</span><h2>Add class</h2><p>Create a class manually. Students can be added from the Students page afterward.</p><form id="class-form"><div class="form-grid"><label>Class name<input name="name" placeholder="IB Mathematics A" required /></label><label>Subject<input name="subject" placeholder="IB Mathematics" /></label><label>Teacher<input name="teacher" placeholder="Teacher name" /></label></div><div class="modal-footer"><button type="button" class="secondary-button" id="cancel-class">Cancel</button><button class="primary-button">Add class</button></div></form>`);
+  $("#cancel-class").onclick = closeModal;
+  $("#class-form").onsubmit = async event => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const payload = { name: form.get("name").trim(), subject: form.get("subject").trim(), teacher: form.get("teacher").trim() };
+    try {
+      const result = await api("/api/classes", { method: "POST", body: JSON.stringify(payload) });
+      state = result.state;
+      closeModal();
+      render();
+      toast("Class added.");
+    } catch (error) { toast(error.message, "error"); }
+  };
+}
+
+async function deleteClasses(classIds) {
+  const classes = state.classes.filter(classItem => classIds.includes(classItem.id));
+  if (!classes.length) return;
+  const studentCount = classes.reduce((total, classItem) => total + studentsForClass(classItem.id).length, 0);
+  const classLabel = classes.length === 1 ? `“${classes[0].name}”` : `${classes.length} classes`;
+  const studentWarning = studentCount ? ` This will also delete ${studentCount} student${studentCount === 1 ? "" : "s"} and their current class data.` : "";
+  if (!confirm(`Delete ${classLabel}?${studentWarning} Generated report history will remain.`)) return;
+  try {
+    const result = await api("/api/classes/delete", { method: "POST", body: JSON.stringify({ class_ids: classes.map(classItem => classItem.id) }) });
+    state = result.state;
+    selectedClassIds.clear();
+    render();
+    toast(`${classes.length} class${classes.length === 1 ? "" : "es"} deleted.`);
+  } catch (error) { toast(error.message, "error"); }
 }
 
 function renderStudents() {
@@ -242,7 +364,7 @@ function renderStudents() {
 function openStudentModal(studentId = "") {
   const student = state.students.find(item => item.id === studentId);
   if (!student && !state.classes.length) {
-    toast("Import class data before adding a student.", "error");
+    toast("Add or import a class before adding a student.", "error");
     return;
   }
   const isNew = !student;
@@ -279,14 +401,57 @@ async function deleteStudents(studentIds, closeAfter = false) {
 }
 
 function renderFiles() {
+  selectedImportIds = new Set([...selectedImportIds].filter(id => state.files.some(file => file.id === id)));
   $("#upload-count").textContent = `${state.files.length} file${state.files.length === 1 ? "" : "s"}`;
+  $("#import-selection-count").textContent = `${selectedImportIds.size} selected`;
+  const selectAll = $("#select-all-imports");
+  selectAll.checked = Boolean(state.files.length && selectedImportIds.size === state.files.length);
+  selectAll.indeterminate = selectedImportIds.size > 0 && selectedImportIds.size < state.files.length;
+  selectAll.disabled = state.files.length === 0;
+  $("#delete-selected-imports").disabled = selectedImportIds.size === 0;
   if (!state.files.length) {
     $("#file-list").innerHTML = emptyState("No files imported", "Start with the multi-class homework CSV.");
     return;
   }
   const labels = { homework_csv: "Student and homework data", generic_csv: "Stored CSV file", comments_pdf: "Teacher comments", report_template: "Report template" };
   const icons = { homework_csv: "CSV", generic_csv: "CSV", comments_pdf: "PDF", report_template: "PDF" };
-  $("#file-list").innerHTML = state.files.map(file => `<div class="file-row"><span class="file-icon">${icons[file.kind] || "FILE"}</span><div class="file-info"><strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(labels[file.kind] || file.kind)} · ${escapeHtml(file.summary)}${file.period_label ? ` · ${escapeHtml(file.period_label)}` : ""}</small></div><div class="file-meta"><span class="status-pill ${file.state === "review" ? "warn" : ""}">${file.state === "review" ? "Review" : "Imported"}</span>${file.kind === "generic_csv" ? `<a class="table-action button-link" href="/api/imports/${file.id}/download">Download</a>` : ""}<time>${escapeHtml(formatDateTime(file.created_at))}</time></div></div>`).join("");
+  $("#file-list").innerHTML = state.files.map(file => `<div class="file-row ${selectedImportIds.has(file.id) ? "selected" : ""}"><input class="file-select" type="checkbox" data-select-import="${file.id}" aria-label="Select ${escapeHtml(file.name)}" ${selectedImportIds.has(file.id) ? "checked" : ""} /><span class="file-icon">${icons[file.kind] || "FILE"}</span><div class="file-info"><strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(labels[file.kind] || file.kind)} · ${escapeHtml(file.summary)}${file.period_label ? ` · ${escapeHtml(file.period_label)}` : ""}</small></div><div class="file-meta"><span class="status-pill ${file.state === "review" ? "warn" : ""}">${file.state === "review" ? "Review" : "Imported"}</span><div class="file-actions">${file.kind === "generic_csv" ? `<a class="table-action button-link" href="/api/imports/${file.id}/download">Download</a>` : ""}<button class="table-action danger-action" data-delete-import="${file.id}">Delete</button></div><time>${escapeHtml(formatDateTime(file.created_at))}</time></div></div>`).join("");
+  selectAll.onchange = event => {
+    selectedImportIds = event.target.checked ? new Set(state.files.map(file => file.id)) : new Set();
+    renderFiles();
+  };
+  $$("[data-select-import]").forEach(input => input.onchange = event => {
+    event.target.checked ? selectedImportIds.add(event.target.dataset.selectImport) : selectedImportIds.delete(event.target.dataset.selectImport);
+    renderFiles();
+  });
+}
+
+async function deleteImports(importIds) {
+  const imports = state.files.filter(file => importIds.includes(file.id));
+  if (!imports.length) return;
+  const label = imports.length === 1 ? `“${imports[0].name}”` : `${imports.length} uploaded data records`;
+  const kinds = new Set(imports.map(file => file.kind));
+  const effects = [];
+  if (kinds.has("homework_csv")) effects.push("its corresponding classes, students, homework, comments, and active report readiness");
+  if (kinds.has("comments_pdf")) effects.push("its corresponding comments, exam data, and review items");
+  if (kinds.has("generic_csv")) effects.push("the stored CSV file");
+  if (kinds.has("report_template")) effects.push("the active replacement template");
+  const effectCopy = effects.length ? ` This will also remove ${effects.join("; ")}.` : "";
+  if (!confirm(`Delete ${label} from Import History?${effectCopy} Generated report history will remain archived.`)) return;
+  try {
+    const result = await api("/api/imports/delete", { method: "POST", body: JSON.stringify({ import_ids: imports.map(file => file.id) }) });
+    state = result.state;
+    selectedImportIds.clear();
+    render();
+    const deletedData = result.deleted_data || {};
+    const removed = [
+      [deletedData.classes, "class", "classes"],
+      [deletedData.students, "student", "students"],
+      [deletedData.exams, "comment/exam", "comments/exams"],
+      [deletedData.issues, "review item", "review items"]
+    ].filter(([count]) => count).map(([count, singular, plural]) => `${count} ${count === 1 ? singular : plural}`);
+    toast(`${imports.length} upload${imports.length === 1 ? "" : "s"} deleted${removed.length ? ` with ${removed.join(", ")}` : ""}.`);
+  } catch (error) { toast(error.message, "error"); }
 }
 
 function renderIssues() {
@@ -480,6 +645,11 @@ function bindEvents() {
     if (nav) { event.preventDefault(); go(nav.dataset.nav); return; }
     const goto = event.target.closest("[data-go]");
     if (goto) { event.preventDefault(); go(goto.dataset.go); return; }
+    const deleteImport = event.target.closest("[data-delete-import]");
+    if (deleteImport) { event.preventDefault(); deleteImports([deleteImport.dataset.deleteImport]); return; }
+    const deleteClass = event.target.closest("[data-delete-class]");
+    if (deleteClass) { event.preventDefault(); deleteClasses([deleteClass.dataset.deleteClass]); return; }
+    if (event.target.closest(".class-select")) return;
     const classLink = event.target.closest("[data-report-class]");
     if (classLink) {
       go("reports");
@@ -529,6 +699,12 @@ function bindEvents() {
   $("#student-class-filter").onchange = renderStudents;
   $("#add-student").onclick = () => openStudentModal();
   $("#delete-selected-students").onclick = () => deleteStudents([...selectedStudentIds]);
+  $("#add-class").onclick = openClassModal;
+  $("#class-search").oninput = renderClasses;
+  $("#class-category-filter").onchange = renderClasses;
+  $("#class-sort").onchange = renderClasses;
+  $("#delete-selected-classes").onclick = () => deleteClasses([...selectedClassIds]);
+  $("#delete-selected-imports").onclick = () => deleteImports([...selectedImportIds]);
   $("#mobile-menu").onclick = () => $(".sidebar").classList.add("open");
   $("#sidebar-close").onclick = () => $(".sidebar").classList.remove("open");
   $("#reset-data").onclick = async () => {

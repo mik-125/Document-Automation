@@ -191,6 +191,17 @@ class Database:
                     generated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS import_entities (
+                    import_id TEXT NOT NULL REFERENCES imports(id) ON DELETE CASCADE,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    PRIMARY KEY(import_id, entity_type, entity_id),
+                    UNIQUE(entity_type, entity_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_import_entities_entity
+                ON import_entities(entity_type, entity_id);
+
                 CREATE INDEX IF NOT EXISTS idx_report_archive_student_period
                 ON report_archive(student_id, period_id, revision);
 
@@ -204,6 +215,7 @@ class Database:
             self._ensure_column(db, "imports", "stored_path", "TEXT")
             self._ensure_column(db, "issues", "period_id", "TEXT")
             self._migrate_legacy_period_data(db)
+            self._backfill_import_provenance(db)
 
     def _migrate_legacy_period_data(self, db: sqlite3.Connection) -> None:
         settings = {
@@ -259,6 +271,50 @@ class Database:
             "INSERT INTO settings(key, value) VALUES('selected_period_id', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (period_id,),
+        )
+
+    def _backfill_import_provenance(self, db: sqlite3.Connection) -> None:
+        if db.execute(
+            "SELECT 1 FROM settings WHERE key = 'import_provenance_backfill_v1'"
+        ).fetchone():
+            return
+        homework_import = db.execute(
+            "SELECT id, created_at FROM imports WHERE kind = 'homework_csv' "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if homework_import:
+            for entity_type, table in (("class", "classes"), ("student", "students")):
+                rows = db.execute(
+                    f"SELECT id FROM {table} WHERE created_at <= ?", (homework_import["created_at"],)
+                ).fetchall()
+                for row in rows:
+                    db.execute(
+                        "INSERT INTO import_entities(import_id, entity_type, entity_id) VALUES(?, ?, ?) "
+                        "ON CONFLICT(entity_type, entity_id) DO UPDATE SET import_id = excluded.import_id",
+                        (homework_import["id"], entity_type, row["id"]),
+                    )
+        comment_imports = db.execute(
+            "SELECT id, name, period_id FROM imports WHERE kind = 'comments_pdf' ORDER BY created_at"
+        ).fetchall()
+        for imported in comment_imports:
+            exam_rows = db.execute(
+                "SELECT id FROM period_exams WHERE source_name = ? AND (? IS NULL OR period_id = ?)",
+                (imported["name"], imported["period_id"], imported["period_id"]),
+            ).fetchall()
+            issue_rows = db.execute(
+                "SELECT id FROM issues WHERE source_name = ? AND (? IS NULL OR period_id = ?)",
+                (imported["name"], imported["period_id"], imported["period_id"]),
+            ).fetchall()
+            for entity_type, rows in (("exam", exam_rows), ("issue", issue_rows)):
+                for row in rows:
+                    db.execute(
+                        "INSERT INTO import_entities(import_id, entity_type, entity_id) VALUES(?, ?, ?) "
+                        "ON CONFLICT(entity_type, entity_id) DO UPDATE SET import_id = excluded.import_id",
+                        (imported["id"], entity_type, row["id"]),
+                    )
+        db.execute(
+            "INSERT INTO settings(key, value) VALUES('import_provenance_backfill_v1', ?)",
+            (now_iso(),),
         )
 
     def get_setting(self, key: str, default: str = "") -> str:
@@ -365,6 +421,48 @@ class Database:
                 )
             result = db.execute("SELECT * FROM classes WHERE id = ?", (class_id,)).fetchone()
         return dict(result)
+
+    def create_class(self, *, name: str, subject: str = "", teacher: str = "") -> dict[str, Any]:
+        name = name.strip()
+        if not name:
+            raise ValueError("Class name is required.")
+        normalized = normalize_value(name)
+        timestamp = now_iso()
+        with self.connect() as db:
+            if db.execute(
+                "SELECT 1 FROM classes WHERE normalized_name = ?", (normalized,)
+            ).fetchone():
+                raise ValueError("A class with that name already exists.")
+            class_id = uuid.uuid4().hex
+            db.execute(
+                "INSERT INTO classes(id, name, normalized_name, subject, teacher, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (
+                    class_id,
+                    name,
+                    normalized,
+                    subject.strip(),
+                    teacher.strip(),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            result = db.execute("SELECT * FROM classes WHERE id = ?", (class_id,)).fetchone()
+        return dict(result)
+
+    def delete_classes(self, class_ids: list[str]) -> int:
+        unique_ids = list(dict.fromkeys(class_id for class_id in class_ids if class_id))
+        if not unique_ids:
+            return 0
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self.connect() as db:
+            count = int(
+                db.execute(
+                    f"SELECT COUNT(*) FROM classes WHERE id IN ({placeholders})", unique_ids
+                ).fetchone()[0]
+            )
+            db.execute(f"DELETE FROM classes WHERE id IN ({placeholders})", unique_ids)
+        return count
 
     def upsert_student(
         self,
@@ -620,7 +718,7 @@ class Database:
 
     def upsert_exam(
         self, student_id: str, class_id: str, record: dict[str, Any], period_id: str | None = None
-    ) -> None:
+    ) -> str:
         period_id = period_id or self.period_id_for_class(class_id)
         if not period_id or not self.get_period(period_id):
             raise ValueError("Choose a reporting period before importing comments.")
@@ -650,6 +748,7 @@ class Database:
                     now_iso(),
                 ),
             )
+        return exam_id
 
     def add_import(
         self,
@@ -673,6 +772,130 @@ class Database:
         with self.connect() as db:
             row = db.execute("SELECT * FROM imports WHERE id = ?", (import_id,)).fetchone()
         return dict(row) if row else None
+
+    def link_import_entities(self, import_id: str, entities: dict[str, set[str]]) -> None:
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM imports WHERE id = ?", (import_id,)).fetchone():
+                raise ValueError("Uploaded data record not found.")
+            for entity_type, entity_ids in entities.items():
+                for entity_id in entity_ids:
+                    db.execute(
+                        "INSERT INTO import_entities(import_id, entity_type, entity_id) VALUES(?, ?, ?) "
+                        "ON CONFLICT(entity_type, entity_id) DO UPDATE SET import_id = excluded.import_id",
+                        (import_id, entity_type, entity_id),
+                    )
+
+    def import_id_for_entity(self, entity_type: str, entity_id: str) -> str | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT import_id FROM import_entities WHERE entity_type = ? AND entity_id = ?",
+                (entity_type, entity_id),
+            ).fetchone()
+        return str(row["import_id"]) if row else None
+
+    def delete_imports(self, import_ids: list[str]) -> dict[str, Any]:
+        unique_ids = list(dict.fromkeys(import_id for import_id in import_ids if import_id))
+        if not unique_ids:
+            return {"imports": [], "classes": 0, "students": 0, "exams": 0, "issues": 0}
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self.connect() as db:
+            rows = db.execute(
+                f"SELECT * FROM imports WHERE id IN ({placeholders})", unique_ids
+            ).fetchall()
+            links = db.execute(
+                f"SELECT entity_type, entity_id FROM import_entities WHERE import_id IN ({placeholders})",
+                unique_ids,
+            ).fetchall()
+            entity_ids: dict[str, list[str]] = {"class": [], "student": [], "exam": [], "issue": []}
+            for link in links:
+                entity_ids.setdefault(str(link["entity_type"]), []).append(str(link["entity_id"]))
+            entity_ids = {key: list(dict.fromkeys(values)) for key, values in entity_ids.items()}
+            if entity_ids["class"]:
+                class_marks = ",".join("?" for _ in entity_ids["class"])
+                entity_ids["student"] = list(dict.fromkeys(entity_ids["student"] + [
+                    str(row["id"])
+                    for row in db.execute(
+                        f"SELECT id FROM students WHERE class_id IN ({class_marks})", entity_ids["class"]
+                    ).fetchall()
+                ]))
+                entity_ids["issue"] = list(dict.fromkeys(entity_ids["issue"] + [
+                    str(row["id"])
+                    for row in db.execute(
+                        f"SELECT id FROM issues WHERE class_id IN ({class_marks})", entity_ids["class"]
+                    ).fetchall()
+                ]))
+            if entity_ids["student"]:
+                student_marks = ",".join("?" for _ in entity_ids["student"])
+                entity_ids["exam"] = list(dict.fromkeys(entity_ids["exam"] + [
+                    str(row["id"])
+                    for row in db.execute(
+                        f"SELECT id FROM period_exams WHERE student_id IN ({student_marks})", entity_ids["student"]
+                    ).fetchall()
+                ]))
+
+            def existing_count(table: str, ids: list[str]) -> int:
+                if not ids:
+                    return 0
+                marks = ",".join("?" for _ in ids)
+                return int(db.execute(f"SELECT COUNT(*) FROM {table} WHERE id IN ({marks})", ids).fetchone()[0])
+
+            counts = {
+                "classes": existing_count("classes", entity_ids["class"]),
+                "students": existing_count("students", entity_ids["student"]),
+                "exams": existing_count("period_exams", entity_ids["exam"]),
+                "issues": existing_count("issues", entity_ids["issue"]),
+            }
+            for table, ids in (
+                ("classes", entity_ids["class"]),
+                ("students", entity_ids["student"]),
+                ("period_exams", entity_ids["exam"]),
+                ("exams", entity_ids["exam"]),
+                ("issues", entity_ids["issue"]),
+            ):
+                if ids:
+                    marks = ",".join("?" for _ in ids)
+                    db.execute(f"DELETE FROM {table} WHERE id IN ({marks})", ids)
+            db.execute(f"DELETE FROM imports WHERE id IN ({placeholders})", unique_ids)
+            period_ids = [str(row["period_id"]) for row in rows if row["period_id"]]
+            for period_id in set(period_ids):
+                in_use = db.execute(
+                    "SELECT EXISTS(SELECT 1 FROM class_periods WHERE period_id = ?) "
+                    "OR EXISTS(SELECT 1 FROM homework_periods WHERE period_id = ?) "
+                    "OR EXISTS(SELECT 1 FROM period_exams WHERE period_id = ?) "
+                    "OR EXISTS(SELECT 1 FROM imports WHERE period_id = ?)",
+                    (period_id, period_id, period_id, period_id),
+                ).fetchone()[0]
+                if not in_use:
+                    db.execute("DELETE FROM periods WHERE id = ?", (period_id,))
+            selected = db.execute(
+                "SELECT value FROM settings WHERE key = 'selected_period_id'"
+            ).fetchone()
+            if selected and not db.execute(
+                "SELECT 1 FROM periods WHERE id = ?", (selected["value"],)
+            ).fetchone():
+                replacement = db.execute(
+                    "SELECT id, start_date, end_date FROM periods ORDER BY start_date DESC, end_date DESC LIMIT 1"
+                ).fetchone()
+                if replacement:
+                    db.execute(
+                        "UPDATE settings SET value = ? WHERE key = 'selected_period_id'",
+                        (replacement["id"],),
+                    )
+                    db.execute(
+                        "INSERT INTO settings(key, value) VALUES('period_start', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (replacement["start_date"],),
+                    )
+                    db.execute(
+                        "INSERT INTO settings(key, value) VALUES('period_end', ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (replacement["end_date"],),
+                    )
+                else:
+                    db.execute(
+                        "DELETE FROM settings WHERE key IN ('selected_period_id', 'period_start', 'period_end')"
+                    )
+        return {"imports": [dict(row) for row in rows], **counts}
 
     def add_issue(
         self,

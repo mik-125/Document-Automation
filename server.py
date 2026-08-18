@@ -341,9 +341,63 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/comments/import":
                 self._import_comments(payload)
                 return
+            if path == "/api/imports/delete":
+                raw_ids = payload.get("import_ids")
+                if not isinstance(raw_ids, list) or not all(
+                    isinstance(import_id, str) and re.fullmatch(r"[a-f0-9]+", import_id)
+                    for import_id in raw_ids
+                ):
+                    raise ValidationError("Choose valid uploaded data to delete.")
+                deletion = DB.delete_imports(raw_ids)
+                deleted_imports = deletion["imports"]
+                upload_root = UPLOAD_DIR.resolve()
+                for imported in deleted_imports:
+                    if imported.get("kind") != "generic_csv" or not imported.get("stored_path"):
+                        continue
+                    stored_path = Path(str(imported["stored_path"])).resolve()
+                    if stored_path.is_relative_to(upload_root) and stored_path.is_file():
+                        try:
+                            stored_path.unlink()
+                        except OSError:
+                            pass
+                if any(imported.get("kind") == "report_template" for imported in deleted_imports):
+                    ACTIVE_TEMPLATE.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(DEFAULT_TEMPLATE, ACTIVE_TEMPLATE)
+                    details = inspect_template(ACTIVE_TEMPLATE)
+                    DB.set_setting("template_path", str(ACTIVE_TEMPLATE))
+                    DB.set_setting("template_name", "Royal IB report template")
+                    DB.set_setting("template_pages", str(details["pages"]))
+                    DB.set_setting("template_fields", json.dumps(details["fields"]))
+                self._send_json(
+                    {
+                        "ok": True,
+                        "deleted": len(deleted_imports),
+                        "deleted_data": {key: deletion[key] for key in ("classes", "students", "exams", "issues")},
+                        "state": DB.state(),
+                    }
+                )
+                return
             if path == "/api/periods/select":
                 DB.select_period(str(payload.get("period_id") or ""))
                 self._send_json({"ok": True, "state": DB.state()})
+                return
+            if path == "/api/classes":
+                DB.create_class(
+                    name=str(payload.get("name") or ""),
+                    subject=str(payload.get("subject") or ""),
+                    teacher=str(payload.get("teacher") or ""),
+                )
+                self._send_json({"ok": True, "state": DB.state()}, HTTPStatus.CREATED)
+                return
+            if path == "/api/classes/delete":
+                raw_ids = payload.get("class_ids")
+                if not isinstance(raw_ids, list) or not all(
+                    isinstance(class_id, str) and re.fullmatch(r"[a-f0-9]+", class_id)
+                    for class_id in raw_ids
+                ):
+                    raise ValidationError("Choose valid classes to delete.")
+                deleted = DB.delete_classes(raw_ids)
+                self._send_json({"ok": True, "deleted": deleted, "state": DB.state()})
                 return
             if path == "/api/students":
                 DB.create_student(
@@ -419,6 +473,7 @@ class AppHandler(BaseHTTPRequestHandler):
         created = 0
         updated = 0
         class_ids: set[str] = set()
+        student_ids: set[str] = set()
         for record in records:
             class_record = DB.upsert_class(record["class_name"], record["teacher"])
             class_ids.add(class_record["id"])
@@ -430,6 +485,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 grade=record["grade"],
                 attendance_mode=record["attendance_mode"],
             )
+            student_ids.add(student["id"])
             DB.update_homework(
                 student["id"],
                 record["entries"],
@@ -446,7 +502,8 @@ class AppHandler(BaseHTTPRequestHandler):
         for class_id in class_ids:
             DB.select_class_period(class_id, period["id"])
         summary = f"{len(records)} records matched · {created} added · {updated} updated"
-        DB.add_import(filename, "homework_csv", "complete", summary, period["id"])
+        import_id = DB.add_import(filename, "homework_csv", "complete", summary, period["id"])
+        DB.link_import_entities(import_id, {"class": class_ids, "student": student_ids})
         self._send_json({"ok": True, "summary": summary, "state": DB.state()})
 
     def _import_comments(self, payload: dict[str, Any]) -> None:
@@ -464,13 +521,15 @@ class AppHandler(BaseHTTPRequestHandler):
         records = parse_comment_pdf(pdf_bytes, label, filename)
         matched = 0
         review = 0
+        exam_ids: set[str] = set()
+        issue_ids: set[str] = set()
         for record in records:
             candidates = DB.find_students_by_name(class_id, record["name"])
             if len(candidates) == 1:
-                DB.upsert_exam(candidates[0]["id"], class_id, record, period_id)
+                exam_ids.add(DB.upsert_exam(candidates[0]["id"], class_id, record, period_id))
                 matched += 1
             else:
-                DB.add_issue(
+                issue_ids.add(DB.add_issue(
                     kind="ambiguous_comment" if candidates else "unmatched_comment",
                     class_id=class_id,
                     source_name=filename,
@@ -478,11 +537,12 @@ class AppHandler(BaseHTTPRequestHandler):
                     payload=record,
                     candidate_ids=[candidate["id"] for candidate in candidates],
                     period_id=period_id,
-                )
+                ))
                 review += 1
         state = "review" if review else "complete"
         summary = f"{matched} comments matched · {review} need review"
-        DB.add_import(filename, "comments_pdf", state, summary, period_id)
+        import_id = DB.add_import(filename, "comments_pdf", state, summary, period_id)
+        DB.link_import_entities(import_id, {"exam": exam_ids, "issue": issue_ids})
         self._send_json({"ok": True, "summary": summary, "state": DB.state()})
 
     def _resolve_issue(self, issue_id: str, payload: dict[str, Any]) -> None:
@@ -493,7 +553,10 @@ class AppHandler(BaseHTTPRequestHandler):
         student = DB.get_student(student_id)
         if not student or student["class_id"] != issue["class_id"]:
             raise ValidationError("Choose a student from the selected class.")
-        DB.upsert_exam(student_id, issue["class_id"], issue["payload"], issue.get("period_id"))
+        import_id = DB.import_id_for_entity("issue", issue_id)
+        exam_id = DB.upsert_exam(student_id, issue["class_id"], issue["payload"], issue.get("period_id"))
+        if import_id:
+            DB.link_import_entities(import_id, {"exam": {exam_id}})
         DB.resolve_issue(issue_id)
         self._send_json({"ok": True, "state": DB.state()})
 
