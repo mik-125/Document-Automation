@@ -83,12 +83,21 @@ function setLoading(loading) {
 async function api(path, options = {}) {
   setLoading(true);
   try {
-    const response = await fetch(path, {
-      ...options,
-      headers: { "Content-Type": "application/json", ...(options.headers || {}) }
-    });
+    let response;
+    try {
+      response = await fetch(path, {
+        ...options,
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+      });
+    } catch (error) {
+      throw new Error("Cannot reach the local service. Start server.py and open http://127.0.0.1:8000.");
+    }
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
+    if (!response.ok) {
+      const error = new Error(payload.error || `Request failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
     return payload;
   } finally {
     setLoading(false);
@@ -275,9 +284,9 @@ function renderFiles() {
     $("#file-list").innerHTML = emptyState("No files imported", "Start with the multi-class homework CSV.");
     return;
   }
-  const labels = { homework_csv: "Student and homework data", comments_pdf: "Teacher comments", report_template: "Report template" };
-  const icons = { homework_csv: "CSV", comments_pdf: "PDF", report_template: "PDF" };
-  $("#file-list").innerHTML = state.files.map(file => `<div class="file-row"><span class="file-icon">${icons[file.kind] || "FILE"}</span><div class="file-info"><strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(labels[file.kind] || file.kind)} · ${escapeHtml(file.summary)}${file.period_label ? ` · ${escapeHtml(file.period_label)}` : ""}</small></div><div class="file-meta"><span class="status-pill ${file.state === "review" ? "warn" : ""}">${file.state === "review" ? "Review" : "Imported"}</span><time>${escapeHtml(formatDateTime(file.created_at))}</time></div></div>`).join("");
+  const labels = { homework_csv: "Student and homework data", generic_csv: "Stored CSV file", comments_pdf: "Teacher comments", report_template: "Report template" };
+  const icons = { homework_csv: "CSV", generic_csv: "CSV", comments_pdf: "PDF", report_template: "PDF" };
+  $("#file-list").innerHTML = state.files.map(file => `<div class="file-row"><span class="file-icon">${icons[file.kind] || "FILE"}</span><div class="file-info"><strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(labels[file.kind] || file.kind)} · ${escapeHtml(file.summary)}${file.period_label ? ` · ${escapeHtml(file.period_label)}` : ""}</small></div><div class="file-meta"><span class="status-pill ${file.state === "review" ? "warn" : ""}">${file.state === "review" ? "Review" : "Imported"}</span>${file.kind === "generic_csv" ? `<a class="table-action button-link" href="/api/imports/${file.id}/download">Download</a>` : ""}<time>${escapeHtml(formatDateTime(file.created_at))}</time></div></div>`).join("");
 }
 
 function renderIssues() {
@@ -343,7 +352,17 @@ async function chooseHomeworkCsv(file) {
   if (!file) return;
   try {
     const text = await file.text();
-    const inspection = await api("/api/csv/inspect", { method: "POST", body: JSON.stringify({ filename: file.name, text }) });
+    let inspection;
+    try {
+      inspection = await api("/api/csv/inspect", { method: "POST", body: JSON.stringify({ filename: file.name, text }) });
+    } catch (error) {
+      if (error.status !== 400) throw error;
+      const result = await api("/api/csv/upload", { method: "POST", body: JSON.stringify({ filename: file.name, text }) });
+      state = result.state;
+      render();
+      toast(`${file.name} was stored. Its columns were not mapped to student records.`, "warning");
+      return;
+    }
     const options = inspection.dates.map(item => `<option value="${item.iso}">${escapeHtml(item.label)} · ${item.iso}</option>`).join("");
     const suggestedLabel = `Week ${state.periods.length + 1}`;
     openModal(`<span class="eyebrow">CSV IMPORT</span><h2>Select the reporting period</h2><p><strong>${escapeHtml(file.name)}</strong> contains ${inspection.record_count} student-class records across ${inspection.class_count} classes.</p><form id="csv-import-form"><label>Period name<input id="period-name" value="${escapeHtml(suggestedLabel)}" placeholder="Week 8" required /></label><div class="form-grid"><label>Start date<select id="period-start" required>${options}</select></label><label>End date<select id="period-end" required>${options}</select></label></div><div class="calculation-note"><strong>Homework rule</strong><span>A and B = completed · F = incomplete · X and blank = excluded</span></div><div class="modal-footer"><button type="button" class="secondary-button" id="cancel-import">Cancel</button><button class="primary-button">Import and update students</button></div></form>`);
@@ -522,6 +541,10 @@ function bindEvents() {
   };
 }
 
-bindEvents();
-go(window.location.hash.slice(1) || "dashboard");
-loadState();
+if (window.location.protocol === "file:") {
+  window.location.replace(`http://127.0.0.1:8000/${window.location.hash || "#dashboard"}`);
+} else {
+  bindEvents();
+  go(window.location.hash.slice(1) || "dashboard");
+  loadState();
+}

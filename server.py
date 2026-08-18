@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import csv
+import io
 import json
 import mimetypes
 import os
@@ -36,6 +38,7 @@ DEFAULT_TEMPLATE = ASSETS_DIR / "royal-ib-report-template.pdf"
 ACTIVE_TEMPLATE = DATA_DIR / "templates" / "active-template.pdf"
 REPORT_DIR = DATA_DIR / "reports"
 EXPORT_DIR = DATA_DIR / "exports"
+UPLOAD_DIR = DATA_DIR / "uploads"
 MAX_REQUEST_BYTES = 60_000_000
 DB = Database(DATA_DIR / "brightline.db")
 
@@ -227,6 +230,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 template_path = Path(DB.get_setting("template_path", str(ACTIVE_TEMPLATE)))
                 self._send_file(template_path, "application/pdf")
                 return
+            import_match = re.fullmatch(r"/api/imports/([a-f0-9]+)/download", path)
+            if import_match:
+                imported = DB.get_import(import_match.group(1))
+                stored_path = Path(str(imported.get("stored_path") or "")) if imported else None
+                if not imported or imported.get("kind") != "generic_csv" or not stored_path:
+                    raise ValidationError("Stored CSV not found.")
+                resolved_path = stored_path.resolve()
+                if not resolved_path.is_relative_to(UPLOAD_DIR.resolve()):
+                    raise ValidationError("Stored CSV path is invalid.")
+                self._send_file(resolved_path, "text/csv; charset=utf-8", str(imported["name"]))
+                return
             student_match = re.fullmatch(r"/api/reports/student/([a-f0-9]+)", path)
             if student_match:
                 student_id = student_match.group(1)
@@ -301,6 +315,29 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/csv/import":
                 self._import_csv(payload)
                 return
+            if path == "/api/csv/upload":
+                text = payload.get("text")
+                filename = str(payload.get("filename") or "upload.csv")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValidationError("The CSV is empty.")
+                rows = [row for row in csv.reader(io.StringIO(text.lstrip("\ufeff"))) if any(cell.strip() for cell in row)]
+                if not rows:
+                    raise ValidationError("The CSV is empty.")
+                UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                stored_name = f"{uuid.uuid4().hex}-{safe_filename(filename, 'upload.csv')}"
+                if not stored_name.lower().endswith(".csv"):
+                    stored_name += ".csv"
+                stored_path = UPLOAD_DIR / stored_name
+                stored_path.write_text(text, encoding="utf-8")
+                import_id = DB.add_import(
+                    filename,
+                    "generic_csv",
+                    "complete",
+                    f"{max(0, len(rows) - 1)} data rows stored · no student fields mapped",
+                    stored_path=str(stored_path),
+                )
+                self._send_json({"ok": True, "import_id": import_id, "state": DB.state()}, HTTPStatus.CREATED)
+                return
             if path == "/api/comments/import":
                 self._import_comments(payload)
                 return
@@ -356,6 +393,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 if payload.get("confirm") is not True:
                     raise ValidationError("Reset confirmation is required.")
                 DB.clear_all()
+                shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
                 self._send_json({"ok": True})
                 return
             self._send_json({"error": "Not found."}, HTTPStatus.NOT_FOUND)

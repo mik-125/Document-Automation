@@ -201,6 +201,7 @@ class Database:
                 """
             )
             self._ensure_column(db, "imports", "period_id", "TEXT")
+            self._ensure_column(db, "imports", "stored_path", "TEXT")
             self._ensure_column(db, "issues", "period_id", "TEXT")
             self._migrate_legacy_period_data(db)
 
@@ -651,16 +652,27 @@ class Database:
             )
 
     def add_import(
-        self, name: str, kind: str, state: str, summary: str, period_id: str | None = None
+        self,
+        name: str,
+        kind: str,
+        state: str,
+        summary: str,
+        period_id: str | None = None,
+        stored_path: str | None = None,
     ) -> str:
         import_id = uuid.uuid4().hex
         with self.connect() as db:
             db.execute(
-                "INSERT INTO imports(id, name, kind, state, summary, created_at, period_id) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?)",
-                (import_id, name, kind, state, summary, now_iso(), period_id),
+                "INSERT INTO imports(id, name, kind, state, summary, created_at, period_id, stored_path) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (import_id, name, kind, state, summary, now_iso(), period_id, stored_path),
             )
         return import_id
+
+    def get_import(self, import_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM imports WHERE id = ?", (import_id,)).fetchone()
+        return dict(row) if row else None
 
     def add_issue(
         self,
@@ -777,7 +789,8 @@ class Database:
             homework_rows = db.execute("SELECT * FROM homework_periods").fetchall()
             exam_rows = db.execute("SELECT * FROM period_exams ORDER BY imported_at, label").fetchall()
             import_rows = db.execute(
-                "SELECT i.*, p.label AS period_label FROM imports i "
+                "SELECT i.id, i.name, i.kind, i.state, i.summary, i.created_at, i.period_id, "
+                "p.label AS period_label FROM imports i "
                 "LEFT JOIN periods p ON p.id = i.period_id ORDER BY i.created_at DESC LIMIT 100"
             ).fetchall()
             issue_rows = db.execute(
