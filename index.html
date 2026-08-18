@@ -45,7 +45,7 @@
 
         <section class="page active" id="dashboard">
           <div class="period-bar">
-            <div><span class="eyebrow" id="period-label">No reporting period selected</span><p>Import academy data, resolve uncertain matches, then download finished reports.</p></div>
+            <div><span class="eyebrow" id="period-label">No reporting period selected</span><p>WORKSPACE</p></div>
             <button class="secondary-button" data-go="inbox">Manage reporting period</button>
           </div>
           <div class="hero-grid">
@@ -74,17 +74,28 @@
         </section>
 
         <section class="page" id="classes">
-          <div class="page-intro"><div><span class="eyebrow">CLASS DIRECTORY</span><h1>Classes</h1><p>Classes are created automatically from the imported CSV.</p></div><button class="primary-button" data-go="inbox">Import class data</button></div>
+          <div class="page-intro"><div><span class="eyebrow">CLASS DIRECTORY</span><h1>Classes</h1><p>STATUS</p></div><div class="button-row"><button class="secondary-button" data-go="inbox">Import class data</button><button class="primary-button" id="add-class">+ Add class</button></div></div>
+          <div class="class-filter-bar">
+            <label class="search"><span>⌕</span><input id="class-search" aria-label="Search classes" placeholder="Search class, teacher, or subject" /></label>
+            <select id="class-category-filter" aria-label="Filter classes by classification"><option value="all">All classifications</option></select>
+            <select id="class-sort" aria-label="Sort classes"><option value="classification">Sort: Classification</option><option value="name">Sort: Class name</option></select>
+          </div>
+          <div class="class-toolbar">
+            <label class="selection-control"><input id="select-all-classes" type="checkbox" aria-label="Select all visible classes" /> Select all visible classes</label>
+            <span class="muted" id="class-selection-count">0 selected</span>
+            <button class="secondary-button" id="delete-selected-classes" disabled>Delete</button>
+          </div>
           <div class="class-grid" id="class-grid"></div>
         </section>
 
         <section class="page" id="students">
-          <div class="page-intro"><div><span class="eyebrow">NORMALIZED RECORDS</span><h1>Students</h1><p>Each record is identified by name, school, grade, and class.</p></div></div>
+          <div class="page-intro"><div><span class="eyebrow">NORMALIZED RECORDS</span><h1>Students</h1><p>STATUS</p></div><button class="primary-button" id="add-student">+ Add student</button></div>
           <div class="toolbar">
             <label class="search"><span>⌕</span><input id="student-search" placeholder="Search name or school" /></label>
             <select id="student-class-filter"><option value="all">All classes</option></select>
+            <button class="secondary-button" id="delete-selected-students" disabled>Delete</button>
           </div>
-          <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Class period</th><th>Homework</th><th>Latest test</th><th>Comment</th><th>Readiness</th></tr></thead><tbody id="students-table"></tbody></table></div>
+          <div class="table-card"><table><thead><tr><th><input class="student-select" id="select-all-students" type="checkbox" aria-label="Select all visible students" /></th><th>Student</th><th>Class</th><th>Report completion</th><th></th></tr></thead><tbody id="students-table"></tbody></table></div>
         </section>
 
         <section class="page" id="inbox">
@@ -103,7 +114,7 @@
 
           <div class="inbox-layout">
             <div class="inbox-list-card">
-              <div class="card-title-row"><div><span class="eyebrow">IMPORT HISTORY</span><h2>Uploaded data</h2></div><span id="upload-count" class="muted">0 files</span></div>
+              <div class="card-title-row"><div><span class="eyebrow">IMPORT HISTORY</span><h2>Uploaded data</h2></div><div class="import-history-controls"><span id="upload-count" class="muted">0 files</span><label class="selection-control"><input id="select-all-imports" type="checkbox" aria-label="Select all uploaded data" /> Select all</label><span id="import-selection-count" class="muted">0 selected</span><button class="secondary-button" id="delete-selected-imports" disabled>Delete</button></div></div>
               <div id="file-list" class="file-list"></div>
             </div>
             <aside class="review-queue">
