@@ -5,6 +5,7 @@ import re
 import sqlite3
 import unicodedata
 import uuid
+from contextlib import nullcontext
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,20 @@ def make_identity_key(name: str, school: str, grade: str, class_name: str) -> st
     )
 
 
+def make_external_identity_key(class_name: str, external_student_id: str) -> str:
+    return "|".join(
+        ("external", normalize_value(class_name), normalize_value(external_student_id))
+    )
+
+
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
+        try:
+            return bool(super().__exit__(exc_type, exc, traceback))
+        finally:
+            self.close()
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -44,11 +59,16 @@ class Database:
         self._initialize()
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=15)
+        connection = sqlite3.connect(self.path, timeout=15, factory=ClosingConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         return connection
+
+    def _connection_scope(
+        self, connection: sqlite3.Connection | None = None
+    ) -> Any:
+        return nullcontext(connection) if connection is not None else self.connect()
 
     @staticmethod
     def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -202,6 +222,19 @@ class Database:
             )
             self._ensure_column(db, "imports", "period_id", "TEXT")
             self._ensure_column(db, "issues", "period_id", "TEXT")
+            self._ensure_column(db, "classes", "source_provider", "TEXT NOT NULL DEFAULT 'manual'")
+            self._ensure_column(db, "students", "external_student_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(db, "students", "external_source", "TEXT NOT NULL DEFAULT 'manual'")
+            self._ensure_column(db, "homework_periods", "source_provider", "TEXT NOT NULL DEFAULT 'manual'")
+            self._ensure_column(db, "period_exams", "source_provider", "TEXT NOT NULL DEFAULT 'manual'")
+            self._ensure_column(db, "imports", "source_provider", "TEXT NOT NULL DEFAULT 'manual'")
+            self._ensure_column(db, "report_archive", "google_doc_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(db, "report_archive", "google_template_id", "TEXT NOT NULL DEFAULT ''")
+            db.execute("DROP INDEX IF EXISTS idx_students_external_identity")
+            db.execute(
+                "CREATE UNIQUE INDEX idx_students_external_identity "
+                "ON students(class_id, external_student_id) WHERE external_student_id <> ''"
+            )
             self._migrate_legacy_period_data(db)
 
     def _migrate_legacy_period_data(self, db: sqlite3.Connection) -> None:
@@ -265,15 +298,23 @@ class Database:
             row = db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return str(row["value"]) if row else default
 
-    def set_setting(self, key: str, value: str) -> None:
-        with self.connect() as db:
+    def set_setting(
+        self, key: str, value: str, connection: sqlite3.Connection | None = None
+    ) -> None:
+        with self._connection_scope(connection) as db:
             db.execute(
                 "INSERT INTO settings(key, value) VALUES(?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
 
-    def ensure_period(self, start_date: str, end_date: str, label: str = "") -> dict[str, Any]:
+    def ensure_period(
+        self,
+        start_date: str,
+        end_date: str,
+        label: str = "",
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
         try:
             start = date.fromisoformat(start_date)
             end = date.fromisoformat(end_date)
@@ -283,15 +324,11 @@ class Database:
             raise ValueError("The reporting period start must be before its end.")
         label = label.strip() or f"{start_date} to {end_date}"
         timestamp = now_iso()
-        with self.connect() as db:
+        with self._connection_scope(connection) as db:
             row = db.execute(
                 "SELECT * FROM periods WHERE start_date = ? AND end_date = ?", (start_date, end_date)
             ).fetchone()
             if row:
-                db.execute(
-                    "UPDATE periods SET label = ?, updated_at = ? WHERE id = ?",
-                    (label, timestamp, row["id"]),
-                )
                 period_id = str(row["id"])
             else:
                 period_id = uuid.uuid4().hex
@@ -311,17 +348,34 @@ class Database:
     def selected_period_id(self) -> str:
         return self.get_setting("selected_period_id")
 
-    def select_period(self, period_id: str) -> None:
-        period = self.get_period(period_id)
-        if not period:
-            raise ValueError("Reporting period not found.")
-        self.set_setting("selected_period_id", period_id)
-        self.set_setting("period_start", period["start_date"])
-        self.set_setting("period_end", period["end_date"])
+    def select_period(
+        self, period_id: str, connection: sqlite3.Connection | None = None
+    ) -> None:
+        with self._connection_scope(connection) as db:
+            period = db.execute(
+                "SELECT * FROM periods WHERE id = ?", (period_id,)
+            ).fetchone()
+            if not period:
+                raise ValueError("Reporting period not found.")
+            for key, value in (
+                ("selected_period_id", period_id),
+                ("period_start", period["start_date"]),
+                ("period_end", period["end_date"]),
+            ):
+                db.execute(
+                    "INSERT INTO settings(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
 
-    def select_class_period(self, class_id: str, period_id: str) -> None:
+    def select_class_period(
+        self,
+        class_id: str,
+        period_id: str,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
         timestamp = now_iso()
-        with self.connect() as db:
+        with self._connection_scope(connection) as db:
             if not db.execute("SELECT 1 FROM classes WHERE id = ?", (class_id,)).fetchone():
                 raise ValueError("Class not found.")
             if not db.execute("SELECT 1 FROM periods WHERE id = ?", (period_id,)).fetchone():
@@ -340,27 +394,43 @@ class Database:
             ).fetchone()
         return str(row["period_id"]) if row else self.selected_period_id()
 
-    def upsert_class(self, name: str, teacher: str = "") -> dict[str, Any]:
+    def upsert_class(
+        self,
+        name: str,
+        teacher: str = "",
+        source_provider: str = "manual",
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
         normalized = normalize_value(name)
         timestamp = now_iso()
         subject = re.sub(r"^\([^)]*\)\s*\d{1,2}:\d{2}\s*\[[^]]+\]\s*", "", name).strip()
-        with self.connect() as db:
+        with self._connection_scope(connection) as db:
             row = db.execute(
                 "SELECT * FROM classes WHERE normalized_name = ?", (normalized,)
             ).fetchone()
             if row:
                 db.execute(
                     "UPDATE classes SET teacher = CASE WHEN ? <> '' THEN ? ELSE teacher END, "
-                    "subject = CASE WHEN ? <> '' THEN ? ELSE subject END, updated_at = ? WHERE id = ?",
-                    (teacher, teacher, subject, subject, timestamp, row["id"]),
+                    "subject = CASE WHEN ? <> '' THEN ? ELSE subject END, source_provider = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (teacher, teacher, subject, subject, source_provider, timestamp, row["id"]),
                 )
                 class_id = str(row["id"])
             else:
                 class_id = uuid.uuid4().hex
                 db.execute(
-                    "INSERT INTO classes(id, name, normalized_name, subject, teacher, created_at, updated_at) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?)",
-                    (class_id, name.strip(), normalized, subject, teacher.strip(), timestamp, timestamp),
+                    "INSERT INTO classes(id, name, normalized_name, subject, teacher, created_at, updated_at, "
+                    "source_provider) VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        class_id,
+                        name.strip(),
+                        normalized,
+                        subject,
+                        teacher.strip(),
+                        timestamp,
+                        timestamp,
+                        source_provider,
+                    ),
                 )
             result = db.execute("SELECT * FROM classes WHERE id = ?", (class_id,)).fetchone()
         return dict(result)
@@ -374,19 +444,48 @@ class Database:
         school: str,
         grade: str,
         attendance_mode: str,
+        external_student_id: str = "",
+        external_source: str = "manual",
+        connection: sqlite3.Connection | None = None,
     ) -> tuple[dict[str, Any], bool]:
-        identity_key = make_identity_key(name, school, grade, class_name)
         timestamp = now_iso()
-        with self.connect() as db:
-            row = db.execute(
-                "SELECT * FROM students WHERE identity_key = ?", (identity_key,)
-            ).fetchone()
+        with self._connection_scope(connection) as db:
+            external_student_id = external_student_id.strip()
+            identity_key = (
+                make_external_identity_key(class_name, external_student_id)
+                if external_student_id
+                else make_identity_key(name, school, grade, class_name)
+            )
+            if external_student_id:
+                row = db.execute(
+                    "SELECT * FROM students WHERE class_id = ? AND external_student_id = ?",
+                    (class_id, external_student_id),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    "SELECT * FROM students WHERE identity_key = ?", (identity_key,)
+                ).fetchone()
+            if row is None and external_student_id and school.strip() and grade.strip():
+                same_identity = db.execute(
+                    "SELECT * FROM students WHERE class_id = ? AND normalized_name = ? "
+                    "AND external_student_id = ''",
+                    (class_id, normalize_student_name(name)),
+                ).fetchall()
+                exact = [
+                    candidate
+                    for candidate in same_identity
+                    if normalize_value(candidate["school"]) == normalize_value(school)
+                    and normalize_value(candidate["grade"]) == normalize_value(grade)
+                ]
+                if len(exact) == 1:
+                    row = exact[0]
             created = row is None
             if created:
                 student_id = uuid.uuid4().hex
                 db.execute(
                     "INSERT INTO students(id, class_id, identity_key, name, normalized_name, school, grade, "
-                    "attendance_mode, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "attendance_mode, created_at, updated_at, external_student_id, external_source) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         student_id,
                         class_id,
@@ -398,20 +497,41 @@ class Database:
                         attendance_mode,
                         timestamp,
                         timestamp,
+                        external_student_id,
+                        external_source,
                     ),
                 )
             else:
                 student_id = str(row["id"])
+                effective_name = name.strip() or str(row["name"])
+                effective_school = school.strip() or str(row["school"])
+                effective_grade = grade.strip() or str(row["grade"])
+                effective_attendance = attendance_mode or str(row["attendance_mode"])
+                effective_external_id = external_student_id or str(row["external_student_id"])
+                effective_identity = (
+                    make_external_identity_key(class_name, effective_external_id)
+                    if effective_external_id
+                    else make_identity_key(
+                        effective_name, effective_school, effective_grade, class_name
+                    )
+                )
                 db.execute(
-                    "UPDATE students SET class_id = ?, name = ?, normalized_name = ?, school = ?, grade = ?, "
-                    "attendance_mode = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE students SET class_id = ?, identity_key = ?, name = ?, normalized_name = ?, "
+                    "school = ?, grade = ?, attendance_mode = ?, external_student_id = CASE WHEN ? <> '' "
+                    "THEN ? ELSE external_student_id END, external_source = CASE WHEN ? <> '' THEN ? "
+                    "ELSE external_source END, updated_at = ? WHERE id = ?",
                     (
                         class_id,
-                        name.strip(),
-                        normalize_student_name(name),
-                        school.strip(),
-                        grade.strip(),
-                        attendance_mode,
+                        effective_identity,
+                        effective_name,
+                        normalize_student_name(effective_name),
+                        effective_school,
+                        effective_grade,
+                        effective_attendance,
+                        external_student_id,
+                        external_student_id,
+                        external_student_id,
+                        external_source,
                         timestamp,
                         student_id,
                     ),
@@ -430,19 +550,34 @@ class Database:
         period_start: str,
         period_end: str,
         period_id: str | None = None,
+        source_provider: str = "manual",
+        connection: sqlite3.Connection | None = None,
     ) -> None:
-        period_id = period_id or self.ensure_period(period_start, period_end)["id"]
+        period_id = period_id or self.ensure_period(
+            period_start, period_end, connection=connection
+        )["id"]
         timestamp = now_iso()
         encoded = json.dumps(entries, ensure_ascii=False)
-        with self.connect() as db:
+        with self._connection_scope(connection) as db:
             db.execute(
                 "INSERT INTO homework_periods(student_id, period_id, homework_json, homework_completed, "
-                "homework_incomplete, homework_excluded, homework_percent, updated_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(student_id, period_id) DO UPDATE SET "
+                "homework_incomplete, homework_excluded, homework_percent, updated_at, source_provider) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(student_id, period_id) DO UPDATE SET "
                 "homework_json = excluded.homework_json, homework_completed = excluded.homework_completed, "
                 "homework_incomplete = excluded.homework_incomplete, homework_excluded = excluded.homework_excluded, "
-                "homework_percent = excluded.homework_percent, updated_at = excluded.updated_at",
-                (student_id, period_id, encoded, completed, incomplete, excluded, percent, timestamp),
+                "homework_percent = excluded.homework_percent, updated_at = excluded.updated_at, "
+                "source_provider = excluded.source_provider",
+                (
+                    student_id,
+                    period_id,
+                    encoded,
+                    completed,
+                    incomplete,
+                    excluded,
+                    percent,
+                    timestamp,
+                    source_provider,
+                ),
             )
             db.execute(
                 "UPDATE students SET homework_json = ?, homework_completed = ?, homework_incomplete = ?, "
@@ -532,12 +667,20 @@ class Database:
         return exams
 
     def upsert_exam(
-        self, student_id: str, class_id: str, record: dict[str, Any], period_id: str | None = None
+        self,
+        student_id: str,
+        class_id: str,
+        record: dict[str, Any],
+        period_id: str | None = None,
+        source_provider: str = "manual",
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         period_id = period_id or self.period_id_for_class(class_id)
-        if not period_id or not self.get_period(period_id):
-            raise ValueError("Choose a reporting period before importing comments.")
-        with self.connect() as db:
+        with self._connection_scope(connection) as db:
+            if not period_id or not db.execute(
+                "SELECT 1 FROM periods WHERE id = ?", (period_id,)
+            ).fetchone():
+                raise ValueError("Choose a reporting period before importing comments.")
             existing = db.execute(
                 "SELECT id FROM period_exams WHERE student_id = ? AND period_id = ? AND label = ?",
                 (student_id, period_id, record["label"]),
@@ -545,10 +688,16 @@ class Database:
             exam_id = str(existing["id"]) if existing else uuid.uuid4().hex
             db.execute(
                 "INSERT INTO period_exams(id, student_id, class_id, period_id, label, score, max_score, "
-                "sections_json, comment, source_name, imported_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(student_id, period_id, label) DO UPDATE SET score = excluded.score, "
-                "max_score = excluded.max_score, sections_json = excluded.sections_json, "
-                "comment = excluded.comment, source_name = excluded.source_name, imported_at = excluded.imported_at",
+                "sections_json, comment, source_name, imported_at, source_provider) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(student_id, period_id, label) DO UPDATE SET "
+                "score = COALESCE(excluded.score, period_exams.score), "
+                "max_score = COALESCE(excluded.max_score, period_exams.max_score), "
+                "sections_json = CASE WHEN excluded.sections_json <> '[]' THEN excluded.sections_json "
+                "ELSE period_exams.sections_json END, comment = CASE WHEN excluded.comment <> '' "
+                "THEN excluded.comment ELSE period_exams.comment END, "
+                "source_name = excluded.source_name, imported_at = excluded.imported_at, "
+                "source_provider = excluded.source_provider",
                 (
                     exam_id,
                     student_id,
@@ -561,18 +710,35 @@ class Database:
                     record.get("comment", ""),
                     record.get("source_name", ""),
                     now_iso(),
+                    source_provider,
                 ),
             )
 
     def add_import(
-        self, name: str, kind: str, state: str, summary: str, period_id: str | None = None
+        self,
+        name: str,
+        kind: str,
+        state: str,
+        summary: str,
+        period_id: str | None = None,
+        source_provider: str = "manual",
+        connection: sqlite3.Connection | None = None,
     ) -> str:
         import_id = uuid.uuid4().hex
-        with self.connect() as db:
+        with self._connection_scope(connection) as db:
             db.execute(
-                "INSERT INTO imports(id, name, kind, state, summary, created_at, period_id) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?)",
-                (import_id, name, kind, state, summary, now_iso(), period_id),
+                "INSERT INTO imports(id, name, kind, state, summary, created_at, period_id, source_provider) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    import_id,
+                    name,
+                    kind,
+                    state,
+                    summary,
+                    now_iso(),
+                    period_id,
+                    source_provider,
+                ),
             )
         return import_id
 
@@ -586,9 +752,10 @@ class Database:
         payload: dict[str, Any],
         candidate_ids: list[str],
         period_id: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> str:
         issue_id = uuid.uuid4().hex
-        with self.connect() as db:
+        with self._connection_scope(connection) as db:
             db.execute(
                 "INSERT INTO issues(id, kind, class_id, source_name, subject_name, payload_json, "
                 "candidate_ids_json, created_at, period_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -623,7 +790,15 @@ class Database:
                 (now_iso(), issue_id),
             )
 
-    def archive_report(self, student: dict[str, Any], period_id: str, pdf_path: Path) -> dict[str, Any]:
+    def archive_report(
+        self,
+        student: dict[str, Any],
+        period_id: str,
+        pdf_path: Path,
+        *,
+        google_doc_id: str = "",
+        google_template_id: str = "",
+    ) -> dict[str, Any]:
         period = self.get_period(period_id)
         if not period:
             raise ValueError("Reporting period not found.")
@@ -637,8 +812,8 @@ class Database:
             revision = int(row["revision"]) + 1
             db.execute(
                 "INSERT INTO report_archive(id, student_id, class_id, period_id, student_name, class_name, "
-                "period_label, revision, snapshot_json, pdf_path, generated_at) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "period_label, revision, snapshot_json, pdf_path, generated_at, google_doc_id, "
+                "google_template_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     report_id,
                     student["id"],
@@ -651,6 +826,8 @@ class Database:
                     json.dumps(student, ensure_ascii=False),
                     str(pdf_path),
                     now_iso(),
+                    google_doc_id,
+                    google_template_id,
                 ),
             )
         return self.get_archived_report(report_id) or {}
@@ -673,7 +850,11 @@ class Database:
             db.execute("DELETE FROM classes")
             db.execute("DELETE FROM imports")
             db.execute("DELETE FROM periods")
-            db.execute("DELETE FROM settings WHERE key NOT LIKE 'template_%'")
+            db.execute(
+                "DELETE FROM settings WHERE key NOT LIKE 'google_connection_%' "
+                "AND key NOT IN ('google_output_folder_id', 'google_output_folder_name', "
+                "'google_output_folder_verified', 'google_sheets_verified', 'google_docs_verified')"
+            )
 
     def state(self) -> dict[str, Any]:
         with self.connect() as db:
@@ -700,7 +881,9 @@ class Database:
                 "WHERE i.status = 'pending' ORDER BY i.created_at DESC"
             ).fetchall()
             report_rows = db.execute(
-                "SELECT * FROM report_archive ORDER BY generated_at DESC LIMIT 250"
+                "SELECT id, student_id, class_id, period_id, student_name, class_name, "
+                "period_label, revision, generated_at "
+                "FROM report_archive ORDER BY generated_at DESC LIMIT 250"
             ).fetchall()
 
         periods = [dict(row) for row in period_rows]
@@ -746,11 +929,19 @@ class Database:
                     "exams": exams_lookup.get((student["id"], period_id), []),
                 }
             )
-            student["latest_exam"] = student["exams"][-1] if student["exams"] else None
-            student["ready"] = bool(
+            scored_exams = [exam for exam in student["exams"] if exam.get("score") is not None]
+            commented_exams = [exam for exam in student["exams"] if exam.get("comment")]
+            student["latest_exam"] = scored_exams[-1] if scored_exams else None
+            student["assignment_ready"] = bool(
                 student["homework_completed"] + student["homework_incomplete"] > 0
-                and student["latest_exam"]
-                and student["latest_exam"].get("comment")
+                or student["homework_percent"] is not None
+            )
+            student["weekly_test_ready"] = bool(scored_exams)
+            student["comments_ready"] = bool(commented_exams)
+            student["ready"] = bool(
+                student["assignment_ready"]
+                and student["weekly_test_ready"]
+                and student["comments_ready"]
             )
             students.append(student)
             student_lookup[student["id"]] = student
