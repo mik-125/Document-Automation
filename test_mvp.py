@@ -1356,6 +1356,21 @@ class FrontendContractTests(unittest.TestCase):
         self.assertTrue(app_server.is_json_content_type("application/json; charset=utf-8"))
         self.assertFalse(app_server.is_json_content_type("text/plain"))
 
+    def test_oauth_return_can_load_static_app_without_opening_cross_site_apis(self) -> None:
+        self.assertTrue(
+            app_server.local_get_request_context(
+                "/", "127.0.0.1:8000", "https://accounts.google.com", "cross-site"
+            )
+        )
+        self.assertFalse(
+            app_server.local_get_request_context(
+                "/api/state",
+                "127.0.0.1:8000",
+                "https://malicious.example",
+                "cross-site",
+            )
+        )
+
     def test_same_name_zip_members_include_a_unique_student_id(self) -> None:
         common = {
             "class_name": "Economics",

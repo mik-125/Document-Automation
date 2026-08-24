@@ -112,6 +112,14 @@ def local_request_context(host: str, origin: str = "", fetch_site: str = "") -> 
         return False
 
 
+def local_get_request_context(
+    path: str, host: str, origin: str = "", fetch_site: str = ""
+) -> bool:
+    if path in STATIC_FILES:
+        return local_request_context(host)
+    return local_request_context(host, origin, fetch_site)
+
+
 def is_json_content_type(value: str) -> bool:
     return value.partition(";")[0].strip().casefold() == "application/json"
 
@@ -1223,9 +1231,15 @@ class AppHandler(BaseHTTPRequestHandler):
             password, expected_password
         )
 
-    def _require_safe_context(self) -> bool:
-        if local_request_context(
-            self.headers.get("Host", ""),
+    def _require_safe_context(self, *, allow_static_navigation: bool = False) -> bool:
+        check = local_get_request_context if allow_static_navigation else local_request_context
+        arguments = (
+            (self._path(), self.headers.get("Host", ""))
+            if allow_static_navigation
+            else (self.headers.get("Host", ""),)
+        )
+        if check(
+            *arguments,
             self.headers.get("Origin", ""),
             self.headers.get("Sec-Fetch-Site", ""),
         ):
@@ -1336,7 +1350,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     error_status(exc),
                 )
             return
-        if not self._require_safe_context():
+        if not self._require_safe_context(allow_static_navigation=True):
             return
         if not self._require_authorized():
             return
