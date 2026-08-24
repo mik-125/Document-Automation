@@ -566,7 +566,7 @@ async function chooseTabularFile(file, kind) {
 function openGoogleSheetImport(kind) {
   const connection = state.connections.google_sheets || {};
   if (!connection.configured || connection.status === "disconnected") {
-    toast("Configure and test Google Workspace first.", "error"); go("connections"); return;
+    toast("Connect and test your Google account first.", "error"); go("connections"); return;
   }
   if (kind !== "assignment" && !state.periods.length) return toast("Import Assignment data first.", "error");
   const saved = state.sheet_sources[kind] || {};
@@ -648,7 +648,7 @@ function connectTemplate(classId) {
   const template = templateForClass(classId) || {};
   const connection = state.connections.google_docs || {};
   if (!connection.configured || connection.status === "disconnected") {
-    toast("Configure and test Google Workspace first.", "error"); go("connections"); return;
+    toast("Connect and test your Google account first.", "error"); go("connections"); return;
   }
   openModal(`<span class="eyebrow">GOOGLE DOCS TEMPLATE</span><h2>${escapeHtml(classItem?.name || "Class")}</h2><p>Paste a Google Doc that <strong>${escapeHtml(connection.account_name || "your connected account")}</strong> can open.</p><form id="template-connect-form"><label><span>Google Docs URL or ID</span><input id="template-document" value="${escapeHtml(template.document_id || "")}" placeholder="https://docs.google.com/document/d/..." required /></label><div class="safety-note">Brightline copies this document. It never overwrites the original template.</div><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Inspect and connect</button></div></form>`);
   $("#template-connect-form").onsubmit = async event => {

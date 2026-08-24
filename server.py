@@ -23,6 +23,7 @@ from typing import Any
 
 from database import Database, normalize_student_name, normalize_value
 from integrations import (
+    GOOGLE_SCOPES,
     GoogleWorkspace,
     IntegrationError,
     REQUIRED_PLACEHOLDERS,
@@ -63,6 +64,43 @@ GOOGLE_OAUTH_FLOWS: dict[str, tuple[float, Any]] = {}
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def complete_google_oauth(flow: Any, authorization_response: str) -> Any:
+    temporary_environment = {
+        "OAUTHLIB_INSECURE_TRANSPORT": "1",
+        "OAUTHLIB_RELAX_TOKEN_SCOPE": "1",
+    }
+    previous = {key: os.environ.get(key) for key in temporary_environment}
+    os.environ.update(temporary_environment)
+    try:
+        flow.fetch_token(authorization_response=authorization_response)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    credentials = flow.credentials
+    granted = set(credentials.granted_scopes or credentials.scopes or ())
+    if not set(GOOGLE_SCOPES).issubset(granted):
+        raise IntegrationError(
+            "Google permission was skipped. Connect again and approve every requested permission.",
+            "google_permissions_missing",
+        )
+    return credentials
+
+
+def google_oauth_error(exc: Exception) -> str:
+    if isinstance(exc, IntegrationError):
+        return str(exc)
+    error = str(getattr(exc, "error", "") or "").strip()
+    description = str(getattr(exc, "description", "") or "").strip()
+    if error:
+        return f"Google OAuth error: {error}{f' · {description}' if description else ''}"
+    if isinstance(exc, Warning):
+        return str(exc)
+    return f"Google sign-in failed ({type(exc).__name__}). Check the OAuth client settings."
 
 
 def safe_filename(value: str, fallback: str = "report") -> str:
@@ -1752,7 +1790,6 @@ class AppHandler(BaseHTTPRequestHandler):
         flow = GoogleWorkspace.authorization_flow(GOOGLE_OAUTH_REDIRECT_URI)
         authorization_url, state = flow.authorization_url(
             access_type="offline",
-            include_granted_scopes="true",
             prompt="consent",
         )
         cutoff = time.monotonic() - 600
@@ -1778,19 +1815,16 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         _, flow = pending
         try:
-            flow.fetch_token(
-                authorization_response=f"{GOOGLE_OAUTH_REDIRECT_URI}?{urllib.parse.urlparse(self.path).query}"
+            credentials = complete_google_oauth(
+                flow,
+                f"{GOOGLE_OAUTH_REDIRECT_URI}?{urllib.parse.urlparse(self.path).query}",
             )
-            GoogleWorkspace.save_oauth_credentials(flow.credentials)
+            GoogleWorkspace.save_oauth_credentials(credentials)
             workspace = GoogleWorkspace.from_env()
             result = workspace.test_connection(ensure_output_folder=True)
             prepare_google_identity(workspace)
         except Exception as exc:
-            error = (
-                str(exc)
-                if isinstance(exc, IntegrationError)
-                else "Google sign-in could not be completed. Check the OAuth client settings."
-            )
+            error = google_oauth_error(exc)
             DB.set_setting("google_connection_status", "error")
             DB.set_setting("google_connection_error", error)
             DB.set_setting("google_connection_last_tested", now_iso())

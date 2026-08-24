@@ -28,6 +28,42 @@ from integrations import (
 
 
 class GoogleReferenceTests(unittest.TestCase):
+    def test_oauth_error_message_exposes_codes_without_response_secrets(self) -> None:
+        class Error(Exception):
+            error = "invalid_grant"
+            description = "Authorization code expired"
+
+        self.assertEqual(
+            app_server.google_oauth_error(Error()),
+            "Google OAuth error: invalid_grant · Authorization code expired",
+        )
+        self.assertEqual(
+            app_server.google_oauth_error(RuntimeError("secret response body")),
+            "Google sign-in failed (RuntimeError). Check the OAuth client settings.",
+        )
+
+    def test_oauth_accepts_extra_scopes_but_requires_every_brightline_scope(self) -> None:
+        class Credentials:
+            scopes = app_server.GOOGLE_SCOPES
+            granted_scopes = (*app_server.GOOGLE_SCOPES, "extra")
+
+        class Flow:
+            credentials = Credentials()
+
+            @staticmethod
+            def fetch_token(**kwargs) -> None:
+                self.assertEqual(os.environ.get("OAUTHLIB_INSECURE_TRANSPORT"), "1")
+                self.assertEqual(os.environ.get("OAUTHLIB_RELAX_TOKEN_SCOPE"), "1")
+                self.assertIn("authorization_response", kwargs)
+
+        self.assertIs(
+            app_server.complete_google_oauth(Flow(), "http://127.0.0.1/callback"),
+            Flow.credentials,
+        )
+        Credentials.granted_scopes = app_server.GOOGLE_SCOPES[:-1]
+        with self.assertRaisesRegex(IntegrationError, "approve every requested permission"):
+            app_server.complete_google_oauth(Flow(), "http://127.0.0.1/callback")
+
     def test_oauth_client_and_token_stay_in_explicit_local_files(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
