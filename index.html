@@ -140,15 +140,15 @@
 
         <section class="page" id="connections">
           <div class="page-intro">
-            <div><span class="eyebrow">SERVER-SIDE CREDENTIALS</span><h1>Connect the report pipeline</h1><p>Private keys never enter this browser. Configure the service account on the server, then paste only Sheet, Doc, and Drive folder links here.</p></div>
+            <div><span class="eyebrow">PERSONAL GOOGLE OAUTH</span><h1>Connect the report pipeline</h1><p>Sign in with your Google account. OAuth tokens stay only on this Mac, and Brightline creates its own output folder in My Drive.</p></div>
           </div>
 
-          <div class="security-banner"><span>⌁</span><div><strong>Google uses a service account, not a browser API key</strong><p>Enable Sheets, Docs, and Drive APIs. Share each source file with the displayed service-account email and use an academy Shared Drive output folder.</p></div></div>
+          <div class="security-banner"><span>⌁</span><div><strong>Google uses OAuth, not a browser API key</strong><p>Enable Sheets, Docs, and Drive APIs, then connect the personal Google account that owns or can open the source files.</p></div></div>
           <div class="connections-grid" id="connections-grid"></div>
 
           <section class="connection-help section-block">
             <span class="eyebrow">SETUP CHECKLIST</span><h2>What you need from Google Cloud</h2>
-            <ol><li>Create one service account and download its JSON credential outside this repository.</li><li>Set <code>GOOGLE_SERVICE_ACCOUNT_FILE</code> when starting Brightline.</li><li>Enable Google Sheets API, Google Docs API, and Google Drive API.</li><li>Share the source Sheets and Docs with the service-account email.</li><li>Use a dedicated report Shared Drive or limited-access folder whose members are authorized for student data, give the service account Content Manager access, then test its link above.</li></ol>
+            <ol><li>Configure the Google OAuth consent screen and add your account as a test user.</li><li>Create a Web application OAuth client with redirect URI <code>http://127.0.0.1:8000/api/google/oauth/callback</code>.</li><li>Download its JSON outside this repository and set <code>GOOGLE_OAUTH_CLIENT_FILE</code>.</li><li>Enable Google Sheets API, Google Docs API, and Google Drive API.</li><li>Click Connect Google account. Brightline creates a private <code>Brightline Reports</code> folder in My Drive.</li></ol>
           </section>
         </section>
       </main>

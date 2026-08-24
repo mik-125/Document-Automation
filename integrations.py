@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import math
 import os
@@ -17,8 +18,10 @@ GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder"
 PDF_MIME = "application/pdf"
 GOOGLE_SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/drive.file",
 )
+GOOGLE_OUTPUT_FOLDER_NAME = "Brightline Reports"
 SUPPORTED_PLACEHOLDERS = (
     "student_name",
     "student_id",
@@ -292,75 +295,171 @@ def report_replacements(student: dict[str, Any]) -> dict[str, str]:
 
 
 class GoogleWorkspace:
-    def __init__(self, credentials_path: Path) -> None:
-        self.credentials_path = credentials_path
+    def __init__(self, client_path: Path, token_path: Path) -> None:
+        self.client_path = client_path
+        self.token_path = token_path
         try:
-            payload = json.loads(credentials_path.read_text(encoding="utf-8"))
+            payload = json.loads(client_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise IntegrationError(
-                "The Google service-account file cannot be read.",
+                "The Google OAuth client file cannot be read.",
                 "google_credentials_invalid",
             ) from exc
-        self.service_account_email = str(payload.get("client_email") or "")
-        self.project_id = str(payload.get("project_id") or "")
-        if not self.service_account_email:
+        client = payload.get("web")
+        if not isinstance(client, dict) or not client.get("client_id"):
             raise IntegrationError(
-                "The configured JSON file is not a Google service-account credential.",
+                "Create a Google OAuth client of type Web application and download its JSON file.",
                 "google_credentials_invalid",
             )
+        self.client_id = str(client["client_id"])
+        self.project_id = str(client.get("project_id") or "")
+        self.identity_fingerprint = hashlib.sha256(self.client_id.encode()).hexdigest()
         self._credentials: Any = None
+        self._account_email = ""
 
-    @classmethod
-    def from_env(cls) -> "GoogleWorkspace":
-        configured = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE") or os.environ.get(
-            "GOOGLE_APPLICATION_CREDENTIALS"
-        )
+    @staticmethod
+    def _client_path() -> Path:
+        configured = os.environ.get("GOOGLE_OAUTH_CLIENT_FILE", "")
         if not configured:
             raise IntegrationError(
-                "Set GOOGLE_SERVICE_ACCOUNT_FILE before connecting Google Workspace.",
+                "Set GOOGLE_OAUTH_CLIENT_FILE before connecting your Google account.",
                 "google_not_configured",
             )
         path = Path(configured).expanduser().resolve()
         if not path.is_file():
             raise IntegrationError(
-                "The configured Google service-account file does not exist.",
+                "The configured Google OAuth client file does not exist.",
                 "google_credentials_missing",
             )
-        return cls(path)
+        return path
+
+    @staticmethod
+    def _token_path() -> Path:
+        configured = os.environ.get("GOOGLE_OAUTH_TOKEN_FILE", "")
+        if configured:
+            return Path(configured).expanduser().resolve()
+        data_dir = Path(
+            os.environ.get("BRIGHTLINE_DATA_DIR", Path(__file__).resolve().parent / "data")
+        ).expanduser().resolve()
+        return data_dir / "google-oauth-token.json"
+
+    @classmethod
+    def from_env(cls) -> "GoogleWorkspace":
+        workspace = cls(cls._client_path(), cls._token_path())
+        if not workspace.token_path.is_file():
+            raise IntegrationError(
+                "Connect your Google account from the Connections page.",
+                "google_oauth_required",
+            )
+        return workspace
 
     @staticmethod
     def configured_identity() -> dict[str, Any]:
         try:
-            workspace = GoogleWorkspace.from_env()
+            workspace = GoogleWorkspace(
+                GoogleWorkspace._client_path(), GoogleWorkspace._token_path()
+            )
         except IntegrationError as exc:
-            return {"configured": False, "account": "", "project": "", "error": str(exc)}
+            return {
+                "configured": False,
+                "authorized": False,
+                "fingerprint": "",
+                "project": "",
+                "error": str(exc),
+            }
         return {
             "configured": True,
-            "account": workspace.service_account_email,
+            "authorized": workspace.token_path.is_file(),
+            "fingerprint": workspace.identity_fingerprint,
             "project": workspace.project_id,
-            "error": "",
+            "error": "" if workspace.token_path.is_file() else "Connect your Google account.",
         }
 
-    def _load_credentials(self) -> Any:
-        if self._credentials is not None:
-            return self._credentials
+    @classmethod
+    def authorization_flow(cls, redirect_uri: str) -> Any:
+        client_path = cls._client_path()
         try:
-            from google.oauth2 import service_account
+            from google_auth_oauthlib.flow import Flow
         except ImportError as exc:
             raise IntegrationError(
                 "Install the Google API packages from requirements.txt.",
                 "google_dependencies_missing",
             ) from exc
         try:
-            self._credentials = service_account.Credentials.from_service_account_file(
-                str(self.credentials_path), scopes=GOOGLE_SCOPES
+            return Flow.from_client_secrets_file(
+                str(client_path),
+                scopes=GOOGLE_SCOPES,
+                redirect_uri=redirect_uri,
+                autogenerate_code_verifier=True,
             )
         except Exception as exc:
             raise IntegrationError(
-                "Google rejected the service-account credential.",
+                "Google rejected the OAuth client configuration.",
                 "google_credentials_invalid",
             ) from exc
+
+    @classmethod
+    def save_oauth_credentials(cls, credentials: Any) -> None:
+        token_path = cls._token_path()
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = token_path.with_suffix(".tmp")
+        temporary.write_text(credentials.to_json(), encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(token_path)
+
+    @classmethod
+    def disconnect(cls) -> None:
+        cls._token_path().unlink(missing_ok=True)
+
+    def _load_credentials(self) -> Any:
+        if self._credentials is not None:
+            return self._credentials
+        try:
+            from google.auth.transport.requests import Request
+            from google.oauth2.credentials import Credentials
+        except ImportError as exc:
+            raise IntegrationError(
+                "Install the Google API packages from requirements.txt.",
+                "google_dependencies_missing",
+            ) from exc
+        try:
+            credentials = Credentials.from_authorized_user_file(
+                str(self.token_path), scopes=GOOGLE_SCOPES
+            )
+            if credentials.expired and credentials.refresh_token:
+                credentials.refresh(Request())
+                self.save_oauth_credentials(credentials)
+            if not credentials.valid:
+                raise ValueError("OAuth token is not valid")
+            self._credentials = credentials
+        except Exception as exc:
+            raise IntegrationError(
+                "Your Google authorization expired. Reconnect your account.",
+                "google_oauth_required",
+            ) from exc
         return self._credentials
+
+    def account_email(self) -> str:
+        if self._account_email:
+            return self._account_email
+        try:
+            about = (
+                self._service("drive", "v3")
+                .about()
+                .get(fields="user(emailAddress)")
+                .execute(num_retries=2)
+            )
+        except IntegrationError:
+            raise
+        except Exception as exc:
+            self._raise_google_error(exc)
+        self._account_email = str(about.get("user", {}).get("emailAddress") or "")
+        if not self._account_email:
+            raise IntegrationError(
+                "Google did not return the connected account email.",
+                "google_account_missing",
+            )
+        return self._account_email
 
     def _service(self, name: str, version: str) -> Any:
         try:
@@ -422,15 +521,15 @@ class GoogleWorkspace:
         elif status == 400:
             message, code = "Google rejected the request. Check the file URL and worksheet name.", "invalid_google_request"
         elif status == 401:
-            message, code = "Google rejected the service-account credential.", "google_credentials_invalid"
+            message, code = "Your Google authorization expired. Reconnect your account.", "google_oauth_required"
         elif status == 403:
             message, code = (
-                "Google denied access. Enable the Sheets, Docs, and Drive APIs and share the file with the service account.",
-                "google_file_not_shared",
+                "Google denied access. Confirm that the connected account can open this file.",
+                "google_access_denied",
             )
         elif status == 404:
             message, code = (
-                "The Google file was not found or has not been shared with the service account.",
+                "The Google file was not found or is not available to the connected account.",
                 "google_file_missing_or_not_shared",
             )
         elif status and status >= 500:
@@ -460,39 +559,57 @@ class GoogleWorkspace:
             raise IntegrationError("The selected Google file has the wrong file type.", "wrong_google_file_type")
         return result
 
-    def test_connection(self, output_folder: str = "") -> dict[str, Any]:
-        folder: dict[str, Any] | None = None
+    def _ensure_output_folder(self, output_folder: str = "") -> dict[str, Any]:
         if output_folder:
             folder = self.file_metadata(output_folder, GOOGLE_FOLDER_MIME)
-            if not folder.get("driveId"):
-                raise IntegrationError(
-                    "Choose a folder inside an academy Shared Drive. Service accounts cannot own report files in My Drive.",
-                    "shared_drive_required",
-                )
-            if not folder.get("capabilities", {}).get("canAddChildren"):
-                raise IntegrationError(
-                    "The service account cannot add reports to that Drive folder.",
-                    "output_folder_not_writable",
-                )
-            if not folder.get("capabilities", {}).get("canTrashChildren"):
-                raise IntegrationError(
-                    "Give the service account Content Manager access to the Shared Drive so temporary previews can be removed.",
-                    "output_folder_cleanup_required",
-                )
         else:
+            drive = self._service("drive", "v3")
             try:
-                (
-                    self._service("drive", "v3")
-                    .files()
-                    .list(pageSize=1, fields="files(id)")
+                existing = (
+                    drive.files()
+                    .list(
+                        q=(
+                            "appProperties has { key='brightline' and value='report-output' } and "
+                            f"mimeType = '{GOOGLE_FOLDER_MIME}' and trashed = false"
+                        ),
+                        spaces="drive",
+                        pageSize=10,
+                        fields="files(id,name,mimeType,webViewLink,capabilities(canAddChildren))",
+                    )
+                    .execute(num_retries=2)
+                    .get("files", [])
+                )
+                folder = existing[0] if existing else (
+                    drive.files()
+                    .create(
+                        body={
+                            "name": GOOGLE_OUTPUT_FOLDER_NAME,
+                            "mimeType": GOOGLE_FOLDER_MIME,
+                            "appProperties": {"brightline": "report-output"},
+                        },
+                        fields="id,name,mimeType,webViewLink,capabilities(canAddChildren)",
+                    )
                     .execute(num_retries=2)
                 )
             except IntegrationError:
                 raise
             except Exception as exc:
                 self._raise_google_error(exc)
+        if not folder.get("capabilities", {}).get("canAddChildren"):
+            raise IntegrationError(
+                "The connected Google account cannot add reports to that Drive folder.",
+                "output_folder_not_writable",
+            )
+        return folder
+
+    def test_connection(
+        self, output_folder: str = "", *, ensure_output_folder: bool = False
+    ) -> dict[str, Any]:
+        folder: dict[str, Any] | None = None
+        if output_folder or ensure_output_folder:
+            folder = self._ensure_output_folder(output_folder)
         return {
-            "account": self.service_account_email,
+            "account": self.account_email(),
             "project": self.project_id,
             "output_folder_id": folder.get("id", "") if folder else "",
             "output_folder_name": folder.get("name", "") if folder else "",
@@ -606,16 +723,6 @@ class GoogleWorkspace:
             raise IntegrationError("The Google Docs template cannot be copied.", "template_copy_not_allowed")
         if not folder.get("capabilities", {}).get("canAddChildren"):
             raise IntegrationError("The Drive output folder is not writable.", "output_folder_not_writable")
-        if not folder.get("driveId"):
-            raise IntegrationError(
-                "The report output folder must be inside an academy Shared Drive.",
-                "shared_drive_required",
-            )
-        if not folder.get("capabilities", {}).get("canTrashChildren"):
-            raise IntegrationError(
-                "The service account needs Content Manager access to remove temporary report copies.",
-                "output_folder_cleanup_required",
-            )
         drive = self._service("drive", "v3")
         document_id = ""
         succeeded = False
@@ -630,7 +737,7 @@ class GoogleWorkspace:
             except Exception as exc:
                 raise IntegrationError(
                     "Google created a temporary report but could not remove it. "
-                    f"Delete Drive file {document_id} and confirm Content Manager access.",
+                    f"Delete Drive file {document_id} and reconnect your Google account.",
                     "google_cleanup_failed",
                 ) from exc
 

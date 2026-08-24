@@ -399,6 +399,7 @@ function renderConnections() {
   const status = connection => {
     if (connection.status === "connected") return ["Connected", ""];
     if (connection.status === "configured") return ["Configured", "warn"];
+    if (connection.status === "needs_auth") return ["Sign in needed", "warn"];
     if (connection.status === "needs_setup") return ["Folder needed", "warn"];
     if (connection.status === "error") return ["Connection error", "warn"];
     if (connection.status === "unavailable") return ["Unavailable", "neutral"];
@@ -407,12 +408,16 @@ function renderConnections() {
   const card = ({ key, short, title, copy, connection, primary }) => {
     const [label, style] = status(connection);
     const disabled = connection.available === false;
-    return `<article class="connection-card"><div class="connection-card-head"><span class="connection-logo">${short}</span><span class="status-pill ${style}">${label}</span></div><h2>${title}</h2><p>${copy}</p><div class="connection-meta"><span>Account<b>${escapeHtml(connection.account_name || "Not configured")}</b></span><span>${key === "google_docs" ? "Output folder" : "Last sync"}<b>${escapeHtml(key === "google_docs" ? (connection.resource_name || "Not configured") : formatDateTime(connection.last_synced_at))}</b></span></div>${connection.error ? `<p class="connection-error">${escapeHtml(connection.error)}</p>` : ""}<div class="connection-actions">${disabled ? `<a class="secondary-button button-link" href="${escapeHtml(connection.support_url || "https://makeedu.co.kr/faq.jsp")}" target="_blank" rel="noopener">Contact MakeEdu</a>` : `<button class="primary-button" data-connection-action="configure" data-service="${key}">${primary}</button><button class="secondary-button" data-connection-action="test" data-service="${key}">Test connection</button>${connection.status !== "disconnected" ? `<button class="secondary-button" data-connection-action="disconnect" data-service="${key}">Disconnect</button>` : ""}`}</div></article>`;
+    const primaryLabel = connection.authorized ? primary : "Connect Google account";
+    const actions = disabled
+      ? `<a class="secondary-button button-link" href="${escapeHtml(connection.support_url || "https://makeedu.co.kr/faq.jsp")}" target="_blank" rel="noopener">Contact MakeEdu</a>`
+      : `<button class="primary-button" data-connection-action="configure" data-service="${key}">${primaryLabel}</button><button class="secondary-button" data-connection-action="test" data-service="${key}" ${connection.authorized ? "" : "disabled"}>Test connection</button>${connection.authorized ? `<button class="secondary-button" data-connection-action="disconnect" data-service="${key}">Disconnect</button>` : ""}`;
+    return `<article class="connection-card"><div class="connection-card-head"><span class="connection-logo">${short}</span><span class="status-pill ${style}">${label}</span></div><h2>${title}</h2><p>${copy}</p><div class="connection-meta"><span>Account<b>${escapeHtml(connection.account_name || "Not connected")}</b></span><span>${key === "google_docs" ? "Output folder" : "Last sync"}<b>${escapeHtml(key === "google_docs" ? (connection.resource_name || "Not configured") : formatDateTime(connection.last_synced_at))}</b></span></div>${connection.error ? `<p class="connection-error">${escapeHtml(connection.error)}</p>` : ""}<div class="connection-actions">${actions}</div></article>`;
   };
   $("#connections-grid").innerHTML = [
     card({ key: "makeedu", short: "ME", title: "MakeEdu", copy: "Direct synchronization remains blocked until MakeEdu supplies official API documentation and academy access.", connection: makeedu, primary: "Configure" }),
-    card({ key: "google_sheets", short: "GS", title: "Google Sheets", copy: "Read Assignment, Weekly Test, and Comments data from Sheets shared with the service account.", connection: sheets, primary: "Configure" }),
-    card({ key: "google_docs", short: "GD", title: "Google Docs + Drive", copy: "Copy class templates, replace controlled fields, preserve formatting, and export PDFs.", connection: docs, primary: "Set output folder" }),
+    card({ key: "google_sheets", short: "GS", title: "Google Sheets", copy: "Read Assignment, Weekly Test, and Comments data from Sheets in your connected Google account.", connection: sheets, primary: "Reconnect account" }),
+    card({ key: "google_docs", short: "GD", title: "Google Docs + Drive", copy: "Copy class templates, replace controlled fields, and save PDFs in your My Drive.", connection: docs, primary: docs.status === "needs_setup" ? "Create output folder" : "Reconnect account" }),
   ].join("");
 }
 
@@ -565,7 +570,7 @@ function openGoogleSheetImport(kind) {
   }
   if (kind !== "assignment" && !state.periods.length) return toast("Import Assignment data first.", "error");
   const saved = state.sheet_sources[kind] || {};
-  openModal(`<span class="eyebrow">GOOGLE SHEETS · ${escapeHtml(kind.replace("_", " "))}</span><h2>Choose the worksheet</h2><p>Paste a Sheet shared with <strong>${escapeHtml(connection.account_name || "the service account")}</strong>. Only mapped columns will be imported.</p><form id="sheet-preview-form"><label><span>Google Sheets URL or ID</span><input id="sheet-url" value="${escapeHtml(saved.spreadsheet_id || "")}" placeholder="https://docs.google.com/spreadsheets/d/..." required /></label><label><span>Worksheet name</span><input id="sheet-tab" value="${escapeHtml(saved.worksheet || "")}" placeholder="Leave blank to use the first tab" /></label><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Preview columns</button></div></form>`);
+  openModal(`<span class="eyebrow">GOOGLE SHEETS · ${escapeHtml(kind.replace("_", " "))}</span><h2>Choose the worksheet</h2><p>Paste a Sheet that <strong>${escapeHtml(connection.account_name || "your connected account")}</strong> can open. Only mapped columns will be imported.</p><form id="sheet-preview-form"><label><span>Google Sheets URL or ID</span><input id="sheet-url" value="${escapeHtml(saved.spreadsheet_id || "")}" placeholder="https://docs.google.com/spreadsheets/d/..." required /></label><label><span>Worksheet name</span><input id="sheet-tab" value="${escapeHtml(saved.worksheet || "")}" placeholder="Leave blank to use the first tab" /></label><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Preview columns</button></div></form>`);
   $("#sheet-preview-form").onsubmit = async event => {
     event.preventDefault();
     const spreadsheet = $("#sheet-url").value.trim();
@@ -645,7 +650,7 @@ function connectTemplate(classId) {
   if (!connection.configured || connection.status === "disconnected") {
     toast("Configure and test Google Workspace first.", "error"); go("connections"); return;
   }
-  openModal(`<span class="eyebrow">GOOGLE DOCS TEMPLATE</span><h2>${escapeHtml(classItem?.name || "Class")}</h2><p>Share the template with <strong>${escapeHtml(connection.account_name || "the service account")}</strong>, then paste its Google Docs link.</p><form id="template-connect-form"><label><span>Google Docs URL or ID</span><input id="template-document" value="${escapeHtml(template.document_id || "")}" placeholder="https://docs.google.com/document/d/..." required /></label><div class="safety-note">Brightline copies this document. It never overwrites the original template.</div><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Inspect and connect</button></div></form>`);
+  openModal(`<span class="eyebrow">GOOGLE DOCS TEMPLATE</span><h2>${escapeHtml(classItem?.name || "Class")}</h2><p>Paste a Google Doc that <strong>${escapeHtml(connection.account_name || "your connected account")}</strong> can open.</p><form id="template-connect-form"><label><span>Google Docs URL or ID</span><input id="template-document" value="${escapeHtml(template.document_id || "")}" placeholder="https://docs.google.com/document/d/..." required /></label><div class="safety-note">Brightline copies this document. It never overwrites the original template.</div><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Inspect and connect</button></div></form>`);
   $("#template-connect-form").onsubmit = async event => {
     event.preventDefault();
     try {
@@ -691,28 +696,28 @@ async function uploadExample(file) {
   finally { pendingExampleClass = ""; $("#example-report-input").value = ""; }
 }
 
-function configureGoogle(service) {
-  const connection = state.connections.google_docs || state.connections.google_sheets || {};
-  const needsFolder = service === "google_docs";
-  openModal(`<span class="eyebrow">GOOGLE WORKSPACE</span><h2>${needsFolder ? "Configure report output" : "Test service-account access"}</h2><p>Credential JSON stays on the server. ${connection.account_name ? `Share files with <strong>${escapeHtml(connection.account_name)}</strong>.` : "Set GOOGLE_SERVICE_ACCOUNT_FILE before testing."}</p><form id="google-config-form"><label><span>Restricted report Shared Drive folder URL or ID ${needsFolder ? "" : "(optional now)"}</span><input id="google-output-folder" value="" placeholder="https://drive.google.com/drive/folders/..." ${needsFolder ? "required" : ""} /></label><div class="safety-note">Use a dedicated report Shared Drive or limited-access folder whose members are all authorized to see student data. Give the service account Content Manager access so previews can be removed.</div><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Test and save</button></div></form>`);
-  $("#google-config-form").onsubmit = async event => {
-    event.preventDefault();
-    try {
-      const result = await api("/api/connections/google/test", { method: "POST", body: JSON.stringify({ output_folder: $("#google-output-folder").value.trim() }) });
-      state = normalizeState(result.state); closeModal(); render(); toast(result.message);
-    } catch (error) { toast(error.message, "error"); }
-  };
+async function configureGoogle(service) {
+  const connection = state.connections[service] || {};
+  if (!connection.oauth_client_configured) {
+    toast("Set GOOGLE_OAUTH_CLIENT_FILE and restart Brightline first.", "error");
+    return;
+  }
+  if (connection.authorized && service === "google_docs" && connection.status === "needs_setup") {
+    await testGoogle(service);
+    return;
+  }
+  window.location.assign(connection.connect_url || "/api/google/oauth/start");
 }
 
-async function testGoogle() {
+async function testGoogle(service) {
   try {
-    const result = await api("/api/connections/google/test", { method: "POST", body: JSON.stringify({}) });
+    const result = await api("/api/connections/google/test", { method: "POST", body: JSON.stringify({ service }) });
     state = normalizeState(result.state); render(); toast(result.message);
   } catch (error) { await loadState(); toast(error.message, "error"); }
 }
 
 async function disconnectGoogle() {
-  if (!confirm("Disconnect Google inside Brightline? Existing Google files will not be deleted. Remove file sharing separately to revoke access.")) return;
+  if (!confirm("Disconnect your Google account from Brightline? Existing Google files will not be deleted.")) return;
   try {
     const result = await api("/api/connections/google/disconnect", { method: "POST", body: JSON.stringify({}) });
     state = normalizeState(result.state); render(); toast("Google disconnected inside Brightline.");
@@ -749,8 +754,8 @@ function bindEvents() {
     const connectionAction = event.target.closest("[data-connection-action]");
     if (connectionAction) {
       const { connectionAction: action, service } = connectionAction.dataset;
-      if (action === "configure") configureGoogle(service);
-      if (action === "test") await testGoogle();
+      if (action === "configure") await configureGoogle(service);
+      if (action === "test") await testGoogle(service);
       if (action === "disconnect") await disconnectGoogle();
       return;
     }

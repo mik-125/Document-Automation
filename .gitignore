@@ -9,3 +9,5 @@ tmp/
 credentials*.json
 service-account*.json
 token*.json
+client_secret*.json
+google-oauth*.json

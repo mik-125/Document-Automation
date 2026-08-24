@@ -19,25 +19,23 @@ MakeEdu is intentionally unavailable until MakeEdu supplies official API documen
 
 1. Create a Google Cloud project.
 2. Enable Google Sheets API, Google Docs API, and Google Drive API.
-3. Create a service account and download its JSON credential outside this repository.
-4. Share each source spreadsheet with the service-account email as Viewer.
-5. Share each Google Docs template with the service-account email as Viewer, with copying allowed.
-6. Create an output folder inside a dedicated, restricted-membership report Shared Drive (or an admin-created limited-access folder). Every folder/drive member must be authorized to see student data. Give the service account **Content Manager** access so Brightline can remove temporary preview copies. A regular My Drive folder is not supported by this service-account MVP.
-7. Set the credential path before starting the app:
+3. Configure the OAuth consent screen for **External** use, keep the app in Testing, and add your own Google account as a test user.
+4. Create an OAuth client ID of type **Web application**.
+5. Add this exact authorized redirect URI: `http://127.0.0.1:8000/api/google/oauth/callback`.
+6. Download the OAuth client JSON outside this repository.
+7. Set the client path before starting the app:
 
 ```sh
-export GOOGLE_SERVICE_ACCOUNT_FILE="/absolute/path/to/service-account.json"
+export GOOGLE_OAUTH_CLIENT_FILE="/absolute/path/to/google-oauth-client.json"
 ```
 
-The output folder can be tested and saved from **Connections → Google Docs + Drive**, or supplied at startup:
+Open **Connections → Connect Google account** and approve access. Brightline stores the refresh token in the ignored local `data/` directory and creates a `Brightline Reports` folder in My Drive. It requests read-only access to existing Drive files plus per-file write access for files it creates.
 
-```sh
-export GOOGLE_REPORT_FOLDER_ID="your-drive-folder-id"
-```
+While the OAuth app remains in Google's **Testing** status, Google expires test-user authorization after seven days. Reconnect from Brightline when prompted. This is suitable for the personal MVP; public release requires a separate OAuth verification review.
 
-Never place the credential JSON inside this repository. Credential-like JSON filenames and `.env` are Git-ignored as a second safety layer.
+Never place the OAuth client JSON or token inside this repository. Credential-like JSON filenames, `data/`, and `.env` are Git-ignored as a second safety layer.
 
-Disconnecting Google or clearing local data does not delete generated report Docs in Drive. Apply the academy's retention policy inside the restricted report folder.
+Disconnecting Google deletes Brightline's local OAuth token but does not delete generated report Docs in Drive. Clearing imported data also leaves generated Google files in place.
 
 ## Install and run
 
@@ -94,4 +92,4 @@ For mapped CSV and Sheet imports, a unique Student ID is strongly recommended. W
 node --check app.js
 ```
 
-Live Google verification requires a real service account, shared Sheet, shared template Doc, and writable output folder.
+Live Google verification requires a personal Google OAuth client, an authorized test user, a source Sheet, and a template Doc.

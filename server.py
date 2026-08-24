@@ -11,6 +11,7 @@ import mimetypes
 import os
 import re
 import shutil
+import time
 import urllib.parse
 import uuid
 import zipfile
@@ -56,6 +57,8 @@ STATIC_FILES = {
 }
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DB = Database(DATA_DIR / "brightline.db")
+GOOGLE_OAUTH_REDIRECT_URI = "http://127.0.0.1:8000/api/google/oauth/callback"
+GOOGLE_OAUTH_FLOWS: dict[str, tuple[float, Any]] = {}
 
 
 def now_iso() -> str:
@@ -115,6 +118,8 @@ def is_json_content_type(value: str) -> bool:
 
 def error_status(exc: Exception) -> HTTPStatus:
     code = getattr(exc, "code", "")
+    if code == "google_oauth_required":
+        return HTTPStatus.UNAUTHORIZED
     if code == "google_rate_limited":
         return HTTPStatus.TOO_MANY_REQUESTS
     if code in {"google_temporarily_unavailable", "google_api_disabled"}:
@@ -181,11 +186,12 @@ def google_connection_state() -> dict[str, Any]:
     disabled = DB.get_setting("google_connection_disabled") == "1"
     tested_status = DB.get_setting("google_connection_status")
     stored_account = DB.get_setting("google_connection_account")
+    stored_identity = DB.get_setting("google_connection_identity")
     credentials_verified = bool(
         tested_status == "connected"
-        and identity["configured"]
+        and identity["authorized"]
         and stored_account
-        and stored_account == identity.get("account")
+        and stored_identity == identity.get("fingerprint")
     )
     active_verified = credentials_verified and not disabled
     if disabled:
@@ -194,21 +200,25 @@ def google_connection_state() -> dict[str, Any]:
         base_status = "error"
     elif credentials_verified:
         base_status = "configured"
+    elif identity["configured"] and not identity["authorized"]:
+        base_status = "needs_auth"
     elif identity["configured"]:
         base_status = "configured"
     else:
         base_status = "disconnected"
-    account = identity.get("account", "") or stored_account
+    account = stored_account
     error = DB.get_setting("google_connection_error") or identity.get("error", "")
     common: dict[str, Any] = {
         "available": True,
-        "configured": bool(identity["configured"]),
+        "configured": bool(identity["authorized"]),
+        "oauth_client_configured": bool(identity["configured"]),
+        "authorized": bool(identity["authorized"]),
+        "auth_mode": "oauth",
+        "connect_url": "/api/google/oauth/start",
         "account_name": account,
         "last_tested_at": DB.get_setting("google_connection_last_tested"),
     }
-    output_folder_id = DB.get_setting("google_output_folder_id") or os.environ.get(
-        "GOOGLE_REPORT_FOLDER_ID", ""
-    )
+    output_folder_id = DB.get_setting("google_output_folder_id")
     output_folder_verified = DB.get_setting("google_output_folder_verified") == "1"
     sheets_status = base_status
     docs_status = base_status
@@ -246,14 +256,22 @@ def mark_google_service_verified(service: str, workspace: GoogleWorkspace) -> No
 
 
 def prepare_google_identity(workspace: GoogleWorkspace) -> None:
-    if DB.get_setting("google_connection_account") != workspace.service_account_email:
+    account = workspace.account_email()
+    identity_changed = (
+        DB.get_setting("google_connection_account") != account
+        or DB.get_setting("google_connection_identity") != workspace.identity_fingerprint
+    )
+    if identity_changed:
         for key in (
             "google_sheets_verified",
             "google_docs_verified",
             "google_output_folder_verified",
         ):
             DB.set_setting(key, "0")
-    DB.set_setting("google_connection_account", workspace.service_account_email)
+        DB.set_setting("google_output_folder_id", "")
+        DB.set_setting("google_output_folder_name", "")
+    DB.set_setting("google_connection_account", account)
+    DB.set_setting("google_connection_identity", workspace.identity_fingerprint)
 
 
 def app_state() -> dict[str, Any]:
@@ -314,7 +332,7 @@ def app_state() -> dict[str, Any]:
             "error": str(
                 template.get("error")
                 or (
-                    "Retest this template with the active service account."
+                    "Retest this template with the connected Google account."
                     if template.get("document_id") and not account_verified
                     else ""
                 )
@@ -1087,9 +1105,7 @@ def generate_report(
         )
     if DB.get_setting("google_connection_disabled") == "1":
         raise ValidationError("Reconnect Google Workspace before generating reports.")
-    output_folder_id = DB.get_setting("google_output_folder_id") or os.environ.get(
-        "GOOGLE_REPORT_FOLDER_ID", ""
-    )
+    output_folder_id = DB.get_setting("google_output_folder_id") or ""
     period_folder = safe_filename(student.get("period_label", "period"), "period")
     output = REPORT_DIR / period_folder / f"{student_id}-{uuid.uuid4().hex[:8]}.pdf"
     report_name = " - ".join(
@@ -1254,6 +1270,13 @@ class AppHandler(BaseHTTPRequestHandler):
             status,
         )
 
+    def _redirect(self, location: str) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self._security_headers()
+        self.end_headers()
+
     def _send_file(self, path: Path, content_type: str, download_name: str | None = None) -> None:
         if not path.exists() or not path.is_file():
             self._send_json({"error": "File not found."}, HTTPStatus.NOT_FOUND)
@@ -1300,17 +1323,32 @@ class AppHandler(BaseHTTPRequestHandler):
         return urllib.parse.urlparse(self.path).path
 
     def do_GET(self) -> None:
+        path = self._path()
+        if path == "/api/google/oauth/callback":
+            if not local_request_context(self.headers.get("Host", "")):
+                self._send_json({"error": "Request host is not allowed."}, HTTPStatus.FORBIDDEN)
+                return
+            try:
+                self._google_oauth_callback()
+            except (ValidationError, IntegrationError, ValueError) as exc:
+                self._send_json(
+                    {"error": str(exc), "code": getattr(exc, "code", "validation_error")},
+                    error_status(exc),
+                )
+            return
         if not self._require_safe_context():
             return
         if not self._require_authorized():
             return
         try:
-            path = self._path()
             if path == "/api/health":
                 self._send_json({"ok": True})
                 return
             if path == "/api/state":
                 self._send_json(app_state())
+                return
+            if path == "/api/google/oauth/start":
+                self._start_google_oauth()
                 return
             archived_match = re.fullmatch(r"/api/reports/archive/([a-f0-9]+)", path)
             if archived_match:
@@ -1445,9 +1483,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._test_google(payload)
                 return
             if path == "/api/connections/google/disconnect":
+                GoogleWorkspace.disconnect()
                 DB.set_setting("google_connection_disabled", "1")
                 DB.set_setting("google_connection_status", "disconnected")
                 DB.set_setting("google_connection_error", "")
+                DB.set_setting("google_connection_account", "")
+                DB.set_setting("google_connection_identity", "")
                 DB.set_setting("google_sheets_verified", "0")
                 DB.set_setting("google_docs_verified", "0")
                 DB.set_setting("google_output_folder_verified", "0")
@@ -1693,17 +1734,82 @@ class AppHandler(BaseHTTPRequestHandler):
         DB.set_setting("google_sheets_last_sync", source["last_sync_at"])
         self._send_json({"ok": True, "summary": summary, "state": app_state()})
 
+    def _start_google_oauth(self) -> None:
+        flow = GoogleWorkspace.authorization_flow(GOOGLE_OAUTH_REDIRECT_URI)
+        authorization_url, state = flow.authorization_url(
+            access_type="offline",
+            include_granted_scopes="true",
+            prompt="consent",
+        )
+        cutoff = time.monotonic() - 600
+        for pending_state, (created_at, _) in list(GOOGLE_OAUTH_FLOWS.items()):
+            if created_at < cutoff:
+                GOOGLE_OAUTH_FLOWS.pop(pending_state, None)
+        GOOGLE_OAUTH_FLOWS[state] = (time.monotonic(), flow)
+        self._redirect(authorization_url)
+
+    def _google_oauth_callback(self) -> None:
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        state = str(query.get("state", [""])[0])
+        pending = GOOGLE_OAUTH_FLOWS.pop(state, None)
+        if not state or not pending or pending[0] < time.monotonic() - 600:
+            raise IntegrationError(
+                "The Google sign-in session expired. Start the connection again.",
+                "google_oauth_required",
+            )
+        if query.get("error"):
+            DB.set_setting("google_connection_status", "error")
+            DB.set_setting("google_connection_error", "Google sign-in was cancelled.")
+            self._redirect("/#connections")
+            return
+        _, flow = pending
+        try:
+            flow.fetch_token(
+                authorization_response=f"{GOOGLE_OAUTH_REDIRECT_URI}?{urllib.parse.urlparse(self.path).query}"
+            )
+            GoogleWorkspace.save_oauth_credentials(flow.credentials)
+            workspace = GoogleWorkspace.from_env()
+            result = workspace.test_connection(ensure_output_folder=True)
+            prepare_google_identity(workspace)
+        except Exception as exc:
+            error = (
+                str(exc)
+                if isinstance(exc, IntegrationError)
+                else "Google sign-in could not be completed. Check the OAuth client settings."
+            )
+            DB.set_setting("google_connection_status", "error")
+            DB.set_setting("google_connection_error", error)
+            DB.set_setting("google_connection_last_tested", now_iso())
+            self._redirect("/#connections")
+            return
+        DB.set_setting("google_connection_disabled", "0")
+        DB.set_setting("google_connection_status", "connected")
+        DB.set_setting("google_connection_error", "")
+        DB.set_setting("google_connection_account", result["account"])
+        DB.set_setting("google_connection_last_tested", now_iso())
+        DB.set_setting("google_sheets_verified", "1")
+        DB.set_setting("google_docs_verified", "1")
+        DB.set_setting("google_output_folder_id", result["output_folder_id"])
+        DB.set_setting("google_output_folder_name", result["output_folder_name"])
+        DB.set_setting("google_output_folder_verified", "1")
+        self._redirect("/#connections")
+
     def _test_google(self, payload: dict[str, Any]) -> None:
+        service = str(payload.get("service") or "google_sheets")
+        if service not in {"google_sheets", "google_docs"}:
+            raise ValidationError("Choose a valid Google service.")
         output_folder = str(
             payload.get("output_folder")
             or DB.get_setting("google_output_folder_id")
-            or os.environ.get("GOOGLE_REPORT_FOLDER_ID", "")
             or ""
         )
         try:
             workspace = GoogleWorkspace.from_env()
+            result = workspace.test_connection(
+                output_folder,
+                ensure_output_folder=service == "google_docs",
+            )
             prepare_google_identity(workspace)
-            result = workspace.test_connection(output_folder)
         except IntegrationError as exc:
             DB.set_setting("google_connection_status", "error")
             DB.set_setting("google_connection_error", str(exc))
@@ -1716,6 +1822,7 @@ class AppHandler(BaseHTTPRequestHandler):
         DB.set_setting("google_connection_error", "")
         DB.set_setting("google_connection_account", result["account"])
         DB.set_setting("google_connection_last_tested", now_iso())
+        DB.set_setting(f"google_{'sheets' if service == 'google_sheets' else 'docs'}_verified", "1")
         if result.get("output_folder_id"):
             DB.set_setting("google_output_folder_id", result["output_folder_id"])
             DB.set_setting("google_output_folder_name", result["output_folder_name"])
@@ -1723,7 +1830,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self._send_json(
             {
                 "ok": True,
-                "message": "Google credentials and Drive access verified.",
+                "message": "Google account access verified.",
                 "state": app_state(),
             }
         )
@@ -1766,10 +1873,10 @@ class AppHandler(BaseHTTPRequestHandler):
         inspected = workspace.inspect_document(document)
         mark_google_service_verified("docs", workspace)
         if not inspected["can_copy"]:
-            raise ValidationError("The service account is not allowed to copy this template.")
+            raise ValidationError("The connected Google account cannot copy this template.")
         template = {
             **inspected,
-            "verified_account": workspace.service_account_email,
+            "verified_account": workspace.account_email(),
             "last_tested_at": now_iso(),
             "error": "",
         }

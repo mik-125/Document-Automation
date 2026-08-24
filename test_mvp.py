@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import json
 import os
 import tempfile
 import unittest
@@ -27,6 +28,71 @@ from integrations import (
 
 
 class GoogleReferenceTests(unittest.TestCase):
+    def test_oauth_client_and_token_stay_in_explicit_local_files(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            client = root / "oauth-client.json"
+            token = root / "oauth-token.json"
+            client.write_text(
+                json.dumps(
+                    {
+                        "web": {
+                            "client_id": "client-id.apps.googleusercontent.com",
+                            "project_id": "brightline",
+                            "client_secret": "test-secret",
+                            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                            "token_uri": "https://oauth2.googleapis.com/token",
+                            "redirect_uris": [app_server.GOOGLE_OAUTH_REDIRECT_URI],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class Credentials:
+                @staticmethod
+                def to_json() -> str:
+                    return '{"refresh_token":"local-test-token"}'
+
+            with patch.dict(
+                os.environ,
+                {
+                    "GOOGLE_OAUTH_CLIENT_FILE": str(client),
+                    "GOOGLE_OAUTH_TOKEN_FILE": str(token),
+                },
+                clear=False,
+            ):
+                identity = GoogleWorkspace.configured_identity()
+                self.assertTrue(identity["configured"])
+                self.assertFalse(identity["authorized"])
+                flow = GoogleWorkspace.authorization_flow(
+                    app_server.GOOGLE_OAUTH_REDIRECT_URI
+                )
+                authorization_url, state = flow.authorization_url()
+                self.assertTrue(state)
+                self.assertIn("accounts.google.com", authorization_url)
+                GoogleWorkspace.save_oauth_credentials(Credentials())
+                self.assertEqual(token.stat().st_mode & 0o777, 0o600)
+                self.assertTrue(GoogleWorkspace.configured_identity()["authorized"])
+                GoogleWorkspace.disconnect()
+                self.assertFalse(token.exists())
+
+    def test_service_account_json_is_not_accepted_as_an_oauth_client(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            client = Path(folder) / "service-account.json"
+            client.write_text(
+                '{"type":"service_account","client_email":"old@example.test"}',
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"GOOGLE_OAUTH_CLIENT_FILE": str(client)},
+                clear=False,
+            ):
+                identity = GoogleWorkspace.configured_identity()
+            self.assertFalse(identity["configured"])
+            self.assertIn("Web application", identity["error"])
+
     def test_extracts_supported_google_ids(self) -> None:
         identifier = "1AbCdEfGhIjKlMnOpQrStUvWxYz_12345"
         self.assertEqual(
@@ -47,11 +113,13 @@ class GoogleReferenceTests(unittest.TestCase):
         with self.assertRaises(IntegrationError):
             google_file_id("https://example.com/document/secret")
 
-    def test_rejects_non_shared_drive_output_folder(self) -> None:
+    def test_accepts_writable_personal_drive_output_folder(self) -> None:
         class Workspace(GoogleWorkspace):
             def __init__(self) -> None:
-                self.service_account_email = "reports@example.iam.gserviceaccount.com"
                 self.project_id = "brightline"
+
+            def account_email(self) -> str:
+                return "owner@example.test"
 
             def file_metadata(self, *_args, **_kwargs):
                 return {
@@ -60,28 +128,70 @@ class GoogleReferenceTests(unittest.TestCase):
                     "capabilities": {"canAddChildren": True},
                 }
 
-        with self.assertRaisesRegex(IntegrationError, "Shared Drive"):
-            Workspace().test_connection("folder_identifier_123")
+        result = Workspace().test_connection("folder_identifier_123")
+        self.assertEqual(result["account"], "owner@example.test")
+        self.assertEqual(result["output_folder_id"], "folder_identifier_123")
 
-    def test_requires_content_manager_access_for_output_folder(self) -> None:
+    def test_rejects_an_unwritable_personal_output_folder(self) -> None:
         class Workspace(GoogleWorkspace):
             def __init__(self) -> None:
-                self.service_account_email = "reports@example.iam.gserviceaccount.com"
                 self.project_id = "brightline"
+
+            def account_email(self) -> str:
+                return "owner@example.test"
 
             def file_metadata(self, *_args, **_kwargs):
                 return {
                     "id": "folder_identifier_123",
                     "name": "Reports",
-                    "driveId": "shared_drive_identifier_123",
-                    "capabilities": {
-                        "canAddChildren": True,
-                        "canTrashChildren": False,
-                    },
+                    "capabilities": {"canAddChildren": False},
                 }
 
-        with self.assertRaisesRegex(IntegrationError, "Content Manager"):
+        with self.assertRaisesRegex(IntegrationError, "cannot add reports"):
             Workspace().test_connection("folder_identifier_123")
+
+    def test_creates_a_brightline_folder_in_personal_drive(self) -> None:
+        class Execute:
+            def __init__(self, result) -> None:
+                self.result = result
+
+            def execute(self, **_kwargs):
+                return self.result
+
+        class Files:
+            def list(self, **_kwargs):
+                return Execute({"files": []})
+
+            def create(self, **kwargs):
+                self.created = kwargs["body"]
+                return Execute(
+                    {
+                        "id": "personal_folder_123",
+                        "name": self.created["name"],
+                        "capabilities": {"canAddChildren": True},
+                    }
+                )
+
+        class Drive:
+            files_api = Files()
+
+            def files(self):
+                return self.files_api
+
+        class Workspace(GoogleWorkspace):
+            def __init__(self) -> None:
+                self.project_id = "brightline"
+                self.drive = Drive()
+
+            def account_email(self) -> str:
+                return "owner@example.test"
+
+            def _service(self, *_args):
+                return self.drive
+
+        result = Workspace().test_connection(ensure_output_folder=True)
+        self.assertEqual(result["output_folder_id"], "personal_folder_123")
+        self.assertEqual(result["output_folder_name"], "Brightline Reports")
 
     def test_classifies_rate_limit_hidden_inside_google_403(self) -> None:
         class Response:
@@ -784,26 +894,30 @@ class ImportSafetyTests(unittest.TestCase):
                 {"document": "document_identifier_123"},
             )
 
-    def test_changed_service_account_requires_a_new_connection_test(self) -> None:
+    def test_changed_oauth_client_requires_a_new_connection_test(self) -> None:
         app_server.DB.set_setting("google_connection_status", "connected")
         app_server.DB.set_setting("google_connection_account", "old@example.test")
+        app_server.DB.set_setting("google_connection_identity", "old-client")
         app_server.DB.set_setting("google_sheets_verified", "1")
         with patch.object(
             app_server.GoogleWorkspace,
             "configured_identity",
             return_value={
                 "configured": True,
-                "account": "new@example.test",
+                "authorized": True,
+                "fingerprint": "new-client",
                 "project": "brightline",
                 "error": "",
             },
         ):
             connection = app_server.google_connection_state()["google_sheets"]
-        self.assertEqual(connection["account_name"], "new@example.test")
+        self.assertEqual(connection["account_name"], "old@example.test")
         self.assertNotEqual(connection["status"], "connected")
 
-    def test_new_service_account_resets_other_google_verification(self) -> None:
+    def test_new_oauth_account_resets_other_google_verification(self) -> None:
         app_server.DB.set_setting("google_connection_account", "old@example.test")
+        app_server.DB.set_setting("google_connection_identity", "old-client")
+        app_server.DB.set_setting("google_output_folder_id", "old-folder")
         for key in (
             "google_sheets_verified",
             "google_docs_verified",
@@ -812,7 +926,11 @@ class ImportSafetyTests(unittest.TestCase):
             app_server.DB.set_setting(key, "1")
 
         class Workspace:
-            service_account_email = "new@example.test"
+            identity_fingerprint = "new-client"
+
+            @staticmethod
+            def account_email() -> str:
+                return "new@example.test"
 
         app_server.mark_google_service_verified("sheets", Workspace())
         self.assertEqual(
@@ -823,8 +941,9 @@ class ImportSafetyTests(unittest.TestCase):
         self.assertEqual(
             app_server.DB.get_setting("google_output_folder_verified"), "0"
         )
+        self.assertEqual(app_server.DB.get_setting("google_output_folder_id"), "")
 
-    def test_each_template_must_match_the_active_service_account(self) -> None:
+    def test_each_template_must_match_the_active_oauth_account(self) -> None:
         first_class = app_server.DB.upsert_class("Economics")
         second_class = app_server.DB.upsert_class("History")
         for class_item in (first_class, second_class):
@@ -840,12 +959,14 @@ class ImportSafetyTests(unittest.TestCase):
             )
         app_server.DB.set_setting("google_connection_status", "connected")
         app_server.DB.set_setting("google_connection_account", "new@example.test")
+        app_server.DB.set_setting("google_connection_identity", "oauth-client")
         app_server.DB.set_setting("google_docs_verified", "1")
         app_server.DB.set_setting("google_output_folder_id", "folder_identifier_123")
         app_server.DB.set_setting("google_output_folder_verified", "1")
         identity = {
             "configured": True,
-            "account": "new@example.test",
+            "authorized": True,
+            "fingerprint": "oauth-client",
             "project": "brightline",
             "error": "",
         }
