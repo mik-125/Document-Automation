@@ -381,7 +381,9 @@ function renderReports() {
       const ready = students.filter(student => student.report_ready).length;
       const rows = students.map(student => {
         const exam = student.latest_exam;
-        return `<div class="report-student-row"><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.school || "School missing")} · ${escapeHtml(student.grade || "Grade missing")}</small></span></div><div class="report-data"><span>Assignment<b>${student.homework_percent == null ? "—" : `${formatNumber(student.homework_percent)}%`}</b></span><span>Weekly Test<b>${exam ? `${formatNumber(exam.score)}${exam.max_score == null ? "" : `/${formatNumber(exam.max_score)}`}` : "—"}</b></span></div><span class="status-pill ${student.report_ready ? "" : "warn"}">${escapeHtml(reportReason(student))}</span><div class="row-actions">${student.report_ready ? `<button class="table-action" data-preview-student="${student.id}" data-period-id="${student.period_id || ""}">Preview</button><button class="table-action" data-download-student="${student.id}" data-period-id="${student.period_id || ""}" data-filename="${escapeHtml(student.name)}-report.pdf">Download PDF</button>` : '<button class="table-action disabled">Needs data</button>'}</div></div>`;
+        const attempted = Number(student.homework_completed || 0) + Number(student.homework_incomplete || 0);
+        const missed = attempted || Number(student.homework_excluded || 0) ? formatNumber(student.homework_incomplete || 0) : student.homework_percent == null ? "—" : "Unavailable";
+        return `<div class="report-student-row"><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.school || "School missing")} · ${escapeHtml(student.grade || "Grade missing")}</small></span></div><div class="report-data"><span>Assignments missed<b>${missed}</b></span><span>Weekly Test<b>${exam ? `${formatNumber(exam.score)}${exam.max_score === 100 ? "%" : exam.max_score == null ? "" : `/${formatNumber(exam.max_score)}`}` : "—"}</b></span></div><span class="status-pill ${student.report_ready ? "" : "warn"}">${escapeHtml(reportReason(student))}</span><div class="row-actions">${student.report_ready ? `<button class="table-action" data-preview-student="${student.id}" data-period-id="${student.period_id || ""}">Preview</button><button class="table-action" data-download-student="${student.id}" data-period-id="${student.period_id || ""}" data-filename="${escapeHtml(student.name)}-report.pdf">Download PDF</button>` : '<button class="table-action disabled">Needs data</button>'}</div></div>`;
       }).join("");
       return `<section class="report-class-section"><header><div><span class="eyebrow">${escapeHtml(classItem.subject || "CLASS REPORTS")}</span><h2>${escapeHtml(classItem.name)}</h2><p>${ready} of ${students.length} students ready · ${escapeHtml(classItem.selected_period_label || "No period")}</p></div><button class="secondary-button ${ready ? "" : "disabled"}" data-download-class="${classItem.id}" data-filename="${escapeHtml(classItem.name)}-reports.zip" ${ready ? "" : "disabled"}>Download class ZIP</button></header>${rows || emptyState("No students in this class", "Import an Assignment file containing this class.")}</section>`;
     }).join("");
@@ -487,22 +489,30 @@ async function chooseAssignmentCsv(file) {
 const FIELD_LABELS = {
   student_id: "Student ID", student_name: "Student name", class_name: "Class name", grade: "Grade or year", school: "School", teacher: "Teacher",
   assignment_completed: "Assignments completed", assignment_total: "Total assignments", assignment_percent: "Assignment percent",
-  weekly_test_label: "Test label", weekly_test_score: "Test score", weekly_test_max: "Maximum score", comment: "Teacher comment", reporting_week: "Reporting week",
+  weekly_test_label: "Test label", weekly_test_score: "Weekly test percentage", weekly_test_max: "Maximum score", comment: "Teacher comment", reporting_week: "Reporting week",
 };
 
 function fieldsForKind(kind) {
-  const base = ["student_id", "student_name", "class_name", "grade", "school", "teacher"];
-  if (kind === "assignment") return [...base, "assignment_completed", "assignment_total", "assignment_percent", "reporting_week"];
-  if (kind === "weekly_test") return [...base, "weekly_test_label", "weekly_test_score", "weekly_test_max", "reporting_week"];
-  return [...base, "comment", "weekly_test_label", "reporting_week"];
+  const base = ["student_name", "class_name", "school"];
+  if (kind === "assignment") return base;
+  if (kind === "weekly_test") return [...base, "weekly_test_score"];
+  return [...base, "comment"];
 }
 
 function requiredFields(kind) {
   return kind === "weekly_test" ? ["student_name", "class_name", "weekly_test_score"] : kind === "comments" ? ["student_name", "class_name", "comment"] : ["student_name", "class_name"];
 }
 
-function mappingSelect(field, headers, selected, required) {
-  return `<label class="${required ? "required" : ""}"><span>${escapeHtml(FIELD_LABELS[field])}</span><select data-map-field="${field}"><option value="">Not used</option>${headers.map(header => `<option value="${escapeHtml(header)}" ${header === selected ? "selected" : ""}>${escapeHtml(header)}</option>`).join("")}</select></label>`;
+function mappingSelect(field, preview, selected, required) {
+  const options = preview.headers.map((header, index) => {
+    const examples = [...new Set(preview.sample_rows.map(row => String(row[index] || "").trim()).filter(Boolean))]
+      .slice(0, 2)
+      .map(value => value.length > 30 ? `${value.slice(0, 29)}…` : value)
+      .join(", ");
+    const label = examples ? `${header} — ${examples}` : header;
+    return `<option value="${escapeHtml(header)}" ${header === selected ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  }).join("");
+  return `<label class="${required ? "required" : ""}"><span>${escapeHtml(FIELD_LABELS[field])}</span><select data-map-field="${field}"><option value="">Not used</option>${options}</select></label>`;
 }
 
 function sampleTable(preview) {
@@ -522,7 +532,9 @@ function openMappingModal(context) {
   const periodValue = state.selected_period_id || state.periods[0]?.id || "";
   const newPeriodSelected = kind === "assignment" && !periodValue;
   const createPeriodOption = kind === "assignment" ? '<option value="">Create a new reporting period</option>' : "";
-  openModal(`<span class="eyebrow">${context.source === "google" ? "GOOGLE SHEETS" : "CSV"} · ${escapeHtml(kind.replace("_", " "))}</span><h2>Confirm column mapping</h2><p>${preview.row_count} rows found. Brightline imports only the columns you map below.</p>${sampleTable(preview)}<form id="mapping-form"><div class="mapping-grid">${fields.map(field => mappingSelect(field, preview.headers, suggested[field] || "", required.includes(field))).join("")}</div><label><span>Reporting period</span><select id="mapping-period">${createPeriodOption}${periodOptions(periodValue)}</select></label><div class="form-grid ${newPeriodSelected ? "" : "hidden"}" id="new-period-fields"><label><span>Period name</span><input id="mapping-period-label" value="Week ${state.periods.length + 1}" /></label><span></span><label><span>Start date</span><input id="mapping-period-start" type="date" /></label><label><span>End date</span><input id="mapping-period-end" type="date" /></label></div><div class="safety-note">Student ID is strongly recommended. Without it, Brightline matches an existing student only when the identity is unambiguous.</div><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Import ${escapeHtml(kind.replace("_", " "))}</button></div></form>`);
+  const datedColumns = preview.headers.filter(header => /^(?:\d{4}\/)?\d{1,2}\/\d{1,2}$/.test(header));
+  const assignmentNote = kind === "assignment" ? `<div class="safety-note">Assignments missed will be counted automatically from <strong>F</strong> across ${datedColumns.length} dated column${datedColumns.length === 1 ? "" : "s"}. A, B, X, blanks, and other text are not counted as missed.</div>` : "";
+  openModal(`<span class="eyebrow">${context.source === "google" ? "GOOGLE SHEETS" : "CSV"} · ${escapeHtml(kind.replace("_", " "))}</span><h2>Confirm column mapping</h2><p>${preview.row_count} rows found. Choose the column for each field; examples appear after each column name.</p>${sampleTable(preview)}<form id="mapping-form"><div class="mapping-grid">${fields.map(field => mappingSelect(field, preview, suggested[field] || "", required.includes(field))).join("")}</div>${assignmentNote}<label><span>Reporting period</span><select id="mapping-period">${createPeriodOption}${periodOptions(periodValue)}</select></label><div class="form-grid ${newPeriodSelected ? "" : "hidden"}" id="new-period-fields"><label><span>Period name</span><input id="mapping-period-label" value="Week ${state.periods.length + 1}" /></label><span></span><label><span>Start date</span><input id="mapping-period-start" type="date" /></label><label><span>End date</span><input id="mapping-period-end" type="date" /></label></div><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Import ${escapeHtml(kind.replace("_", " "))}</button></div></form>`);
   const periodSelect = $("#mapping-period");
   if (!newPeriodSelected && periodValue) periodSelect.value = periodValue;
   const toggleNewPeriod = () => $("#new-period-fields").classList.toggle("hidden", kind !== "assignment" || Boolean(periodSelect.value));
@@ -533,13 +545,12 @@ function openMappingModal(context) {
     const mapping = Object.fromEntries($$("[data-map-field]").filter(select => select.value).map(select => [select.dataset.mapField, select.value]));
     const missing = required.filter(field => !mapping[field]);
     if (missing.length) return toast(`Map ${FIELD_LABELS[missing[0]]} before importing.`, "error");
-    if (kind === "assignment" && !(mapping.assignment_percent || (mapping.assignment_completed && mapping.assignment_total))) return toast("Map completed and total assignments, or map assignment percent.", "error");
     if (kind !== "assignment" && !periodSelect.value) return toast("Choose an existing reporting period.", "error");
     const period = periodSelect.value ? { period_id: periodSelect.value } : { period_label: $("#mapping-period-label").value.trim(), period_start: $("#mapping-period-start").value, period_end: $("#mapping-period-end").value };
     try {
       const url = context.source === "google" ? "/api/google/sheets/sync" : "/api/tabular/import";
       const payload = context.source === "google"
-        ? { kind, spreadsheet: context.spreadsheet, worksheet: context.worksheet, mapping, ...period }
+        ? { kind, spreadsheet: context.spreadsheet, worksheet: context.worksheet, header_row: context.header_row, mapping, ...period }
         : { kind, filename: context.filename, text: context.text, mapping, ...period };
       let result;
       try {
@@ -570,14 +581,15 @@ function openGoogleSheetImport(kind) {
   }
   if (kind !== "assignment" && !state.periods.length) return toast("Import Assignment data first.", "error");
   const saved = state.sheet_sources[kind] || {};
-  openModal(`<span class="eyebrow">GOOGLE SHEETS · ${escapeHtml(kind.replace("_", " "))}</span><h2>Choose the worksheet</h2><p>Paste a Sheet that <strong>${escapeHtml(connection.account_name || "your connected account")}</strong> can open. Only mapped columns will be imported.</p><form id="sheet-preview-form"><label><span>Google Sheets URL or ID</span><input id="sheet-url" value="${escapeHtml(saved.spreadsheet_id || "")}" placeholder="https://docs.google.com/spreadsheets/d/..." required /></label><label><span>Worksheet name</span><input id="sheet-tab" value="${escapeHtml(saved.worksheet || "")}" placeholder="Leave blank to use the first tab" /></label><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Preview columns</button></div></form>`);
+  openModal(`<span class="eyebrow">GOOGLE SHEETS · ${escapeHtml(kind.replace("_", " "))}</span><h2>Choose the worksheet</h2><p>Paste a Sheet that <strong>${escapeHtml(connection.account_name || "your connected account")}</strong> can open. Only mapped columns will be imported.</p><form id="sheet-preview-form"><label><span>Google Sheets URL or ID</span><input id="sheet-url" value="${escapeHtml(saved.spreadsheet_id || "")}" placeholder="https://docs.google.com/spreadsheets/d/..." required /></label><div class="form-grid"><label><span>Worksheet name</span><input id="sheet-tab" value="${escapeHtml(saved.worksheet || "")}" placeholder="Leave blank to use the first tab" /></label><label><span>Header row</span><input id="sheet-header-row" type="number" min="1" step="1" value="${escapeHtml(saved.header_row || 1)}" required /></label></div><div class="safety-note">Header row is the spreadsheet row containing labels such as Student name and Class name.</div><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Preview columns</button></div></form>`);
   $("#sheet-preview-form").onsubmit = async event => {
     event.preventDefault();
     const spreadsheet = $("#sheet-url").value.trim();
     const worksheet = $("#sheet-tab").value.trim();
+    const header_row = Number.parseInt($("#sheet-header-row").value, 10);
     try {
-      const preview = await api("/api/google/sheets/preview", { method: "POST", body: JSON.stringify({ spreadsheet, worksheet }) });
-      openMappingModal({ kind, source: "google", spreadsheet, worksheet: preview.worksheet, preview });
+      const preview = await api("/api/google/sheets/preview", { method: "POST", body: JSON.stringify({ spreadsheet, worksheet, header_row }) });
+      openMappingModal({ kind, source: "google", spreadsheet, worksheet: preview.worksheet, header_row: preview.header_row, preview });
     } catch (error) { toast(error.message, "error"); }
   };
 }

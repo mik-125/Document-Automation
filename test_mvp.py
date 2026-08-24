@@ -352,6 +352,40 @@ class TableMappingTests(unittest.TestCase):
         with self.assertRaises(IntegrationError):
             preview_table([["Student", "Student"], ["Mark", "Mark"]])
 
+    def test_selects_the_requested_sheet_header_row(self) -> None:
+        values = [
+            ["", "", "Staff note"],
+            ["Course", "Teacher", "Student"],
+            ["과목명", "담당자 이름", "학생", "학년", "학교"],
+            ["Economics", "Teacher", "Mark", "11", "School"],
+        ]
+        selected, header_row = app_server._values_from_header_row(values, 3)
+        preview = preview_table(selected)
+        self.assertEqual(header_row, 3)
+        self.assertEqual(preview["suggested_mapping"]["student_name"], "학생")
+        self.assertEqual(preview["suggested_mapping"]["class_name"], "과목명")
+        self.assertEqual(preview["row_count"], 1)
+        with self.assertRaisesRegex(ValueError, "positive whole number"):
+            app_server._values_from_header_row(values, 0)
+
+    def test_counts_missed_assignments_from_dated_columns(self) -> None:
+        values, mapping, dated = app_server._assignment_values_from_dated_columns(
+            [
+                ["과목명", "학생", "학교", "7/13", "7/14", "7/15", "7/16"],
+                ["Economics", "Mark", "School", "A", "F", "X", "B"],
+                ["Economics", "June", "School", "X", "", "X", ""],
+            ],
+            {"class_name": "과목명", "student_name": "학생", "school": "학교"},
+        )
+        records = mapped_records(values, mapping)
+        self.assertEqual(dated, ["7/13", "7/14", "7/15", "7/16"])
+        self.assertEqual(records[0]["assignment_completed"], "2")
+        self.assertEqual(records[0]["assignment_total"], "3")
+        self.assertEqual(records[0]["assignment_excluded"], "1")
+        self.assertEqual(records[1]["assignment_completed"], "0")
+        self.assertEqual(records[1]["assignment_total"], "0")
+        self.assertEqual(records[1]["assignment_excluded"], "4")
+
 
 class ReportReplacementTests(unittest.TestCase):
     def test_uses_scored_test_and_separate_comment(self) -> None:
@@ -374,6 +408,7 @@ class ReportReplacementTests(unittest.TestCase):
             }
         )
         self.assertEqual(replacements["student_id"], "S-42")
+        self.assertEqual(replacements["assignment_summary"], "2 assignments missed")
         self.assertEqual(replacements["weekly_test_score"], "18 / 20")
         self.assertEqual(replacements["teacher_comment"], "Strong analysis.")
 
@@ -442,6 +477,33 @@ class ImportSafetyTests(unittest.TestCase):
             "start_date": "2026-08-17",
             "end_date": "2026-08-23",
         }
+
+    def test_dated_assignment_import_counts_missed_per_student(self) -> None:
+        app_server.import_mapped_table(
+            values=[
+                ["학생", "과목명", "학교", "8/17", "8/18", "8/19"],
+                ["Mark", "Economics", "School", "A", "F", "B"],
+                ["June", "Economics", "School", "X", "", "X"],
+            ],
+            mapping={
+                "student_name": "학생",
+                "class_name": "과목명",
+                "school": "학교",
+            },
+            kind="assignment",
+            period=self.new_period(),
+            source_name="Assignments.csv",
+            source_provider="manual",
+        )
+        students = {item["name"]: item for item in app_server.DB.state()["students"]}
+        self.assertEqual(students["Mark"]["homework_incomplete"], 1)
+        self.assertEqual(students["Mark"]["homework_excluded"], 0)
+        self.assertEqual(students["June"]["homework_incomplete"], 0)
+        self.assertEqual(students["June"]["homework_excluded"], 3)
+        self.assertEqual(
+            report_replacements(students["June"])["assignment_summary"],
+            "0 assignments missed",
+        )
 
     def test_mixed_weeks_and_duplicate_rows_write_nothing(self) -> None:
         headers = ["Student ID", "Student", "Class", "Completed", "Total", "Week"]
@@ -577,7 +639,8 @@ class ImportSafetyTests(unittest.TestCase):
         self.assertEqual(student["homework_percent"], 78.4)
         self.assertTrue(student["assignment_ready"])
         self.assertEqual(
-            report_replacements(student)["assignment_summary"], "78.4% completed"
+            report_replacements(student)["assignment_summary"],
+            "Missed assignment count unavailable",
         )
 
     def test_assignment_counts_win_when_percent_is_also_mapped(self) -> None:

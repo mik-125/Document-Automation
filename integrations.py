@@ -251,14 +251,14 @@ def report_replacements(student: dict[str, Any]) -> dict[str, str]:
     attempted = int(student.get("homework_completed") or 0) + int(
         student.get("homework_incomplete") or 0
     )
-    completed = int(student.get("homework_completed") or 0)
+    missed = int(student.get("homework_incomplete") or 0)
+    excluded = int(student.get("homework_excluded") or 0)
     percent = student.get("homework_percent")
     assignment_summary = (
-        f"{completed} of {attempted} completed"
-        + (f" ({float(percent):g}%)" if percent is not None else "")
-        if attempted
+        f"{missed} assignment{'s' if missed != 1 else ''} missed"
+        if attempted or excluded
         else (
-            f"{float(percent):g}% completed"
+            "Missed assignment count unavailable"
             if percent is not None
             else "No assignment data"
         )
@@ -267,12 +267,18 @@ def report_replacements(student: dict[str, Any]) -> dict[str, str]:
     maximum = latest_test.get("max_score")
     score_text = "No weekly test score"
     if score is not None:
-        score_text = f"{float(score):g}"
-        if maximum is not None:
+        score_text = f"{float(score):g}%" if maximum == 100 else f"{float(score):g}"
+        if maximum is not None and maximum != 100:
             score_text += f" / {float(maximum):g}"
     test_summary = " · ".join(
         f"{exam.get('label') or 'Weekly test'}: {float(exam['score']):g}"
-        + (f"/{float(exam['max_score']):g}" if exam.get("max_score") is not None else "")
+        + (
+            "%"
+            if exam.get("max_score") == 100
+            else f"/{float(exam['max_score']):g}"
+            if exam.get("max_score") is not None
+            else ""
+        )
         for exam in scored
     ) or "No weekly test data"
     comment = "\n\n".join(

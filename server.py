@@ -463,6 +463,66 @@ def _values_from_csv(text: str) -> list[list[str]]:
     return list(csv.reader(io.StringIO(text.lstrip("\ufeff"))))
 
 
+def _values_from_header_row(
+    values: list[list[Any]], raw_header_row: Any
+) -> tuple[list[list[Any]], int]:
+    text = str(raw_header_row if raw_header_row is not None else "1").strip() or "1"
+    if not text.isdigit() or int(text) < 1:
+        raise ValidationError("Header row must be a positive whole number.")
+    header_row = int(text)
+    if header_row > len(values):
+        raise ValidationError("Header row is below the last populated spreadsheet row.")
+    return values[header_row - 1 :], header_row
+
+
+def _assignment_values_from_dated_columns(
+    values: list[list[Any]], mapping: dict[str, Any]
+) -> tuple[list[list[Any]], dict[str, Any], list[str]]:
+    if not values:
+        raise ValidationError("The selected table is empty.")
+    headers = [str(value).strip() for value in values[0]]
+    dated = [
+        header
+        for header in headers
+        if re.fullmatch(r"(?:\d{4}/)?\d{1,2}/\d{1,2}", header)
+    ]
+    if not dated:
+        raise ValidationError(
+            "No dated assignment columns were found. Use headings such as 7/13 or 2026/7/13."
+        )
+    indices = [headers.index(header) for header in dated]
+    completed_header = "__brightline_assignments_completed"
+    total_header = "__brightline_assignments_total"
+    excluded_header = "__brightline_assignments_excluded"
+    transformed: list[list[Any]] = [
+        headers + [completed_header, total_header, excluded_header]
+    ]
+    for raw_row in values[1:]:
+        completed = sum(
+            1
+            for index in indices
+            if index < len(raw_row) and str(raw_row[index]).strip().upper() in {"A", "B"}
+        )
+        missed = sum(
+            1
+            for index in indices
+            if index < len(raw_row) and str(raw_row[index]).strip().upper() == "F"
+        )
+        excluded = len(indices) - completed - missed
+        transformed.append(
+            list(raw_row) + [str(completed), str(completed + missed), str(excluded)]
+        )
+    updated_mapping = dict(mapping)
+    updated_mapping.update(
+        {
+            "assignment_completed": completed_header,
+            "assignment_total": total_header,
+            "assignment_excluded": excluded_header,
+        }
+    )
+    return transformed, updated_mapping, dated
+
+
 def _existing_class_by_name(name: str) -> dict[str, Any] | None:
     normalized = normalize_value(name)
     return next(
@@ -707,6 +767,8 @@ def _mapped_replacement_conflicts(
                 int(current.get("homework_completed") or 0) != int(record["_completed"])
                 or int(current.get("homework_incomplete") or 0)
                 != int(record["_total"]) - int(record["_completed"])
+                or int(current.get("homework_excluded") or 0)
+                != int(record["_excluded"])
                 or not _same_number(current.get("homework_percent"), record["_percent"])
             )
             if has_value and differs:
@@ -748,6 +810,11 @@ def import_mapped_table(
 ) -> str:
     if kind not in {"assignment", "weekly_test", "comments"}:
         raise ValidationError("Choose Assignment, Weekly Test, or Comments as the import type.")
+    if kind == "assignment" and not (
+        {"assignment_completed", "assignment_total"}.issubset(mapping)
+        or "assignment_percent" in mapping
+    ):
+        values, mapping, _ = _assignment_values_from_dated_columns(values, mapping)
     records = mapped_records(values, mapping)
     if kind == "assignment" and not (
         {"assignment_completed", "assignment_total"}.issubset(mapping)
@@ -788,11 +855,20 @@ def import_mapped_table(
                     )
                 completed = int(completed_number)
                 total = int(total_number)
-                if completed < 0 or total <= 0 or completed > total:
+                automatic_missed_count = (
+                    mapping.get("assignment_completed")
+                    == "__brightline_assignments_completed"
+                )
+                if (
+                    completed < 0
+                    or total < 0
+                    or completed > total
+                    or (total == 0 and not automatic_missed_count)
+                ):
                     raise ValidationError(
                         "Assignment totals must be positive and completed cannot exceed total."
                     )
-                calculated_percent = round(completed / total * 100, 1)
+                calculated_percent = round(completed / total * 100, 1) if total else 100.0
                 if (
                     percent_value is not None
                     and abs(percent_value - calculated_percent) > 0.11
@@ -801,9 +877,21 @@ def import_mapped_table(
                         "Assignment percent does not match the completed and total counts."
                     )
                 percent_value = calculated_percent
+                excluded_number = parse_number(
+                    item.get("assignment_excluded"), "Excluded assignments"
+                )
+                if excluded_number is not None and (
+                    not excluded_number.is_integer() or excluded_number < 0
+                ):
+                    raise IntegrationError(
+                        "Excluded assignment counts must be non-negative whole numbers.",
+                        "invalid_number",
+                    )
+                excluded = int(excluded_number or 0)
             elif percent_value is not None:
                 completed = 0
                 total = 0
+                excluded = 0
             else:
                 raise ValidationError(
                     "Every Assignment row needs completed and total counts, or a percent."
@@ -813,15 +901,18 @@ def import_mapped_table(
                     "_completed": completed,
                     "_total": total,
                     "_percent": percent_value,
+                    "_excluded": excluded,
                 }
             )
         elif kind == "weekly_test":
             score = parse_number(
-                item.get("weekly_test_score"), "Weekly Test score", required=True
+                item.get("weekly_test_score"), "Weekly Test percentage", required=True
             )
             maximum = parse_number(item.get("weekly_test_max"), "Weekly Test maximum")
-            if score is not None and score < 0:
-                raise ValidationError("Weekly Test scores cannot be negative.")
+            if maximum is None:
+                maximum = 100
+            if score is not None and not 0 <= score <= 100:
+                raise ValidationError("Weekly Test percentage must be between 0 and 100.")
             if maximum is not None and (maximum <= 0 or (score is not None and score > maximum)):
                 raise ValidationError(
                     "Weekly Test maximum must be positive and not below the score."
@@ -909,7 +1000,7 @@ def import_mapped_table(
                     ],
                     completed,
                     incomplete,
-                    0,
+                    int(record["_excluded"]),
                     percent_value,
                     period["start_date"],
                     period["end_date"],
@@ -1743,7 +1834,10 @@ class AppHandler(BaseHTTPRequestHandler):
             str(payload.get("spreadsheet") or ""), str(payload.get("worksheet") or "")
         )
         mark_google_service_verified("sheets", workspace)
-        preview = preview_table(result["values"])
+        values, header_row = _values_from_header_row(
+            result["values"], payload.get("header_row")
+        )
+        preview = preview_table(values)
         self._send_json(
             {
                 **preview,
@@ -1751,6 +1845,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "spreadsheet_name": result["spreadsheet_name"],
                 "worksheet": result["worksheet"],
                 "tabs": result["tabs"],
+                "header_row": header_row,
             }
         )
 
@@ -1764,9 +1859,12 @@ class AppHandler(BaseHTTPRequestHandler):
             str(payload.get("spreadsheet") or ""), str(payload.get("worksheet") or "")
         )
         mark_google_service_verified("sheets", workspace)
+        values, header_row = _values_from_header_row(
+            result["values"], payload.get("header_row")
+        )
         mapping = dict(payload.get("mapping") or {})
         summary = import_mapped_table(
-            values=result["values"],
+            values=values,
             mapping=mapping,
             kind=kind,
             period=period,
@@ -1778,6 +1876,7 @@ class AppHandler(BaseHTTPRequestHandler):
             "spreadsheet_id": result["spreadsheet_id"],
             "spreadsheet_name": result["spreadsheet_name"],
             "worksheet": result["worksheet"],
+            "header_row": header_row,
             "mapping": mapping,
             "last_sync_at": now_iso(),
         }
