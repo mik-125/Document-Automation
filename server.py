@@ -32,12 +32,14 @@ from integrations import (
     parse_number,
     preview_table,
     report_replacements,
+    suggest_mapping,
 )
 from report_engine import (
     ValidationError,
     homework_records,
+    inspect_example_report,
     inspect_homework_csv,
-    inspect_template,
+    parse_date_label,
     parse_comment_pdf,
     student_payload,
 )
@@ -222,6 +224,78 @@ def save_class_template(class_id: str, template: dict[str, Any]) -> None:
     set_json_setting(f"class_template_{class_id}", template)
 
 
+def class_example_manifest(class_id: str) -> list[dict[str, Any]]:
+    manifest_path = EXAMPLE_DIR / class_id / "manifest.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        payload = []
+    if not isinstance(payload, list):
+        return []
+    folder = manifest_path.parent.resolve()
+    examples: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        stored_name = Path(str(item.get("stored_name") or "")).name
+        candidate = (folder / stored_name).resolve()
+        if not stored_name or candidate.parent != folder or not candidate.is_file():
+            continue
+        examples.append(item)
+    return examples
+
+
+def save_class_example_manifest(class_id: str, examples: list[dict[str, Any]]) -> None:
+    folder = EXAMPLE_DIR / class_id
+    folder.mkdir(parents=True, exist_ok=True)
+    manifest_path = folder / "manifest.json"
+    temporary = folder / f"manifest-{uuid.uuid4().hex}.tmp"
+    temporary.write_text(
+        json.dumps(examples, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary.replace(manifest_path)
+
+
+def example_analysis_profile(examples: list[dict[str, Any]]) -> dict[str, Any]:
+    analyses = [item.get("analysis") for item in examples if isinstance(item.get("analysis"), dict)]
+    font_counts: dict[str, int] = {}
+    section_counts: dict[str, int] = {}
+    page_counts: list[int] = []
+    image_count = 0
+    multi_page_count = 0
+    warnings: list[str] = []
+    for analysis in analyses:
+        page_counts.append(int(analysis.get("page_count") or 0))
+        multi_page_count += int(bool(analysis.get("multi_page")))
+        summary = analysis.get("summary") or {}
+        image_count += int(summary.get("image_xobject_count") or 0)
+        for font in summary.get("font_names") or []:
+            font_counts[str(font)] = font_counts.get(str(font), 0) + 1
+        for section in summary.get("section_label_clues") or []:
+            section_counts[str(section)] = section_counts.get(str(section), 0) + 1
+        for warning in analysis.get("warnings") or []:
+            if warning not in warnings:
+                warnings.append(str(warning))
+    return {
+        "sample_count": len(examples),
+        "analyzed_count": len(analyses),
+        "page_counts": page_counts,
+        "multi_page_count": multi_page_count,
+        "common_fonts": [
+            name
+            for name, _ in sorted(font_counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+        ],
+        "section_clues": [
+            name
+            for name, _ in sorted(section_counts.items(), key=lambda item: (-item[1], item[0]))
+        ],
+        "image_xobject_count": image_count,
+        "possible_graph_regions": image_count,
+        "warnings": warnings[:8],
+        "advisory_only": True,
+    }
+
+
 def sheet_source(kind: str) -> dict[str, Any]:
     source = json_setting(f"sheet_source_{kind}", {})
     return source if isinstance(source, dict) else {}
@@ -320,8 +394,94 @@ def prepare_google_identity(workspace: GoogleWorkspace) -> None:
     DB.set_setting("google_connection_identity", workspace.identity_fingerprint)
 
 
+def period_input_matrix() -> tuple[list[dict[str, Any]], dict[tuple[str, str], set[str]]]:
+    """Return week-specific input readiness using Assignment rows as the roster.
+
+    Students remain attached to a class across weeks in the underlying directory, but a
+    report week should only include students present in that week's Assignment import.
+    Building the matrix from ``homework_periods`` keeps both readiness and report lists
+    scoped to the selected class and week without changing the existing import format.
+    """
+    with DB.connect() as connection:
+        homework_rows = connection.execute(
+            "SELECT h.student_id, h.period_id, s.class_id, h.homework_completed, "
+            "h.homework_incomplete, h.homework_excluded, h.homework_percent "
+            "FROM homework_periods h JOIN students s ON s.id = h.student_id"
+        ).fetchall()
+        exam_rows = connection.execute(
+            "SELECT student_id, period_id, score, comment FROM period_exams"
+        ).fetchall()
+
+    exam_flags: dict[tuple[str, str], dict[str, bool]] = {}
+    for row in exam_rows:
+        key = (str(row["student_id"]), str(row["period_id"]))
+        flags = exam_flags.setdefault(key, {"weekly_test": False, "comments": False})
+        flags["weekly_test"] = bool(flags["weekly_test"] or row["score"] is not None)
+        flags["comments"] = bool(flags["comments"] or str(row["comment"] or "").strip())
+
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    rosters: dict[tuple[str, str], set[str]] = {}
+    for row in homework_rows:
+        class_id = str(row["class_id"])
+        period_id = str(row["period_id"])
+        student_id = str(row["student_id"])
+        flags = exam_flags.get((student_id, period_id), {})
+        grouped.setdefault((class_id, period_id), []).append(
+            {
+                "assignment": bool(
+                    int(row["homework_completed"] or 0)
+                    + int(row["homework_incomplete"] or 0)
+                    + int(row["homework_excluded"] or 0)
+                    > 0
+                    or row["homework_percent"] is not None
+                ),
+                "weekly_test": bool(flags.get("weekly_test")),
+                "comments": bool(flags.get("comments")),
+            }
+        )
+        rosters.setdefault((class_id, period_id), set()).add(student_id)
+
+    statuses: list[dict[str, Any]] = []
+    for (class_id, period_id), students in grouped.items():
+        assignment_count = sum(item["assignment"] for item in students)
+        weekly_test_count = sum(item["weekly_test"] for item in students)
+        comment_count = sum(item["comments"] for item in students)
+        statuses.append(
+            {
+                "class_id": class_id,
+                "period_id": period_id,
+                "student_count": len(students),
+                "assignment_count": assignment_count,
+                "weekly_test_count": weekly_test_count,
+                "comment_count": comment_count,
+                "assignment_ready": bool(students)
+                and assignment_count == len(students),
+                "weekly_test_ready": bool(students)
+                and weekly_test_count == len(students),
+                "comments_ready": bool(students) and comment_count == len(students),
+                "comments_allowed": bool(students)
+                and assignment_count == len(students)
+                and weekly_test_count == len(students),
+            }
+        )
+    statuses.sort(key=lambda item: (item["period_id"], item["class_id"]))
+    return statuses, rosters
+
+
 def app_state() -> dict[str, Any]:
     state = DB.state()
+    period_statuses, period_rosters = period_input_matrix()
+    active_roster_ids: set[str] = set()
+    for class_item in state["classes"]:
+        active_roster_ids.update(
+            period_rosters.get(
+                (class_item["id"], str(class_item.get("selected_period_id") or "")),
+                set(),
+            )
+        )
+    state["students"] = [
+        student for student in state["students"] if student["id"] in active_roster_ids
+    ]
     google = google_connection_state()
     google_docs_ready = google["google_docs"]["status"] == "connected"
     state["connections"] = {
@@ -341,8 +501,8 @@ def app_state() -> dict[str, Any]:
     active_google_account = str(google["google_docs"].get("account_name") or "")
     for class_item in state["classes"]:
         template = class_template(class_item["id"])
-        example_folder = EXAMPLE_DIR / class_item["id"]
-        example_count = len(list(example_folder.glob("*.pdf"))) if example_folder.exists() else 0
+        examples = class_example_manifest(class_item["id"])
+        example_profile = example_analysis_profile(examples)
         missing = list(template.get("missing_required") or [])
         invalid = list(template.get("invalid_placeholders") or [])
         template_account = str(template.get("verified_account") or "")
@@ -373,7 +533,17 @@ def app_state() -> dict[str, Any]:
                 )
             ),
             "ready": ready,
-            "example_count": example_count,
+            "example_count": len(examples),
+            "examples": [
+                {
+                    "id": str(example.get("id") or ""),
+                    "filename": str(example.get("filename") or "Example report.pdf"),
+                    "uploaded_at": str(example.get("uploaded_at") or ""),
+                    "analysis": example.get("analysis") or {},
+                }
+                for example in examples
+            ],
+            "example_profile": example_profile,
             "last_tested_at": str(template.get("last_tested_at") or ""),
             "error": str(
                 template.get("error")
@@ -395,30 +565,31 @@ def app_state() -> dict[str, Any]:
         student["google_ready"] = google_docs_ready
         student["report_ready"] = bool(student["report_ready"] and google_docs_ready)
 
+    period_status_lookup = {
+        (item["class_id"], item["period_id"]): item for item in period_statuses
+    }
     data_status: list[dict[str, Any]] = []
     for class_item in state["classes"]:
         period_id = class_item.get("selected_period_id") or state.get("selected_period_id")
-        students = [
-            student
-            for student in state["students"]
-            if student["class_id"] == class_item["id"] and student.get("period_id") == period_id
-        ]
+        input_status = period_status_lookup.get((class_item["id"], period_id), {})
         data_status.append(
             {
                 "class_id": class_item["id"],
                 "period_id": period_id,
-                "student_count": len(students),
-                "assignment_count": sum(bool(item.get("assignment_ready")) for item in students),
-                "weekly_test_count": sum(bool(item.get("weekly_test_ready")) for item in students),
-                "comment_count": sum(bool(item.get("comments_ready")) for item in students),
-                "assignment_ready": bool(students) and all(item.get("assignment_ready") for item in students),
-                "weekly_test_ready": bool(students) and all(item.get("weekly_test_ready") for item in students),
-                "comments_ready": bool(students) and all(item.get("comments_ready") for item in students),
+                "student_count": int(input_status.get("student_count") or 0),
+                "assignment_count": int(input_status.get("assignment_count") or 0),
+                "weekly_test_count": int(input_status.get("weekly_test_count") or 0),
+                "comment_count": int(input_status.get("comment_count") or 0),
+                "assignment_ready": bool(input_status.get("assignment_ready")),
+                "weekly_test_ready": bool(input_status.get("weekly_test_ready")),
+                "comments_ready": bool(input_status.get("comments_ready")),
+                "comments_allowed": bool(input_status.get("comments_allowed")),
                 "template_ready": bool(template_lookup.get(class_item["id"], {}).get("ready")),
                 "google_ready": google_docs_ready,
             }
         )
     state["data_status"] = data_status
+    state["period_input_status"] = period_statuses
     state["sheet_sources"] = {
         kind: sheet_source(kind) for kind in ("assignment", "weekly_test", "comments")
     }
@@ -475,22 +646,207 @@ def _values_from_header_row(
     return values[header_row - 1 :], header_row
 
 
+_AUTOMATIC_SHEET_REQUIRED_FIELDS = {
+    "assignment": ("student_name", "class_name"),
+    "weekly_test": ("student_name", "class_name", "weekly_test_score"),
+    "comments": ("student_name", "class_name", "comment"),
+}
+
+_AUTOMATIC_SHEET_SCAN_ROWS = 50
+_AUTOMATIC_SHEET_MAX_HEADER_ROWS = 3
+
+
+def _is_assignment_date_header(value: Any) -> bool:
+    """Return whether a heading is a supported assignment date label."""
+
+    return parse_date_label(str(value or "").strip(), year=2000) is not None
+
+
+def _flatten_sheet_header_rows(rows: list[list[Any]]) -> list[str]:
+    """Combine a small multi-row heading into the single row imports consume.
+
+    Google Sheets represents merged cells only in their top-left position.  Choosing a
+    recognized combined label (``Class`` + ``Name``), the deepest recognized label, or
+    the original date spelling makes common grouped and two-tier headings importable
+    without changing what the preview shows.
+    """
+
+    width = max((len(row) for row in rows), default=0)
+    flattened: list[str] = []
+    for column in range(width):
+        parts = [
+            str(row[column]).strip()
+            for row in rows
+            if column < len(row) and str(row[column]).strip()
+        ]
+        if not parts:
+            flattened.append("")
+            continue
+        dated = [part for part in parts if _is_assignment_date_header(part)]
+        if dated:
+            flattened.append(dated[-1])
+            continue
+        distinct = list(dict.fromkeys(parts))
+        combined = " ".join(distinct)
+        if suggest_mapping([combined]):
+            flattened.append(combined)
+            continue
+        recognized = [part for part in distinct if suggest_mapping([part])]
+        flattened.append(recognized[-1] if recognized else combined)
+    return flattened
+
+
+def _automatic_sheet_candidate(
+    values: list[list[Any]], kind: str
+) -> dict[str, Any] | None:
+    required = _AUTOMATIC_SHEET_REQUIRED_FIELDS[kind]
+    candidates: list[dict[str, Any]] = []
+    for index, row in enumerate(values[:_AUTOMATIC_SHEET_SCAN_ROWS]):
+        if not any(str(cell or "").strip() for cell in row):
+            continue
+        maximum_depth = min(
+            _AUTOMATIC_SHEET_MAX_HEADER_ROWS,
+            len(values) - index - 1,
+        )
+        for header_depth in range(1, maximum_depth + 1):
+            headers = _flatten_sheet_header_rows(
+                [list(item) for item in values[index : index + header_depth]]
+            )
+            prepared_values = [headers] + [
+                list(item) for item in values[index + header_depth :]
+            ]
+            try:
+                preview = preview_table(prepared_values)
+            except IntegrationError:
+                continue
+            if not preview.get("row_count"):
+                continue
+            mapping = dict(preview.get("suggested_mapping") or {})
+            matched_required = sum(field in mapping for field in required)
+            dated_columns = sum(
+                _is_assignment_date_header(header) for header in preview["headers"]
+            )
+            assignment_values_found = kind != "assignment" or bool(
+                dated_columns
+                or mapping.get("assignment_percent")
+                or (
+                    mapping.get("assignment_completed")
+                    and mapping.get("assignment_total")
+                )
+            )
+            complete = matched_required == len(required) and assignment_values_found
+            score = (
+                int(complete),
+                matched_required,
+                int(assignment_values_found),
+                len(mapping),
+                dated_columns,
+                int(preview.get("row_count") or 0),
+                -header_depth,
+                -index,
+            )
+            candidates.append(
+                {
+                    "score": score,
+                    "values": prepared_values,
+                    "header_row": index + 1,
+                    "header_rows": header_depth,
+                    "preview": preview,
+                }
+            )
+    return max(candidates, key=lambda candidate: candidate["score"]) if candidates else None
+
+
+def _automatic_sheet_error(kind: str, *, found_table: bool) -> IntegrationError:
+    if not found_table:
+        return IntegrationError(
+            "Brightline could not find a usable header row in this spreadsheet.",
+            "automatic_sheet_detection_failed",
+        )
+    expected = {
+        "assignment": "Student name, Class name, and assignment completion",
+        "weekly_test": "Student name, Class name, and Weekly Test score",
+        "comments": "Student name, Class name, and Teacher comment",
+    }[kind]
+    return IntegrationError(
+        f"Brightline could not identify {expected} columns automatically. "
+        "Check the sheet headers and try again.",
+        "automatic_sheet_mapping_failed",
+    )
+
+
+def _automatic_sheet_values(
+    values: list[list[Any]], kind: str
+) -> tuple[list[list[Any]], int, dict[str, Any]]:
+    if kind not in _AUTOMATIC_SHEET_REQUIRED_FIELDS:
+        raise ValidationError(
+            "Choose Assignment, Weekly Test, or Comments before previewing the sheet."
+        )
+    candidate = _automatic_sheet_candidate(values, kind)
+    if not candidate or not candidate["score"][0]:
+        raise _automatic_sheet_error(kind, found_table=bool(candidate))
+    return candidate["values"], candidate["header_row"], candidate["preview"]
+
+
+def _automatic_workbook_sheet(
+    worksheets: list[dict[str, Any]],
+    kind: str,
+    preferred_worksheet: str = "",
+) -> tuple[dict[str, Any], list[list[Any]], int, dict[str, Any]]:
+    """Select the best automatically recognized table across all worksheet tabs."""
+
+    if kind not in _AUTOMATIC_SHEET_REQUIRED_FIELDS:
+        raise ValidationError(
+            "Choose Assignment, Weekly Test, or Comments before previewing the sheet."
+        )
+    found_table = False
+    complete: list[tuple[dict[str, Any], dict[str, Any], int]] = []
+    for order, worksheet in enumerate(worksheets):
+        candidate = _automatic_sheet_candidate(
+            list(worksheet.get("values") or []), kind
+        )
+        if not candidate:
+            continue
+        found_table = True
+        if candidate["score"][0]:
+            complete.append((worksheet, candidate, order))
+    if not complete:
+        raise _automatic_sheet_error(kind, found_table=found_table)
+
+    preferred = [
+        item
+        for item in complete
+        if str(item[0].get("worksheet") or item[0].get("title") or "")
+        == preferred_worksheet
+    ]
+    pool = preferred or complete
+    worksheet, candidate, _ = max(
+        pool,
+        key=lambda item: (item[1]["score"], -item[2]),
+    )
+    return (
+        worksheet,
+        candidate["values"],
+        candidate["header_row"],
+        candidate["preview"],
+    )
+
+
 def _assignment_values_from_dated_columns(
     values: list[list[Any]], mapping: dict[str, Any]
 ) -> tuple[list[list[Any]], dict[str, Any], list[str]]:
     if not values:
         raise ValidationError("The selected table is empty.")
     headers = [str(value).strip() for value in values[0]]
-    dated = [
-        header
-        for header in headers
-        if re.fullmatch(r"(?:\d{4}/)?\d{1,2}/\d{1,2}", header)
+    indices = [
+        index for index, header in enumerate(headers) if _is_assignment_date_header(header)
     ]
+    dated = [headers[index] for index in indices]
     if not dated:
         raise ValidationError(
-            "No dated assignment columns were found. Use headings such as 7/13 or 2026/7/13."
+            "No dated assignment columns were found. Use headings such as 7/13, "
+            "2026-07-13, 7.13, or 7월 13일."
         )
-    indices = [headers.index(header) for header in dated]
     completed_header = "__brightline_assignments_completed"
     total_header = "__brightline_assignments_total"
     excluded_header = "__brightline_assignments_excluded"
@@ -666,7 +1022,8 @@ def _resolve_existing_targets(
         attempted = int(student.get("homework_completed") or 0) + int(
             student.get("homework_incomplete") or 0
         )
-        if not attempted and student.get("homework_percent") is None:
+        excluded = int(student.get("homework_excluded") or 0)
+        if not attempted and not excluded and student.get("homework_percent") is None:
             raise ValidationError(
                 f"Assignment data for {record['student_name']} is missing in {period['label']}."
             )
@@ -816,6 +1173,14 @@ def import_mapped_table(
     ):
         values, mapping, _ = _assignment_values_from_dated_columns(values, mapping)
     records = mapped_records(values, mapping)
+    if kind == "comments":
+        comment_classes = {
+            normalize_value(str(record.get("class_name") or "")) for record in records
+        }
+        if len(comment_classes) > 1:
+            raise ValidationError(
+                "Each Comments file must contain exactly one class. Upload each class separately."
+            )
     if kind == "assignment" and not (
         {"assignment_completed", "assignment_total"}.issubset(mapping)
         or "assignment_percent" in mapping
@@ -1186,7 +1551,8 @@ def get_ready_student(student_id: str, period_id: str | None = None) -> dict[str
     attempted = int(payload.get("homework_completed") or 0) + int(
         payload.get("homework_incomplete") or 0
     )
-    if not attempted and payload.get("homework_percent") is None:
+    excluded = int(payload.get("homework_excluded") or 0)
+    if not attempted and not excluded and payload.get("homework_percent") is None:
         raise ValidationError("This student still needs Assignment data.")
     if not any(exam.get("score") is not None for exam in exams):
         raise ValidationError("This student still needs a Weekly Test score.")
@@ -1202,6 +1568,7 @@ def student_period_has_assignment_and_test(student_id: str, period_id: str) -> b
     has_assignment = bool(
         int(student.get("homework_completed") or 0)
         + int(student.get("homework_incomplete") or 0)
+        + int(student.get("homework_excluded") or 0)
         > 0
         or student.get("homework_percent") is not None
     )
@@ -1212,10 +1579,11 @@ def student_period_has_assignment_and_test(student_id: str, period_id: str) -> b
 
 
 def class_period_has_assignment_and_test(class_id: str, period_id: str) -> bool:
-    return any(
-        student_period_has_assignment_and_test(student["id"], period_id)
-        for student in DB.state()["students"]
-        if student["class_id"] == class_id
+    _, rosters = period_input_matrix()
+    student_ids = rosters.get((class_id, period_id), set())
+    return bool(student_ids) and all(
+        student_period_has_assignment_and_test(student_id, period_id)
+        for student_id in student_ids
     )
 
 
@@ -1275,27 +1643,54 @@ def generate_report(
 
 def generate_zip(class_id: str | None = None) -> tuple[Path | None, dict[str, Any], str]:
     state = app_state()
-    students = [
-        student
-        for student in state["students"]
-        if student.get("report_ready") and (class_id is None or student["class_id"] == class_id)
-    ]
-    if not students:
-        raise ValidationError("There are no report-ready students in this selection.")
     selected_class = None
     if class_id:
         selected_class = next((item for item in state["classes"] if item["id"] == class_id), None)
         if not selected_class:
             raise ValidationError("Class not found.")
+    students = [
+        student
+        for student in state["students"]
+        if class_id is None or student["class_id"] == class_id
+    ]
+    if not any(student.get("report_ready") for student in students):
+        raise ValidationError("There are no report-ready students in this selection.")
     archive_name = safe_filename(
         selected_class["name"] if selected_class else "all-class-reports", "class-reports"
     )
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     archive_path = EXPORT_DIR / f"{uuid.uuid4().hex}.zip"
     class_names = {item["id"]: item["name"] for item in state["classes"]}
-    manifest: dict[str, Any] = {"generated": [], "failed": []}
+    manifest: dict[str, Any] = {"generated": [], "failed": [], "skipped": []}
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for student in students:
+            if not student.get("report_ready"):
+                missing = [
+                    label
+                    for field, label in (
+                        ("assignment_ready", "Assignment data"),
+                        ("weekly_test_ready", "Weekly Test score"),
+                        ("comments_ready", "teacher comment"),
+                        ("template_ready", "class template"),
+                        ("google_ready", "Google output connection"),
+                    )
+                    if not student.get(field)
+                ]
+                manifest["skipped"].append(
+                    {
+                        "student_id": student["id"],
+                        "student": student["name"],
+                        "class_name": student["class_name"],
+                        "period_id": student.get("period_id") or "",
+                        "period_label": student.get("period_label") or "",
+                        "reason": (
+                            "Report is not ready: " + ", ".join(missing) + "."
+                            if missing
+                            else "Report readiness requirements were not met."
+                        ),
+                    }
+                )
+                continue
             try:
                 report_path = generate_report(student["id"], student.get("period_id"))
                 report_name = report_zip_member_name(student)
@@ -1653,7 +2048,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "state": app_state()})
                 return
             template_match = re.fullmatch(
-                r"/api/templates/([a-f0-9]+)/(connect|test|disconnect|example)", path
+                r"/api/templates/([a-f0-9]+)/(connect|test|disconnect|example|example-delete)", path
             )
             if template_match:
                 self._template_action(template_match.group(1), template_match.group(2), payload)
@@ -1689,12 +2084,14 @@ class AppHandler(BaseHTTPRequestHandler):
         self, archive: Path | None, manifest: dict[str, Any], filename: str
     ) -> None:
         payload = {
-            "ok": bool(archive) and not manifest["failed"],
-            "partial": bool(archive) and bool(manifest["failed"]),
+            "ok": bool(archive) and not manifest["failed"] and not manifest.get("skipped"),
+            "partial": bool(archive) and bool(manifest["failed"] or manifest.get("skipped")),
             "generated": manifest["generated"],
             "failed": manifest["failed"],
+            "skipped": manifest.get("skipped", []),
             "generated_count": len(manifest["generated"]),
             "failed_count": len(manifest["failed"]),
+            "skipped_count": len(manifest.get("skipped", [])),
             "download_url": f"/api/exports/{archive.name}" if archive else "",
             "filename": filename,
         }
@@ -1829,22 +2226,31 @@ class AppHandler(BaseHTTPRequestHandler):
     def _google_sheet_preview(self, payload: dict[str, Any]) -> None:
         if DB.get_setting("google_connection_disabled") == "1":
             raise ValidationError("Reconnect Google Workspace before reading Sheets.")
+        kind = str(payload.get("kind") or "")
         workspace = GoogleWorkspace.from_env()
-        result = workspace.read_sheet(
-            str(payload.get("spreadsheet") or ""), str(payload.get("worksheet") or "")
-        )
+        spreadsheet = str(payload.get("spreadsheet") or "")
+        requested_worksheet = str(payload.get("worksheet") or "")
+        if requested_worksheet:
+            result = workspace.read_sheet(spreadsheet, requested_worksheet)
+            tabs = result["tabs"]
+        else:
+            workbook = workspace.read_sheets(spreadsheet)
+            selected, _, _, _ = _automatic_workbook_sheet(
+                workbook["worksheets"], kind
+            )
+            result = workspace.read_sheet(
+                spreadsheet, str(selected.get("worksheet") or "")
+            )
+            tabs = workbook["tabs"]
         mark_google_service_verified("sheets", workspace)
-        values, header_row = _values_from_header_row(
-            result["values"], payload.get("header_row")
-        )
-        preview = preview_table(values)
+        _, header_row, preview = _automatic_sheet_values(result["values"], kind)
         self._send_json(
             {
                 **preview,
                 "spreadsheet_id": result["spreadsheet_id"],
                 "spreadsheet_name": result["spreadsheet_name"],
                 "worksheet": result["worksheet"],
-                "tabs": result["tabs"],
+                "tabs": tabs,
                 "header_row": header_row,
             }
         )
@@ -1855,14 +2261,21 @@ class AppHandler(BaseHTTPRequestHandler):
         kind = str(payload.get("kind") or "")
         period = period_from_payload(payload, allow_create=kind == "assignment")
         workspace = GoogleWorkspace.from_env()
-        result = workspace.read_sheet(
-            str(payload.get("spreadsheet") or ""), str(payload.get("worksheet") or "")
-        )
+        spreadsheet = str(payload.get("spreadsheet") or "")
+        preferred_worksheet = str(payload.get("worksheet") or "")
+        if preferred_worksheet:
+            result = workspace.read_sheet(spreadsheet, preferred_worksheet)
+        else:
+            workbook = workspace.read_sheets(spreadsheet)
+            selected, _, _, _ = _automatic_workbook_sheet(
+                workbook["worksheets"], kind
+            )
+            result = workspace.read_sheet(
+                spreadsheet, str(selected.get("worksheet") or "")
+            )
         mark_google_service_verified("sheets", workspace)
-        values, header_row = _values_from_header_row(
-            result["values"], payload.get("header_row")
-        )
-        mapping = dict(payload.get("mapping") or {})
+        values, header_row, preview = _automatic_sheet_values(result["values"], kind)
+        mapping = dict(preview.get("suggested_mapping") or {})
         summary = import_mapped_table(
             values=values,
             mapping=mapping,
@@ -1989,26 +2402,76 @@ class AppHandler(BaseHTTPRequestHandler):
             save_class_template(class_id, {})
             self._send_json({"ok": True, "state": app_state()})
             return
+        if action == "example-delete":
+            if payload.get("confirm") is not True:
+                raise ValidationError("Example report deletion confirmation is required.")
+            example_id = str(payload.get("example_id") or "")
+            examples = class_example_manifest(class_id)
+            selected = next((item for item in examples if item.get("id") == example_id), None)
+            if not selected:
+                raise ValidationError("Example report not found.")
+            folder = (EXAMPLE_DIR / class_id).resolve()
+            candidate = (folder / Path(str(selected.get("stored_name") or "")).name).resolve()
+            if candidate.parent != folder:
+                raise ValidationError("Example report path is invalid.")
+            candidate.unlink(missing_ok=True)
+            save_class_example_manifest(
+                class_id, [item for item in examples if item.get("id") != example_id]
+            )
+            self._send_json(
+                {"ok": True, "message": "Example report removed.", "state": app_state()}
+            )
+            return
         if action == "example":
             filename = safe_filename(str(payload.get("filename") or "example-report.pdf"))
             pdf_bytes = decode_base64(payload.get("pdf_base64"), "Example report")
             folder = EXAMPLE_DIR / class_id
             folder.mkdir(parents=True, exist_ok=True)
-            temporary = folder / f"{uuid.uuid4().hex}-{filename}"
+            digest = hashlib.sha256(pdf_bytes).hexdigest()
+            examples = class_example_manifest(class_id)
+            if any(item.get("sha256") == digest for item in examples):
+                raise ValidationError("This example report is already saved for the class.")
+            example_id = uuid.uuid4().hex
+            stored_name = f"{example_id}-{filename}"
+            temporary = folder / f".{example_id}.upload"
             temporary.write_bytes(pdf_bytes)
             try:
-                details = inspect_template(temporary)
+                analysis = inspect_example_report(temporary)
             except Exception:
                 temporary.unlink(missing_ok=True)
                 raise ValidationError("The example report is not a readable PDF.")
+            temporary.replace(folder / stored_name)
+            examples.append(
+                {
+                    "id": example_id,
+                    "filename": filename,
+                    "stored_name": stored_name,
+                    "sha256": digest,
+                    "byte_size": len(pdf_bytes),
+                    "uploaded_at": now_iso(),
+                    "analysis": analysis,
+                }
+            )
+            try:
+                save_class_example_manifest(class_id, examples)
+            except Exception:
+                (folder / stored_name).unlink(missing_ok=True)
+                raise
             DB.add_import(
                 filename,
                 "example_report",
                 "complete",
-                f"{details['pages']} page reference saved",
+                f"{analysis['page_count']} page example analyzed",
                 source_provider="manual",
             )
-            self._send_json({"ok": True, "state": app_state()})
+            self._send_json(
+                {
+                    "ok": True,
+                    "message": "Example report saved and analyzed.",
+                    "analysis": analysis,
+                    "state": app_state(),
+                }
+            )
             return
         current = class_template(class_id)
         document = str(payload.get("document") or current.get("document_id") or "")

@@ -1,3 +1,7 @@
+if (window.location.protocol === "file:") {
+  window.location.replace(`http://127.0.0.1:8000/${window.location.hash || "#inbox"}`);
+}
+
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 
@@ -10,6 +14,7 @@ const EMPTY_STATE = {
   reports: [],
   class_templates: [],
   data_status: [],
+  period_input_status: [],
   sheet_sources: {},
   connections: {},
   supported_placeholders: [],
@@ -23,6 +28,39 @@ let toastTimer;
 let selectedReportClass = "";
 let pendingExampleClass = "";
 let generationBusy = false;
+let uploadSession = null;
+const UPLOAD_DRAFT_PERIODS_KEY = "brightline.uploadDraftPeriods.v1";
+const UPLOAD_LAST_PERIOD_KEY = "brightline.uploadLastPeriod.v1";
+
+function readUploadDraftPeriods() {
+  try {
+    if (typeof sessionStorage === "undefined") return [];
+    const stored = JSON.parse(sessionStorage.getItem(UPLOAD_DRAFT_PERIODS_KEY) || "[]");
+    if (!Array.isArray(stored)) return [];
+    const seen = new Set();
+    return stored.slice(0, 100).flatMap(item => {
+      const id = String(item?.id || "").slice(0, 120);
+      const label = String(item?.label || "").trim().slice(0, 80);
+      if (!id || !label || seen.has(id)) return [];
+      seen.add(id);
+      const date = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || "")) ? String(value) : "";
+      return [{ id, label, start_date: date(item.start_date), end_date: date(item.end_date), draft: true }];
+    });
+  } catch (_error) {
+    return [];
+  }
+}
+
+function readLastUploadPeriodKey() {
+  try {
+    return typeof sessionStorage === "undefined" ? "" : String(sessionStorage.getItem(UPLOAD_LAST_PERIOD_KEY) || "");
+  } catch (_error) {
+    return "";
+  }
+}
+
+let uploadDraftPeriods = readUploadDraftPeriods();
+let lastUploadPeriodKey = readLastUploadPeriodKey();
 
 function normalizeState(payload = {}) {
   return {
@@ -61,6 +99,14 @@ function studentsForClass(id) { return state.students.filter(item => item.class_
 function templateForClass(id) { return state.class_templates.find(item => item.class_id === id); }
 function statusForClass(id, periodId = "") {
   return state.data_status.find(item => item.class_id === id && (!periodId || item.period_id === periodId)) || {};
+}
+
+function periodInputStatuses(periodId) {
+  return state.period_input_status.filter(item => item.period_id === periodId);
+}
+
+function statusForClassPeriod(classId, periodId) {
+  return state.period_input_status.find(item => item.class_id === classId && item.period_id === periodId) || {};
 }
 
 function periodOptions(selected = "", includeBlank = false) {
@@ -157,12 +203,14 @@ async function downloadGenerated(url, payload, filename) {
 
 function showArchiveResult(result) {
   const failures = result.failed || [];
-  if (!failures.length) {
+  const skipped = result.skipped || [];
+  if (!failures.length && !skipped.length) {
     toast(`${result.generated_count} reports generated and downloaded.`);
     return;
   }
-  const rows = failures.map(item => `<li><strong>${escapeHtml(item.student)}</strong><span>${escapeHtml(item.class_name || "")}</span><p>${escapeHtml(item.error)}</p></li>`).join("");
-  openModal(`<span class="eyebrow">GENERATION RESULT</span><h2>${result.generated_count || 0} generated · ${result.failed_count || failures.length} failed</h2><p>${result.generated_count ? "The successful PDFs were downloaded. Review the students that need attention below." : "No ZIP was downloaded because every report failed."}</p><ul class="generation-errors">${rows}</ul><div class="modal-footer"><button class="primary-button" data-close-modal>Done</button></div>`);
+  const rows = [...failures.map(item => ({ ...item, reason: item.error, status: "Failed" })), ...skipped.map(item => ({ ...item, status: "Skipped" }))]
+    .map(item => `<li><strong>${escapeHtml(item.student)}</strong><span>${escapeHtml(item.class_name || "")} · ${item.status}</span><p>${escapeHtml(item.reason)}</p></li>`).join("");
+  openModal(`<span class="eyebrow">GENERATION RESULT</span><h2>${result.generated_count || 0} generated · ${result.skipped_count || skipped.length} skipped · ${result.failed_count || failures.length} failed</h2><p>${result.generated_count ? "The successful PDFs were downloaded. Every roster student is accounted for below and in generation-summary.json." : "No ZIP was downloaded because no report could be generated."}</p><ul class="generation-errors">${rows}</ul><div class="modal-footer"><button class="primary-button" data-close-modal>Done</button></div>`);
 }
 
 async function generateArchive(url, fallbackFilename) {
@@ -225,15 +273,71 @@ function toast(message, type = "success") {
   toastTimer = setTimeout(() => element.classList.add("hidden"), 4200);
 }
 
+let lockedPageScroll = null;
+
+function lockPageScroll() {
+  if (lockedPageScroll) return;
+  const appShell = $("#app-shell");
+  lockedPageScroll = {
+    x: window.scrollX,
+    y: window.scrollY,
+    activeElement: document.activeElement instanceof HTMLElement ? document.activeElement : null,
+    bodyTop: document.body.style.top,
+    bodyLeft: document.body.style.left,
+    scrollbarWidth: document.body.style.getPropertyValue("--modal-scrollbar-width"),
+    appShellWasInert: appShell.inert,
+  };
+  const scrollbarWidth = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+  document.body.style.setProperty("--modal-scrollbar-width", `${scrollbarWidth}px`);
+  document.documentElement.classList.add("modal-open");
+  document.body.classList.add("modal-open");
+  document.body.style.top = `-${lockedPageScroll.y}px`;
+  document.body.style.left = `-${lockedPageScroll.x}px`;
+  appShell.inert = true;
+}
+
+function unlockPageScroll() {
+  if (!lockedPageScroll) return;
+  const scrollLock = lockedPageScroll;
+  lockedPageScroll = null;
+  document.documentElement.classList.remove("modal-open");
+  document.body.classList.remove("modal-open");
+  if (scrollLock.bodyTop) document.body.style.top = scrollLock.bodyTop;
+  else document.body.style.removeProperty("top");
+  if (scrollLock.bodyLeft) document.body.style.left = scrollLock.bodyLeft;
+  else document.body.style.removeProperty("left");
+  if (scrollLock.scrollbarWidth) document.body.style.setProperty("--modal-scrollbar-width", scrollLock.scrollbarWidth);
+  else document.body.style.removeProperty("--modal-scrollbar-width");
+  $("#app-shell").inert = scrollLock.appShellWasInert;
+  const previousScrollBehavior = document.documentElement.style.scrollBehavior;
+  document.documentElement.style.scrollBehavior = "auto";
+  window.scrollTo(scrollLock.x, scrollLock.y);
+  document.documentElement.style.scrollBehavior = previousScrollBehavior;
+  requestAnimationFrame(() => {
+    if (scrollLock.activeElement?.isConnected) scrollLock.activeElement.focus({ preventScroll: true });
+  });
+}
+
 function openModal(html) {
+  lockPageScroll();
+  $("#modal").className = "modal";
   $("#modal").innerHTML = html;
+  $("#modal").scrollTop = 0;
   $("#modal-backdrop").classList.remove("hidden");
   requestAnimationFrame(() => $("#modal").querySelector("input, select, button")?.focus());
 }
 
 function closeModal() {
+  if (uploadSession) {
+    captureUploadFields();
+    if (uploadSession.periodKey) lastUploadPeriodKey = uploadSession.periodKey;
+    persistUploadDraftPeriods();
+  }
+  uploadSession = null;
   $("#modal-backdrop").classList.add("hidden");
+  $("#modal").className = "modal";
   $("#modal").innerHTML = "";
+  unlockPageScroll();
 }
 
 function emptyState(title, copy, large = false) {
@@ -265,9 +369,11 @@ function renderPeriods() {
 }
 
 function renderSourceStatuses() {
-  const assignmentReady = state.data_status.some(item => item.assignment_count > 0);
-  const testsReady = state.data_status.some(item => item.weekly_test_count > 0);
-  const commentsReady = state.data_status.some(item => item.comment_count > 0);
+  const periodId = state.selected_period_id || state.periods[0]?.id || "";
+  const current = periodInputStatuses(periodId);
+  const assignmentReady = current.some(item => item.assignment_count > 0);
+  const testsReady = current.some(item => item.weekly_test_count > 0);
+  const commentsReady = current.some(item => item.comment_count > 0);
   const statuses = [
     ["#assignment-source-status", assignmentReady, assignmentReady ? "Imported" : "Start here"],
     ["#test-source-status", testsReady, testsReady ? "Imported" : "After assignment"],
@@ -325,15 +431,17 @@ function renderIssues() {
 function renderTemplates() {
   const body = $("#templates-table");
   if (!state.classes.length) {
-    body.innerHTML = `<tr><td colspan="6">${emptyState("No classes yet", "Import Assignment data first; classes appear here automatically.", true)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="2">${emptyState("No classes yet", "Import Assignment data first; classes appear here automatically.", true)}</td></tr>`;
     return;
   }
   body.innerHTML = state.classes.map(classItem => {
     const template = templateForClass(classItem.id) || {};
-    const placeholders = template.placeholders || [];
-    const statusClass = template.status === "ready" ? "" : template.status === "missing" ? "neutral" : "warn";
-    const statusLabel = template.status === "ready" ? "Ready" : template.status === "needs_test" ? "Retest" : template.status === "needs_mapping" ? "Needs fields" : "Not connected";
-    return `<tr><td><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.teacher || "Teacher not set")}</small></td><td class="template-name">${template.document_id ? `<a href="${escapeHtml(template.url)}" target="_blank" rel="noopener">${escapeHtml(template.name || "Google Docs template")}</a><small>Last checked ${escapeHtml(formatDateTime(template.last_tested_at))}</small>` : '<strong>No Google Doc</strong><small>Paste a template link to connect</small>'}</td><td><strong>${template.example_count || 0} PDF${template.example_count === 1 ? "" : "s"}</strong><small>Reference only</small></td><td><div class="placeholder-list">${placeholders.length ? placeholders.slice(0, 5).map(name => `<span class="placeholder-chip">{{${escapeHtml(name)}}}</span>`).join("") : '<span class="muted">No fields checked</span>'}</div></td><td><span class="status-pill ${statusClass}">${statusLabel}</span>${template.missing_required?.length ? `<small>Missing ${escapeHtml(template.missing_required.join(", "))}</small>` : template.error ? `<small>${escapeHtml(template.error)}</small>` : ""}</td><td><div class="table-actions"><button class="table-action" data-template-connect="${classItem.id}">${template.document_id ? "Replace" : "Connect"}</button><button class="table-action" data-template-test="${classItem.id}" ${template.document_id ? "" : "disabled"}>Test</button><button class="table-action" data-template-example="${classItem.id}">Add example</button><button class="table-action" data-template-map="${classItem.id}">Fields</button>${template.document_id ? `<button class="table-action" data-template-disconnect="${classItem.id}">Disconnect</button>` : ""}</div></td></tr>`;
+    const profile = template.example_profile || {};
+    const exampleCount = template.example_count || 0;
+    const sampleSummary = exampleCount
+      ? `${profile.multi_page_count || 0} multi-page · ${profile.image_xobject_count || 0} image/graph region${profile.image_xobject_count === 1 ? "" : "s"}`
+      : "Upload a completed PDF report for this class.";
+    return `<tr><td class="template-class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.teacher || "Teacher not set")}</small></td><td class="template-sample-cell"><div class="template-sample-layout"><div class="template-sample-summary"><strong>${exampleCount ? `${exampleCount} sample report${exampleCount === 1 ? "" : "s"}` : "No sample report uploaded"}</strong><small>${escapeHtml(sampleSummary)}</small></div><div class="template-sample-actions"><button class="table-action" type="button" data-template-example="${classItem.id}">Upload sample report</button>${exampleCount ? `<button class="table-action" type="button" data-template-analysis="${classItem.id}">View uploaded report${exampleCount === 1 ? "" : "s"}</button>` : ""}</div></div></td></tr>`;
   }).join("");
 }
 
@@ -437,6 +545,7 @@ function render() {
 async function loadState() {
   try {
     state = normalizeState(await api("/api/state"));
+    reconcileUploadDraftPeriods();
     render();
   } catch (error) {
     toast(error.message, "error");
@@ -451,6 +560,460 @@ function arrayBufferToBase64(buffer) {
   const chunkSize = 0x8000;
   for (let index = 0; index < bytes.length; index += chunkSize) binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
   return btoa(binary);
+}
+
+const UPLOAD_COPY = {
+  assignment: {
+    eyebrow: "ASSIGNMENT",
+    title: "Upload assignment completion",
+    copy: "Add the class roster and assignment completion for the selected week.",
+    manual: "Upload CSV",
+  },
+  weekly_test: {
+    eyebrow: "WEEKLY TEST",
+    title: "Upload weekly test scores",
+    copy: "Scores are matched only to students in the selected week's Assignment roster.",
+    manual: "Upload CSV",
+  },
+  comments: {
+    eyebrow: "COMMENTS",
+    title: "Upload student comments",
+    copy: "Use a CSV or Google Sheet, or one class-specific searchable PDF.",
+    manual: "Upload CSV or PDF",
+  },
+};
+
+function persistUploadDraftPeriods() {
+  try {
+    if (typeof sessionStorage === "undefined") return;
+    sessionStorage.setItem(UPLOAD_DRAFT_PERIODS_KEY, JSON.stringify(uploadDraftPeriods));
+    if (lastUploadPeriodKey) sessionStorage.setItem(UPLOAD_LAST_PERIOD_KEY, lastUploadPeriodKey);
+  } catch (_error) {
+    // Uploads still work when browser storage is unavailable; only draft week persistence is skipped.
+  }
+}
+
+function normalizedPeriodLabel(period) {
+  return String(period?.label || "").trim().toLocaleLowerCase();
+}
+
+function matchingSavedPeriod(draft) {
+  const label = normalizedPeriodLabel(draft);
+  return state.periods.find(period => {
+    const sameDates = draft.start_date && draft.end_date
+      && period.start_date === draft.start_date && period.end_date === draft.end_date;
+    return sameDates || (label && normalizedPeriodLabel(period) === label);
+  }) || null;
+}
+
+function reconcileUploadDraftPeriods() {
+  for (let index = uploadDraftPeriods.length - 1; index >= 0; index -= 1) {
+    const draft = uploadDraftPeriods[index];
+    const saved = matchingSavedPeriod(draft);
+    if (!saved) continue;
+    if (lastUploadPeriodKey === draft.id) lastUploadPeriodKey = saved.id;
+    uploadDraftPeriods.splice(index, 1);
+  }
+  let previous = state.periods.filter(period => period.end_date).sort((a, b) => a.end_date.localeCompare(b.end_date)).at(-1) || null;
+  for (const draft of uploadDraftPeriods) {
+    if (!draft.start_date || !draft.end_date) Object.assign(draft, nextWeekDates(previous));
+    previous = draft;
+  }
+  persistUploadDraftPeriods();
+}
+
+function nextWeekNumber() {
+  const knownPeriods = [
+    ...state.periods,
+    ...(uploadSession?.draftPeriods || uploadDraftPeriods),
+  ];
+  return Math.max(knownPeriods.length, ...knownPeriods.map(period => Number.parseInt(String(period.label || "").match(/\bweek\s+(\d+)\b/i)?.[1] || "0", 10))) + 1;
+}
+
+function nextWeekDates(previousPeriod = null) {
+  const latestEnd = previousPeriod?.end_date || state.periods.map(period => period.end_date).filter(Boolean).sort().at(-1);
+  let start;
+  if (latestEnd) {
+    start = new Date(`${latestEnd}T00:00:00Z`);
+    if (Number.isNaN(start.valueOf())) start = null;
+    else start.setUTCDate(start.getUTCDate() + 1);
+  }
+  if (!start) {
+    const today = new Date();
+    start = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+    start.setUTCDate(start.getUTCDate() - ((today.getDay() + 6) % 7));
+  }
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 6);
+  return { start_date: start.toISOString().slice(0, 10), end_date: end.toISOString().slice(0, 10) };
+}
+
+function createDraftWeek(previousPeriod = null) {
+  const number = nextWeekNumber();
+  const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return { id: `draft-week-${number}-${suffix}`, label: `Week ${number}`, ...nextWeekDates(previousPeriod), draft: true };
+}
+
+function uploadTargetPeriod() {
+  if (!uploadSession) return null;
+  const draft = uploadSession.draftPeriods.find(period => period.id === uploadSession.periodKey);
+  if (draft) return draft;
+  return periodById(uploadSession.periodKey) || null;
+}
+
+function currentUploadStage() {
+  return uploadSession?.stage || null;
+}
+
+function setUploadStage(stage) {
+  if (uploadSession) uploadSession.stage = stage || null;
+}
+
+function uploadPrerequisite() {
+  const target = uploadTargetPeriod();
+  const kind = uploadSession?.kind;
+  if (!target) return { ready: false, message: "Upload a source now or choose a week first. A week is required before Save." };
+  if (kind === "assignment") {
+    return { ready: true, message: target.draft ? "This week will be created only when Assignment is saved." : "Assignment can add or update this week's roster." };
+  }
+  if (target.draft) {
+    return { ready: false, message: `Import Assignment for ${target.label} before adding ${kind === "weekly_test" ? "Weekly Test" : "Comments"} data.` };
+  }
+  const statuses = periodInputStatuses(target.id);
+  if (kind === "weekly_test") {
+    const ready = statuses.some(item => item.assignment_ready);
+    return { ready, message: ready ? "Assignment data is ready. Every score must match this week's roster." : `Import Assignment for ${target.label} before Weekly Test.` };
+  }
+  const eligible = statuses.filter(item => item.comments_allowed);
+  return {
+    ready: Boolean(eligible.length),
+    message: eligible.length
+      ? `${eligible.length} class${eligible.length === 1 ? " is" : "es are"} ready for Comments. Every imported student must already have Assignment and Weekly Test data.`
+      : `Import both Assignment and Weekly Test for ${target.label} before Comments.`,
+  };
+}
+
+function captureUploadFields() {
+  const stage = currentUploadStage();
+  const label = $("#upload-period-label");
+  const start = $("#upload-period-start");
+  const end = $("#upload-period-end");
+  const target = uploadTargetPeriod();
+  if (target?.draft) {
+    if (label) target.label = label.value.trim() || target.label;
+    if (start) target.start_date = start.value;
+    if (end) target.end_date = end.value;
+    persistUploadDraftPeriods();
+  }
+  if (!stage) return;
+  const mappingSelects = $$('[data-upload-map-field]');
+  if (mappingSelects.length) {
+    const visibleFields = new Set(mappingSelects.map(select => select.dataset.uploadMapField));
+    const retainedMapping = Object.fromEntries(
+      Object.entries(stage.mapping || {}).filter(([field]) => !visibleFields.has(field)),
+    );
+    const visibleMapping = Object.fromEntries(
+      mappingSelects.filter(select => select.value).map(select => [select.dataset.uploadMapField, select.value]),
+    );
+    stage.mapping = { ...retainedMapping, ...visibleMapping };
+  }
+  if (stage.mode === "comments_pdf") {
+    const classSelect = $("#upload-comments-class");
+    const commentLabel = $("#upload-comments-label");
+    if (classSelect) stage.classId = classSelect.value;
+    if (commentLabel) stage.label = commentLabel.value.trim();
+  }
+}
+
+function uploadMappingSelect(field, preview, selected, required) {
+  const options = preview.headers.map((header, index) => {
+    const examples = [...new Set(preview.sample_rows.map(row => String(row[index] || "").trim()).filter(Boolean))]
+      .slice(0, 2)
+      .map(value => value.length > 30 ? `${value.slice(0, 29)}…` : value)
+      .join(", ");
+    return `<option value="${escapeHtml(header)}" ${header === selected ? "selected" : ""}>${escapeHtml(examples ? `${header} — ${examples}` : header)}</option>`;
+  }).join("");
+  return `<label class="${required ? "required" : ""}"><span>${escapeHtml(FIELD_LABELS[field])}</span><select data-upload-map-field="${field}"><option value="">Not used</option>${options}</select></label>`;
+}
+
+function uploadStageEditor() {
+  const stage = currentUploadStage();
+  const target = uploadTargetPeriod();
+  if (!stage) return '<div class="staged-source-empty">No source selected. Choose Google Sheets or a local file above.</div>';
+  if (stage.mode === "legacy_assignment") {
+    const options = stage.inspection.dates.map(item => `<option value="${item.iso}">${escapeHtml(item.label)} · ${item.iso}</option>`).join("");
+    const periodFields = target?.draft
+      ? `<label><span>Week name</span><input id="upload-period-label" value="${escapeHtml(target.label)}" required /></label><div class="form-grid"><label><span>Start date</span><select id="upload-period-start" required>${options}</select></label><label><span>End date</span><select id="upload-period-end" required>${options}</select></label></div>`
+      : `<div class="safety-note">This file will update <strong>${escapeHtml(target?.label || "the selected week")}</strong> (${escapeHtml(target?.start_date || "")}–${escapeHtml(target?.end_date || "")}).</div>`;
+    return `<div class="safety-note">Detected ${stage.inspection.record_count} student-class records across ${stage.inspection.class_count} classes. A/B are completed, F is incomplete, and X or blank is excluded.</div>${periodFields}`;
+  }
+  if (stage.mode === "comments_pdf") {
+    const eligibleClasses = state.classes.filter(item => statusForClassPeriod(item.id, target?.id || "").comments_allowed);
+    return `<div class="form-grid"><label><span>Class in this PDF</span><select id="upload-comments-class" required><option value="">Choose a ready class</option>${eligibleClasses.map(item => `<option value="${item.id}" ${item.id === stage.classId ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}</select></label><label><span>Comment label</span><input id="upload-comments-label" value="${escapeHtml(stage.label)}" required /></label></div><div class="safety-note">A Comments PDF represents one class. Uncertain student names go to the review queue; scores found in the PDF are ignored.</div>`;
+  }
+  if (stage.mode === "google_sheet") {
+    stage.previewRowsShown = Math.min(
+      stage.preview.sample_rows.length,
+      stage.previewRowsShown || SHEET_PREVIEW_RENDER_CHUNK,
+    );
+    return sampleTable(stage.preview, {
+      worksheet: stage.worksheet,
+      itemLabel: "student rows",
+      progressive: true,
+      visibleRows: stage.previewRowsShown,
+    });
+  }
+  const required = requiredFields(uploadSession.kind);
+  const fields = fieldsForKind(uploadSession.kind);
+  const suggested = { ...(stage.preview.suggested_mapping || {}), ...(state.sheet_sources[uploadSession.kind]?.mapping || {}), ...(stage.mapping || {}) };
+  const datedColumns = stage.preview.headers.filter(header => /^(?:\d{4}\/)?\d{1,2}\/\d{1,2}$/.test(header));
+  const assignmentNote = uploadSession.kind === "assignment" && datedColumns.length
+    ? `<div class="safety-note">Assignments missed will be counted from <strong>F</strong> across ${datedColumns.length} dated column${datedColumns.length === 1 ? "" : "s"}.</div>`
+    : "";
+  const periodFields = target?.draft
+    ? `<label><span>Week name</span><input id="upload-period-label" value="${escapeHtml(target.label)}" required /></label><div class="form-grid"><label><span>Start date</span><input id="upload-period-start" type="date" value="${escapeHtml(target.start_date || "")}" required /></label><label><span>End date</span><input id="upload-period-end" type="date" value="${escapeHtml(target.end_date || "")}" required /></label></div>`
+    : "";
+  return `${sampleTable(stage.preview)}<div class="mapping-grid">${fields.map(field => uploadMappingSelect(field, stage.preview, suggested[field] || "", required.includes(field))).join("")}</div>${assignmentNote}${periodFields}`;
+}
+
+function stagedSourceRow() {
+  const stage = currentUploadStage();
+  if (!stage) return "";
+  const target = uploadTargetPeriod();
+  const extension = stage.mode === "google_sheet" ? "GS" : stage.mode === "comments_pdf" ? "PDF" : "CSV";
+  const source = stage.mode === "google_sheet" ? "Google Sheets" : "Local file";
+  return `<div class="staged-source-list"><div class="staged-source-row"><span class="staged-source-icon">${extension}</span><div class="staged-source-details"><strong>${escapeHtml(stage.name)}</strong><small>${source} · staged, not imported</small></div><span class="staged-source-meta">${escapeHtml(target?.label || "Choose week")}</span><button class="staged-source-remove" type="button" data-upload-remove aria-label="Remove staged source">×</button></div></div>`;
+}
+
+function sheetSourceForm() {
+  if (uploadSession?.view !== "sheet") return "";
+  const saved = state.sheet_sources[uploadSession.kind] || {};
+  return `<div class="source-note"><span>Google Sheet</span><strong>Preview a sheet to stage it</strong><small>Previewing does not import student data.</small></div><label><span>Google Sheets URL or ID</span><input id="upload-sheet-url" value="${escapeHtml(saved.spreadsheet_id || "")}" placeholder="https://docs.google.com/spreadsheets/d/..." required /></label><div class="button-row"><button class="primary-button" type="button" data-upload-sheet-preview>Preview and stage Sheet</button><button class="secondary-button" type="button" data-upload-sheet-cancel>Back</button></div>`;
+}
+
+function renderUploadModal() {
+  if (!uploadSession) return;
+  const copy = UPLOAD_COPY[uploadSession.kind];
+  const target = uploadTargetPeriod();
+  const prerequisite = uploadPrerequisite();
+  const stage = currentUploadStage();
+  if (uploadSession.confirming && stage && target) {
+    const kindLabel = { assignment: "Assignment", weekly_test: "Weekly Test", comments: "Comments" }[uploadSession.kind];
+    openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">CONFIRM UPLOAD</span><h2>Check the source and week</h2><p>Nothing has been imported yet. Review these details before continuing.</p></div><div class="upload-modal-controls"><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving">×</button></div></div><div class="upload-confirmation-summary"><div><span>Source</span><strong>${escapeHtml(stage.name)}</strong></div><div><span>Data type</span><strong>${escapeHtml(kindLabel)}</strong></div><div><span>Week</span><strong>${escapeHtml(target.label)}</strong></div></div><div class="safety-note">Choose Go back if the source or week is not correct. Confirm upload will import this source only for the week shown above.</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button" type="button" data-upload-confirm>Confirm upload</button><button class="secondary-button upload-cancel-button" type="button" data-upload-confirm-back>Go back</button><span class="upload-modal-footer-note">This is the final check before data is imported.</span></div>`);
+    $("#modal").classList.add("upload-modal");
+    return;
+  }
+  const weekOptions = [...state.periods, ...uploadSession.draftPeriods]
+    .map(period => `<option value="${period.id}" ${period.id === uploadSession.periodKey ? "selected" : ""}>${escapeHtml(period.label)}</option>`)
+    .join("");
+  const manualDetail = uploadSession.kind === "comments" ? "CSV or one class PDF" : "CSV file";
+  const saveDisabled = !stage || !target || !prerequisite.ready || uploadSession.saving;
+  const sourceDisabled = uploadSession.saving;
+  openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">${copy.eyebrow}</span><h2>${copy.title}</h2><p>${copy.copy}</p></div><div class="upload-modal-controls"><label class="upload-week-control"><span>Week</span><select id="upload-week-select" aria-label="Week" ${uploadSession.saving ? "disabled" : ""}>${weekOptions}</select></label><button class="upload-add-week" type="button" data-upload-add-week ${uploadSession.saving ? "disabled" : ""}>+ Add week</button><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving" ${uploadSession.saving ? "disabled" : ""}>×</button></div></div><div class="upload-modal-body"><div class="upload-prerequisite-copy ${prerequisite.ready ? "ready" : ""}"><span>${prerequisite.ready ? "✓" : "!"}</span><div>${escapeHtml(prerequisite.message)}</div></div><div class="upload-source-choices"><button class="upload-source-choice" type="button" data-upload-google ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">GS</span><span><strong>Import Google Sheet</strong><small>Preview the sheet before saving.</small></span></button><button class="upload-source-choice" type="button" data-upload-manual ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">FILE</span><span><strong>${copy.manual}</strong><small>${manualDetail}; held locally until Save.</small></span></button></div>${sheetSourceForm()}${stagedSourceRow()}${uploadStageEditor()}</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button ${saveDisabled ? "disabled" : ""}" type="button" data-upload-save ${saveDisabled ? "disabled" : ""}>${uploadSession.saving ? "Saving…" : "Save"}</button><button class="secondary-button upload-cancel-button" type="button" data-close-modal ${uploadSession.saving ? "disabled" : ""}>Cancel</button><span class="upload-modal-footer-note">Closing without Save discards the staged source. Added week options remain for this browser session.</span></div>`);
+  $("#modal").classList.add("upload-modal");
+  if (stage?.mode === "legacy_assignment" && target?.draft) {
+    $("#upload-period-start").value = target.start_date || stage.inspection.dates[0]?.iso || "";
+    $("#upload-period-end").value = target.end_date || stage.inspection.dates.at(-1)?.iso || "";
+  }
+  bindSamplePreviewScroll();
+}
+
+function openUploadModal(kind) {
+  if (!UPLOAD_COPY[kind]) return;
+  reconcileUploadDraftPeriods();
+  if (!state.periods.length && !uploadDraftPeriods.length) {
+    uploadDraftPeriods.push(createDraftWeek());
+    persistUploadDraftPeriods();
+  }
+  const existingPeriod = periodById(state.selected_period_id) || state.periods[0];
+  const availablePeriods = [...state.periods, ...uploadDraftPeriods];
+  const preferredPeriod = availablePeriods.find(period => period.id === lastUploadPeriodKey);
+  uploadSession = {
+    kind,
+    periodKey: preferredPeriod?.id || existingPeriod?.id || uploadDraftPeriods[0]?.id || "",
+    draftPeriods: uploadDraftPeriods,
+    stage: null,
+    view: "sources",
+    confirming: false,
+    saving: false,
+  };
+  renderUploadModal();
+}
+
+function addUploadWeek() {
+  if (!uploadSession) return;
+  captureUploadFields();
+  const previousDraft = uploadDraftPeriods.at(-1) || null;
+  const draft = createDraftWeek(previousDraft);
+  uploadDraftPeriods.push(draft);
+  uploadSession.periodKey = draft.id;
+  lastUploadPeriodKey = draft.id;
+  persistUploadDraftPeriods();
+  renderUploadModal();
+}
+
+async function stageManualUpload(file) {
+  if (!file || !uploadSession) return;
+  const session = uploadSession;
+  try {
+    if (session.kind === "comments" && (/\.pdf$/i.test(file.name) || file.type === "application/pdf")) {
+      session.stage = { mode: "comments_pdf", name: file.name, file, classId: "", label: file.name.replace(/\.pdf$/i, "") };
+    } else {
+      const text = await file.text();
+      if (session.kind === "assignment") {
+        try {
+          const inspection = await api("/api/csv/inspect", { method: "POST", body: JSON.stringify({ text }) });
+          if (uploadSession !== session) return;
+          session.stage = { mode: "legacy_assignment", name: file.name, text, inspection };
+        } catch (_inspectionError) {
+          const preview = await api("/api/tabular/preview", { method: "POST", body: JSON.stringify({ text }) });
+          if (uploadSession !== session) return;
+          session.stage = { mode: "mapped_csv", name: file.name, text, preview, mapping: { ...(preview.suggested_mapping || {}) } };
+        }
+      } else {
+        const preview = await api("/api/tabular/preview", { method: "POST", body: JSON.stringify({ text }) });
+        if (uploadSession !== session) return;
+        session.stage = { mode: "mapped_csv", name: file.name, text, preview, mapping: { ...(preview.suggested_mapping || {}) } };
+      }
+    }
+    session.view = "sources";
+    renderUploadModal();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function beginGoogleUpload() {
+  if (!uploadSession) return;
+  const connection = state.connections.google_sheets || {};
+  if (!connection.configured || connection.status === "disconnected") {
+    closeModal();
+    toast("Connect and test your Google account first.", "error");
+    go("connections");
+    return;
+  }
+  captureUploadFields();
+  uploadSession.view = "sheet";
+  renderUploadModal();
+}
+
+async function previewUploadSheet() {
+  if (!uploadSession) return;
+  const session = uploadSession;
+  const spreadsheet = $("#upload-sheet-url")?.value.trim();
+  if (!spreadsheet) return toast("Enter a Google Sheets URL or ID.", "error");
+  try {
+    const preview = await api("/api/google/sheets/preview", { method: "POST", body: JSON.stringify({ spreadsheet, kind: session.kind }) });
+    if (uploadSession !== session) return;
+    session.stage = {
+      mode: "google_sheet",
+      name: `${preview.spreadsheet_name} · ${preview.worksheet}`,
+      spreadsheet,
+      worksheet: preview.worksheet,
+      preview,
+    };
+    session.view = "sources";
+    renderUploadModal();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function saveUpload(confirmed = false) {
+  if (!uploadSession || uploadSession.saving) return;
+  captureUploadFields();
+  const session = uploadSession;
+  const stage = currentUploadStage();
+  if (!stage) return toast("Choose a file or Google Sheet before saving.", "error");
+  const target = uploadTargetPeriod();
+  if (!target) return toast("Choose a reporting week before saving.", "error");
+  const prerequisite = uploadPrerequisite();
+  if (!prerequisite.ready) return toast(prerequisite.message, "error");
+  let period;
+  if (target?.draft) {
+    if (session.kind !== "assignment") return toast(`Import Assignment for ${target.label} first.`, "error");
+    if (!target.start_date || !target.end_date) return toast("Choose the new week's start and end dates.", "error");
+    if (target.start_date > target.end_date) return toast("The week start must be before its end.", "error");
+    period = { period_label: target.label, period_start: target.start_date, period_end: target.end_date };
+  } else if (target) {
+    period = { period_id: target.id };
+  } else {
+    return toast("Choose a reporting week.", "error");
+  }
+
+  let url;
+  let payload;
+  if (stage.mode === "legacy_assignment") {
+    url = "/api/csv/import";
+    payload = {
+      filename: stage.name,
+      text: stage.text,
+      period_label: target.label,
+      period_start: target.start_date,
+      period_end: target.end_date,
+    };
+  } else if (stage.mode === "comments_pdf") {
+    if (!stage.classId) return toast("Choose the class represented by this Comments PDF.", "error");
+    if (!stage.label) return toast("Enter a comment label.", "error");
+    url = "/api/comments/pdf/import";
+    payload = {
+      filename: stage.name,
+      class_id: stage.classId,
+      period_id: target.id,
+      label: stage.label,
+    };
+  } else if (stage.mode === "google_sheet") {
+    url = "/api/google/sheets/sync";
+    payload = { kind: session.kind, spreadsheet: stage.spreadsheet, worksheet: stage.worksheet, ...period };
+  } else {
+    const required = requiredFields(session.kind);
+    const missing = required.filter(field => !stage.mapping?.[field]);
+    if (missing.length) return toast(`Map ${FIELD_LABELS[missing[0]]} before saving.`, "error");
+    url = "/api/tabular/import";
+    payload = { kind: session.kind, filename: stage.name, text: stage.text, mapping: stage.mapping, ...period };
+  }
+
+  if (!confirmed) {
+    session.confirming = true;
+    renderUploadModal();
+    return;
+  }
+
+  session.confirming = false;
+  session.saving = true;
+  renderUploadModal();
+  try {
+    if (stage.mode === "comments_pdf") {
+      payload.pdf_base64 = arrayBufferToBase64(await stage.file.arrayBuffer());
+      if (uploadSession !== session) return;
+    }
+    let result;
+    try {
+      result = await api(url, { method: "POST", body: JSON.stringify(payload) });
+    } catch (error) {
+      if (error.code !== "replacement_confirmation_required" || !confirm(`${error.message}\n\nReplace the existing data?`)) throw error;
+      result = await api(url, { method: "POST", body: JSON.stringify({ ...payload, confirm_replace: true }) });
+    }
+    if (uploadSession !== session) return;
+    state = normalizeState(result.state);
+    if (target.draft) {
+      const savedPeriod = matchingSavedPeriod(target);
+      const draftIndex = uploadDraftPeriods.findIndex(period => period.id === target.id);
+      if (draftIndex >= 0) uploadDraftPeriods.splice(draftIndex, 1);
+      if (savedPeriod) session.periodKey = savedPeriod.id;
+    }
+    lastUploadPeriodKey = session.periodKey || lastUploadPeriodKey;
+    reconcileUploadDraftPeriods();
+    closeModal();
+    render();
+    toast(`${result.summary || "Upload saved."} · ${target.label}`);
+  } catch (error) {
+    if (uploadSession === session) {
+      session.saving = false;
+      renderUploadModal();
+    }
+    toast(error.message, "error");
+  }
 }
 
 async function chooseAssignmentCsv(file) {
@@ -515,8 +1078,72 @@ function mappingSelect(field, preview, selected, required) {
   return `<label class="${required ? "required" : ""}"><span>${escapeHtml(FIELD_LABELS[field])}</span><select data-map-field="${field}"><option value="">Not used</option>${options}</select></label>`;
 }
 
-function sampleTable(preview) {
-  return `<div class="sample-table"><table><thead><tr>${preview.headers.map(header => `<th>${escapeHtml(header)}</th>`).join("")}</tr></thead><tbody>${preview.sample_rows.slice(0, 4).map(row => `<tr>${preview.headers.map((_, index) => `<td>${escapeHtml(row[index] || "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+const SHEET_PREVIEW_RENDER_CHUNK = 40;
+
+function sampleRowsHtml(headers, rows) {
+  return rows.map(row => `<tr>${headers.map((_, index) => `<td title="${escapeHtml(row[index] || "")}">${escapeHtml(row[index] || "")}</td>`).join("")}</tr>`).join("");
+}
+
+function samplePreviewCountLabel(shown, total, itemLabel) {
+  return shown === total ? `${total} ${itemLabel}` : `Showing ${shown} of ${total} ${itemLabel}`;
+}
+
+function samplePreviewHint(shown, available, total, itemLabel) {
+  if (shown < available) return "Scroll down to load more preview rows.";
+  if (available < total) return `${total - available} additional rows will still be processed when you save.`;
+  return `Scroll vertically and horizontally to review all ${shown} ${itemLabel}.`;
+}
+
+function sampleTable(preview, options = {}) {
+  const headers = Array.isArray(preview.headers) ? preview.headers : [];
+  const rows = Array.isArray(preview.sample_rows) ? preview.sample_rows : [];
+  const parsedTotal = Number.parseInt(preview.row_count, 10);
+  const total = Math.max(rows.length, Number.isFinite(parsedTotal) ? parsedTotal : rows.length);
+  const itemLabel = options.itemLabel || "rows";
+  const worksheet = String(options.worksheet || preview.worksheet || "").trim();
+  const sourceLabel = worksheet ? `Worksheet · ${worksheet}` : "Data preview";
+  const requestedVisible = Number.parseInt(options.visibleRows, 10);
+  const visibleCount = options.progressive
+    ? Math.min(rows.length, Number.isFinite(requestedVisible) ? requestedVisible : SHEET_PREVIEW_RENDER_CHUNK)
+    : rows.length;
+  const visibleRows = rows.slice(0, visibleCount);
+  const countLabel = samplePreviewCountLabel(visibleRows.length, total, itemLabel);
+  const scrollCopy = samplePreviewHint(visibleRows.length, rows.length, total, itemLabel);
+  const ariaLabel = `${sourceLabel}. ${countLabel}.`;
+  const progressiveAttributes = options.progressive
+    ? ` data-preview-scroll data-rendered-rows="${visibleRows.length}"`
+    : "";
+  return `<div class="sample-preview"><div class="sample-preview-header"><span>${escapeHtml(sourceLabel)}</span><strong data-preview-row-count>${escapeHtml(countLabel)}</strong></div><div class="sample-table" role="region" tabindex="0" aria-label="${escapeHtml(ariaLabel)}"${progressiveAttributes}><table><thead><tr>${headers.map(header => `<th title="${escapeHtml(header)}">${escapeHtml(header)}</th>`).join("")}</tr></thead><tbody>${sampleRowsHtml(headers, visibleRows)}</tbody></table></div><small class="sample-preview-hint" data-preview-row-hint>${escapeHtml(scrollCopy)}</small></div>`;
+}
+
+function appendSamplePreviewRows(scroller) {
+  const stage = currentUploadStage();
+  if (!stage || stage.mode !== "google_sheet") return;
+  const preview = stage.preview;
+  const rows = Array.isArray(preview.sample_rows) ? preview.sample_rows : [];
+  const headers = Array.isArray(preview.headers) ? preview.headers : [];
+  const rendered = Number.parseInt(scroller.dataset.renderedRows, 10) || 0;
+  const next = Math.min(rows.length, rendered + SHEET_PREVIEW_RENDER_CHUNK);
+  if (next <= rendered) return;
+  scroller.querySelector("tbody")?.insertAdjacentHTML("beforeend", sampleRowsHtml(headers, rows.slice(rendered, next)));
+  scroller.dataset.renderedRows = String(next);
+  stage.previewRowsShown = next;
+  const total = Math.max(rows.length, Number.parseInt(preview.row_count, 10) || rows.length);
+  const itemLabel = "student rows";
+  const count = scroller.closest(".sample-preview")?.querySelector("[data-preview-row-count]");
+  const hint = scroller.closest(".sample-preview")?.querySelector("[data-preview-row-hint]");
+  if (count) count.textContent = samplePreviewCountLabel(next, total, itemLabel);
+  if (hint) hint.textContent = samplePreviewHint(next, rows.length, total, itemLabel);
+}
+
+function bindSamplePreviewScroll() {
+  const scroller = $("#modal [data-preview-scroll]");
+  if (!scroller) return;
+  scroller.addEventListener("scroll", () => {
+    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 36) {
+      appendSamplePreviewRows(scroller);
+    }
+  }, { passive: true });
 }
 
 function openMappingModal(context) {
@@ -699,13 +1326,61 @@ function addExample(classId) {
   $("#example-report-input").click();
 }
 
-async function uploadExample(file) {
-  if (!file || !pendingExampleClass) return;
+async function uploadExamples(files) {
+  const classId = pendingExampleClass;
+  const selected = [...(files || [])];
+  if (!selected.length || !classId) return;
+  let uploaded = 0;
+  const failures = [];
   try {
-    const result = await api(`/api/templates/${pendingExampleClass}/example`, { method: "POST", body: JSON.stringify({ filename: file.name, pdf_base64: arrayBufferToBase64(await file.arrayBuffer()) }) });
-    state = normalizeState(result.state); render(); toast("Example report saved as a private local reference.");
-  } catch (error) { toast(error.message, "error"); }
-  finally { pendingExampleClass = ""; $("#example-report-input").value = ""; }
+    for (const file of selected) {
+      try {
+        const result = await api(`/api/templates/${classId}/example`, { method: "POST", body: JSON.stringify({ filename: file.name, pdf_base64: arrayBufferToBase64(await file.arrayBuffer()) }) });
+        state = normalizeState(result.state);
+        uploaded += 1;
+      } catch (error) {
+        failures.push(`${file.name}: ${error.message}`);
+      }
+    }
+    render();
+    if (failures.length) {
+      toast(`${uploaded} example${uploaded === 1 ? "" : "s"} analyzed; ${failures.length} could not be saved.`, "error");
+    } else {
+      toast(`${uploaded} example report${uploaded === 1 ? "" : "s"} saved and analyzed.`);
+    }
+  } finally {
+    pendingExampleClass = "";
+    $("#example-report-input").value = "";
+  }
+}
+
+function showExampleAnalysis(classId) {
+  const classItem = classById(classId);
+  const template = templateForClass(classId) || {};
+  const examples = template.examples || [];
+  const profile = template.example_profile || {};
+  const chips = values => values?.length ? values.map(value => `<span class="placeholder-chip">${escapeHtml(value)}</span>`).join("") : '<span class="muted">None detected</span>';
+  const rows = examples.map(example => {
+    const analysis = example.analysis || {};
+    const summary = analysis.summary || {};
+    return `<article class="example-analysis-row"><div><strong>${escapeHtml(example.filename)}</strong><small>${escapeHtml(formatDateTime(example.uploaded_at))}</small></div><div><span>${analysis.page_count || 0} page${analysis.page_count === 1 ? "" : "s"}${analysis.multi_page ? " · continuation layout present" : ""}</span><small>${escapeHtml((summary.font_names || []).slice(0, 4).join(", ") || "Fonts unavailable")} · ${summary.image_xobject_count || 0} image/possible graph region${summary.image_xobject_count === 1 ? "" : "s"}</small></div><button class="table-action" type="button" data-example-delete="${escapeHtml(example.id)}" data-example-class="${classId}">Delete</button></article>`;
+  }).join("");
+  openModal(`<span class="eyebrow">SAMPLE REPORT ANALYSIS</span><h2>${escapeHtml(classItem?.name || "Class")} sample reports</h2><p>Brightline compares structural clues across the completed PDF reports uploaded for this class.</p><div class="analysis-summary-grid"><div><span>Samples</span><strong>${profile.sample_count || 0}</strong></div><div><span>Multi-page</span><strong>${profile.multi_page_count || 0}</strong></div><div><span>Image / graph regions</span><strong>${profile.image_xobject_count || 0}</strong></div></div><div class="analysis-section"><strong>Common fonts</strong><div class="placeholder-list">${chips(profile.common_fonts)}</div></div><div class="analysis-section"><strong>Likely report sections</strong><div class="placeholder-list">${chips(profile.section_clues)}</div></div><div class="example-analysis-list">${rows || emptyState("No sample reports", "Upload a completed PDF for this class.")}</div><div class="safety-note">Clues are advisory: font names and coordinates can be approximate, image-heavy areas are only possible graph regions, and scanned PDFs need future OCR.</div><div class="modal-footer"><button class="secondary-button" type="button" data-template-example="${classId}">Upload another sample</button><button class="primary-button" data-close-modal>Done</button></div>`);
+}
+
+async function deleteExample(classId, exampleId) {
+  const template = templateForClass(classId) || {};
+  const example = (template.examples || []).find(item => item.id === exampleId);
+  if (!example || !confirm(`Delete ${example.filename} from this class's local examples?`)) return;
+  try {
+    const result = await api(`/api/templates/${classId}/example-delete`, { method: "POST", body: JSON.stringify({ example_id: exampleId, confirm: true }) });
+    state = normalizeState(result.state);
+    render();
+    showExampleAnalysis(classId);
+    toast("Example report deleted.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 
 async function configureGoogle(service) {
@@ -744,6 +1419,34 @@ function bindEvents() {
     if (goto) { event.preventDefault(); go(goto.dataset.go); return; }
     const close = event.target.closest("[data-close-modal]");
     if (close) { event.preventDefault(); closeModal(); return; }
+    const upload = event.target.closest("[data-upload-kind]");
+    if (upload) { event.preventDefault(); openUploadModal(upload.dataset.uploadKind); return; }
+    if (event.target.closest("[data-upload-add-week]")) { event.preventDefault(); addUploadWeek(); return; }
+    if (event.target.closest("[data-upload-google]")) { event.preventDefault(); beginGoogleUpload(); return; }
+    if (event.target.closest("[data-upload-manual]")) {
+      event.preventDefault();
+      const inputs = { assignment: "#assignment-file-input", weekly_test: "#weekly-test-file-input", comments: "#comments-file-input" };
+      $(inputs[uploadSession?.kind])?.click();
+      return;
+    }
+    if (event.target.closest("[data-upload-remove]")) {
+      event.preventDefault();
+      if (uploadSession) { setUploadStage(null); uploadSession.view = "sources"; renderUploadModal(); }
+      return;
+    }
+    if (event.target.closest("[data-upload-sheet-preview]")) { event.preventDefault(); await previewUploadSheet(); return; }
+    if (event.target.closest("[data-upload-sheet-cancel]")) {
+      event.preventDefault();
+      if (uploadSession) { uploadSession.view = "sources"; renderUploadModal(); }
+      return;
+    }
+    if (event.target.closest("[data-upload-confirm]")) { event.preventDefault(); await saveUpload(true); return; }
+    if (event.target.closest("[data-upload-confirm-back]")) {
+      event.preventDefault();
+      if (uploadSession) { uploadSession.confirming = false; renderUploadModal(); }
+      return;
+    }
+    if (event.target.closest("[data-upload-save]")) { event.preventDefault(); await saveUpload(); return; }
     const manual = event.target.closest("[data-manual-kind]");
     if (manual) {
       const inputs = { assignment: "#assignment-file-input", weekly_test: "#weekly-test-file-input", comments: "#comments-file-input" };
@@ -758,7 +1461,11 @@ function bindEvents() {
     const test = event.target.closest("[data-template-test]");
     if (test) { await testTemplate(test.dataset.templateTest); return; }
     const example = event.target.closest("[data-template-example]");
-    if (example) { addExample(example.dataset.templateExample); return; }
+    if (example) { if (example.closest("#modal")) closeModal(); addExample(example.dataset.templateExample); return; }
+    const analysis = event.target.closest("[data-template-analysis]");
+    if (analysis) { showExampleAnalysis(analysis.dataset.templateAnalysis); return; }
+    const exampleDelete = event.target.closest("[data-example-delete]");
+    if (exampleDelete) { await deleteExample(exampleDelete.dataset.exampleClass, exampleDelete.dataset.exampleDelete); return; }
     const mapping = event.target.closest("[data-template-map]");
     if (mapping) { showTemplateFields(mapping.dataset.templateMap); return; }
     const disconnect = event.target.closest("[data-template-disconnect]");
@@ -792,7 +1499,7 @@ function bindEvents() {
       return;
     }
     if (event.target.closest(".disabled")?.matches("a")) event.preventDefault();
-    if (event.target === $("#modal-backdrop")) closeModal();
+    if (event.target === $("#modal-backdrop") && !uploadSession?.saving) closeModal();
   });
 
   document.addEventListener("change", async event => {
@@ -808,14 +1515,26 @@ function bindEvents() {
         const result = await api(`/api/classes/${selectedReportClass}/period`, { method: "POST", body: JSON.stringify({ period_id: event.target.value }) });
         state = normalizeState(result.state); render(); toast("Class reporting period changed.");
       }
+      if (event.target.matches("#upload-week-select") && uploadSession) {
+        captureUploadFields();
+        uploadSession.periodKey = event.target.value;
+        if (uploadSession.periodKey) lastUploadPeriodKey = uploadSession.periodKey;
+        persistUploadDraftPeriods();
+        uploadSession.view = "sources";
+        renderUploadModal();
+      }
     } catch (error) { toast(error.message, "error"); await loadState(); }
   });
 
-  $("#assignment-file-input").onchange = event => chooseAssignmentCsv(event.target.files[0]);
-  $("#weekly-test-file-input").onchange = async event => { await chooseTabularFile(event.target.files[0], "weekly_test"); event.target.value = ""; };
-  $("#comments-file-input").onchange = event => chooseCommentsFile(event.target.files[0]);
-  $("#example-report-input").onchange = event => uploadExample(event.target.files[0]);
-  $("#show-placeholder-guide").onclick = () => showTemplateFields();
+  $$('[data-upload-file-kind]').forEach(input => {
+    input.onchange = async event => {
+      const file = event.target.files[0];
+      event.target.value = "";
+      if (!uploadSession || uploadSession.kind !== event.target.dataset.uploadFileKind) return;
+      await stageManualUpload(file);
+    };
+  });
+  $("#example-report-input").onchange = event => uploadExamples(event.target.files);
   $("#preview-report").onclick = async event => {
     if (event.currentTarget.classList.contains("disabled")) return;
     await previewGenerated(event.currentTarget.dataset.studentId, event.currentTarget.dataset.periodId);

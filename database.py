@@ -934,6 +934,7 @@ class Database:
             student["latest_exam"] = scored_exams[-1] if scored_exams else None
             student["assignment_ready"] = bool(
                 student["homework_completed"] + student["homework_incomplete"] > 0
+                or student["homework_excluded"] > 0
                 or student["homework_percent"] is not None
             )
             student["weekly_test_ready"] = bool(scored_exams)

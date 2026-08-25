@@ -60,23 +60,23 @@
             <article class="source-card">
               <div class="source-card-head"><span class="source-icon assignment">01</span><span class="status-pill" id="assignment-source-status">Start here</span></div>
               <h2>Assignment</h2><p>Class roster and assignment completion for every student.</p>
-              <div class="source-actions"><button class="primary-button" data-sheet-kind="assignment">Import Google Sheet</button><button class="secondary-button" data-manual-kind="assignment">Upload CSV</button></div>
+              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="assignment">Upload</button></div>
             </article>
             <article class="source-card">
               <div class="source-card-head"><span class="source-icon test">02</span><span class="status-pill neutral" id="test-source-status">After assignment</span></div>
               <h2>Weekly Test</h2><p>Scores and maximum scores matched to the same students and week.</p>
-              <div class="source-actions"><button class="primary-button" data-sheet-kind="weekly_test">Import Google Sheet</button><button class="secondary-button" data-manual-kind="weekly_test">Upload CSV</button></div>
+              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="weekly_test">Upload</button></div>
             </article>
             <article class="source-card">
               <div class="source-card-head"><span class="source-icon comments">03</span><span class="status-pill neutral" id="comments-source-status">Last step</span></div>
               <h2>Comments</h2><p>Teacher comments by student. Manual files may be CSV or one class-specific PDF.</p>
-              <div class="source-actions"><button class="primary-button" data-sheet-kind="comments">Import Google Sheet</button><button class="secondary-button" data-manual-kind="comments">Upload CSV or PDF</button></div>
+              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="comments">Upload</button></div>
             </article>
           </div>
 
-          <input type="file" id="assignment-file-input" accept=".csv,text/csv" hidden />
-          <input type="file" id="weekly-test-file-input" accept=".csv,text/csv" hidden />
-          <input type="file" id="comments-file-input" accept=".csv,text/csv,.pdf,application/pdf" hidden />
+          <input type="file" id="assignment-file-input" accept=".csv,text/csv" data-upload-file-kind="assignment" hidden />
+          <input type="file" id="weekly-test-file-input" accept=".csv,text/csv" data-upload-file-kind="weekly_test" hidden />
+          <input type="file" id="comments-file-input" accept=".csv,text/csv,.pdf,application/pdf" data-upload-file-kind="comments" hidden />
 
           <section class="section-block">
             <div class="section-heading"><div><span class="eyebrow">READINESS BY CLASS</span><h2>Required inputs</h2><p>Green checks mean every imported student in that class has the required data.</p></div></div>
@@ -97,19 +97,13 @@
 
         <section class="page" id="templates">
           <div class="page-intro">
-            <div><span class="eyebrow">CONTROLLED GOOGLE DOCS</span><h1>One report template per class</h1><p>Connect a Google Doc containing approved placeholders. Formatting stays in Google Docs; Brightline only replaces the values.</p></div>
-            <button class="secondary-button" data-go="connections">Check Google Docs connection</button>
+            <div><span class="eyebrow">CLASS REPORT TEMPLATES</span><h1>Templates by class</h1><p>Upload completed PDF sample reports so Brightline can study the report design used for each class.</p></div>
           </div>
 
-          <div class="placeholder-guide">
-            <div><span class="guide-mark">{{ }}</span><div><strong>Use placeholders in ordinary text or tables</strong><p>Required: <code>{{student_name}}</code>, <code>{{class_name}}</code>, <code>{{reporting_week}}</code>, <code>{{assignment_summary}}</code>, <code>{{weekly_test_summary}}</code>, and <code>{{teacher_comment}}</code>.</p></div></div>
-            <button class="link-button" id="show-placeholder-guide">See all supported placeholders →</button>
-          </div>
-
-          <input type="file" id="example-report-input" accept=".pdf,application/pdf" hidden />
+          <input type="file" id="example-report-input" accept=".pdf,application/pdf" multiple hidden />
           <div class="table-card">
-            <table>
-              <thead><tr><th>Class</th><th>Google Docs template</th><th>Examples</th><th>Field mapping</th><th>Status</th><th></th></tr></thead>
+            <table class="templates-table">
+              <thead><tr><th>Classes</th><th>Sample Report</th></tr></thead>
               <tbody id="templates-table"></tbody>
             </table>
           </div>

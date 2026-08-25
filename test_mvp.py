@@ -368,6 +368,42 @@ class TableMappingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive whole number"):
             app_server._values_from_header_row(values, 0)
 
+    def test_google_sheet_header_and_mapping_are_detected_automatically(self) -> None:
+        values = [
+            ["Assignment export", "", ""],
+            ["Course", "Teacher", "Student"],
+            ["과목명", "담당자 이름", "학생", "학년", "학교", "8/17", "8/18"],
+            ["Economics", "Teacher", "Mark", "11", "School", "A", "F"],
+        ]
+        selected, header_row, preview = app_server._automatic_sheet_values(
+            values, "assignment"
+        )
+        self.assertEqual(header_row, 3)
+        self.assertEqual(selected[0][0], "과목명")
+        self.assertEqual(preview["suggested_mapping"]["student_name"], "학생")
+        self.assertEqual(preview["suggested_mapping"]["class_name"], "과목명")
+
+    def test_automatic_sheet_detection_uses_kind_specific_fields(self) -> None:
+        values = [
+            ["Student", "Class"],
+            ["Ignore", "Ignore"],
+            ["Student", "Class", "Score"],
+            ["Mark", "Economics", "91"],
+        ]
+        _, header_row, preview = app_server._automatic_sheet_values(
+            values, "weekly_test"
+        )
+        self.assertEqual(header_row, 3)
+        self.assertEqual(preview["suggested_mapping"]["weekly_test_score"], "Score")
+
+    def test_automatic_sheet_detection_rejects_unrecognized_columns(self) -> None:
+        with self.assertRaisesRegex(IntegrationError, "could not identify") as raised:
+            app_server._automatic_sheet_values(
+                [["Person", "Group"], ["Mark", "Economics"]],
+                "comments",
+            )
+        self.assertEqual(raised.exception.code, "automatic_sheet_mapping_failed")
+
     def test_counts_missed_assignments_from_dated_columns(self) -> None:
         values, mapping, dated = app_server._assignment_values_from_dated_columns(
             [

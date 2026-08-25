@@ -44,6 +44,7 @@ REQUIRED_PLACEHOLDERS = (
     "teacher_comment",
 )
 MAX_SHEET_ROWS = 10_000
+PREVIEW_SAMPLE_ROW_LIMIT = 100
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,256}$")
 _PLACEHOLDER_PATTERN = re.compile(r"\{\{([a-zA-Z][a-zA-Z0-9_-]*)\}\}")
 _ANY_PLACEHOLDER_PATTERN = re.compile(r"\{\{.*?\}\}", re.DOTALL)
@@ -62,8 +63,33 @@ def normalize_header(value: str) -> str:
 
 HEADER_ALIASES: dict[str, set[str]] = {
     "student_id": {"studentid", "studentnumber", "id", "학생id", "학생번호", "원생번호"},
-    "student_name": {"student", "studentname", "name", "학생", "학생명", "이름", "원생명"},
-    "class_name": {"class", "classname", "course", "subject", "과목", "과목명", "수업", "수업명", "반"},
+    "student_name": {
+        "student",
+        "studentname",
+        "name",
+        "학생",
+        "학생명",
+        "학생이름",
+        "이름",
+        "원생명",
+        "원생이름",
+    },
+    "class_name": {
+        "class",
+        "classname",
+        "course",
+        "subject",
+        "과목",
+        "과목명",
+        "과목이름",
+        "수업",
+        "수업명",
+        "수업이름",
+        "반",
+        "반이름",
+        "강좌",
+        "강좌명",
+    },
     "grade": {"grade", "year", "schoolyear", "학년"},
     "school": {"school", "schoolname", "학교", "학교명"},
     "teacher": {"teacher", "teachername", "instructor", "담당자", "담당자이름", "강사", "선생님"},
@@ -105,7 +131,10 @@ def preview_table(values: list[list[Any]]) -> dict[str, Any]:
             "duplicate_headers",
         )
     width = len(headers)
-    sample = [(row + [""] * width)[:width] for row in rows[1:21]]
+    sample = [
+        (row + [""] * width)[:width]
+        for row in rows[1 : PREVIEW_SAMPLE_ROW_LIMIT + 1]
+    ]
     return {
         "headers": headers,
         "sample_rows": sample,
@@ -525,7 +554,7 @@ class GoogleWorkspace:
                 "google_export_not_allowed",
             )
         elif status == 400:
-            message, code = "Google rejected the request. Check the file URL and worksheet name.", "invalid_google_request"
+            message, code = "Google rejected the request. Check the file URL and sheet contents.", "invalid_google_request"
         elif status == 401:
             message, code = "Your Google authorization expired. Reconnect your account.", "google_oauth_required"
         elif status == 403:
@@ -635,7 +664,10 @@ class GoogleWorkspace:
                 )
                 .execute(num_retries=2)
             )
-            tabs = [item["properties"] for item in metadata.get("sheets", [])]
+            tabs = sorted(
+                (item["properties"] for item in metadata.get("sheets", [])),
+                key=lambda tab: int(tab.get("index") or 0),
+            )
             if not tabs:
                 raise IntegrationError("The spreadsheet has no worksheets.", "empty_spreadsheet")
             selected = worksheet.strip() or str(tabs[0].get("title") or "")
@@ -669,6 +701,71 @@ class GoogleWorkspace:
             "worksheet": selected,
             "tabs": [str(tab.get("title") or "") for tab in tabs],
             "values": values,
+        }
+
+    def read_sheets(
+        self, spreadsheet_or_url: str, *, row_limit: int = 60
+    ) -> dict[str, Any]:
+        """Read a bounded detection sample from every worksheet in a spreadsheet.
+
+        ``read_sheet`` remains the full-table API used once a worksheet has been
+        selected.  Sampling all tabs here prevents a workbook with several large tabs
+        from being downloaded in full merely to locate the table to preview.
+        """
+
+        spreadsheet_id = google_file_id(spreadsheet_or_url)
+        self.file_metadata(spreadsheet_id, GOOGLE_SHEET_MIME)
+        sheets = self._service("sheets", "v4")
+        try:
+            metadata = (
+                sheets.spreadsheets()
+                .get(
+                    spreadsheetId=spreadsheet_id,
+                    includeGridData=False,
+                    fields="properties(title),sheets(properties(sheetId,title,index))",
+                )
+                .execute(num_retries=2)
+            )
+            tabs = sorted(
+                (item["properties"] for item in metadata.get("sheets", [])),
+                key=lambda tab: int(tab.get("index") or 0),
+            )
+            if not tabs:
+                raise IntegrationError("The spreadsheet has no worksheets.", "empty_spreadsheet")
+            worksheets: list[dict[str, Any]] = []
+            for tab in tabs:
+                title = str(tab.get("title") or "")
+                safe_title = title.replace("'", "''")
+                row_range = f"'{safe_title}'!1:{max(1, int(row_limit))}"
+                result = (
+                    sheets.spreadsheets()
+                    .values()
+                    .get(
+                        spreadsheetId=spreadsheet_id,
+                        range=row_range,
+                        majorDimension="ROWS",
+                        valueRenderOption="FORMATTED_VALUE",
+                    )
+                    .execute(num_retries=2)
+                )
+                worksheets.append(
+                    {
+                        "worksheet": title,
+                        "index": int(tab.get("index") or 0),
+                        "values": result.get("values", []),
+                    }
+                )
+        except IntegrationError:
+            raise
+        except Exception as exc:
+            self._raise_google_error(exc)
+        return {
+            "spreadsheet_id": spreadsheet_id,
+            "spreadsheet_name": str(
+                metadata.get("properties", {}).get("title") or "Spreadsheet"
+            ),
+            "tabs": [str(tab.get("title") or "") for tab in tabs],
+            "worksheets": worksheets,
         }
 
     def inspect_document(self, document_or_url: str) -> dict[str, Any]:
