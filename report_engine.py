@@ -5,8 +5,10 @@ import csv
 import html
 import io
 import json
+import math
 import re
 import unicodedata
+from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -453,6 +455,371 @@ def inspect_template(path: Path) -> dict[str, Any]:
         raise ValidationError("The report template must use a portrait page.")
     fields = sorted((reader.get_fields() or {}).keys())
     return {"pages": len(reader.pages), "fields": fields, "width": width, "height": height}
+
+
+_EXAMPLE_SECTION_PATTERNS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "student_identity",
+        (
+            (r"\bstudent(?:\s+(?:name|id|number))?\b", "student"),
+            (r"(?:학생(?:명|번호)?|원생(?:명|번호)?|이름)", "학생/이름"),
+        ),
+    ),
+    (
+        "class",
+        (
+            (r"\b(?:class|course|subject)(?:\s+name)?\b", "class/course"),
+            (r"(?:과목(?:명)?|수업(?:명)?|(?:^|[\s:])반(?:$|[\s:]))", "과목/수업"),
+        ),
+    ),
+    (
+        "reporting_period",
+        (
+            (r"\b(?:reporting\s+)?(?:week|period)\b", "week/period"),
+            (r"(?:주차|보고\s*기간|기간)", "주차/기간"),
+        ),
+    ),
+    (
+        "assignment",
+        (
+            (r"\b(?:assignment|homework)s?\b", "assignment/homework"),
+            (r"(?:과제|숙제)", "과제/숙제"),
+        ),
+    ),
+    (
+        "weekly_test",
+        (
+            (r"\b(?:weekly\s+test|test\s+score|exam|quiz)\b", "weekly test/exam"),
+            (r"(?:주간\s*테스트|시험|테스트\s*점수)", "주간 테스트/시험"),
+        ),
+    ),
+    (
+        "teacher_comment",
+        (
+            (r"\b(?:(?:teacher|instructor)\s+)?(?:comment|feedback|remark)s?\b", "comment/feedback"),
+            (r"(?:선생님?\s*(?:코멘트|의견|평가)|코멘트|의견|총평)", "코멘트/총평"),
+        ),
+    ),
+    (
+        "graph_or_chart",
+        (
+            (r"\b(?:graph|chart|trend)\b", "graph/chart"),
+            (r"(?:그래프|차트|추이)", "그래프/차트"),
+        ),
+    ),
+)
+_EXAMPLE_CONTINUATION_PATTERN = re.compile(
+    r"\b(?:continued|continuation|continue)\b|(?:계속|다음\s*페이지)", re.IGNORECASE
+)
+_PDF_SUBSET_PREFIX = re.compile(r"^[A-Z]{6}\+")
+
+
+def _resolved_pdf_object(value: Any) -> Any:
+    try:
+        return value.get_object()
+    except (AttributeError, TypeError, ValueError):
+        return value
+
+
+def _example_font_name(font: Any) -> str:
+    font = _resolved_pdf_object(font)
+    if not hasattr(font, "get"):
+        return ""
+    raw_name = str(font.get("/BaseFont") or "").lstrip("/")
+    return _PDF_SUBSET_PREFIX.sub("", raw_name)
+
+
+def _example_text_position(cm: Any, tm: Any) -> tuple[float | None, float | None]:
+    try:
+        x = float(tm[4]) * float(cm[0]) + float(tm[5]) * float(cm[2]) + float(cm[4])
+        y = float(tm[4]) * float(cm[1]) + float(tm[5]) * float(cm[3]) + float(cm[5])
+    except (IndexError, TypeError, ValueError):
+        return None, None
+    if not math.isfinite(x) or not math.isfinite(y):
+        return None, None
+    return x, y
+
+
+def _example_section_clues(
+    text: str,
+    *,
+    x: float | None,
+    y: float | None,
+    width: float,
+    height: float,
+    seen: set[str],
+) -> list[dict[str, Any]]:
+    normalized = unicodedata.normalize("NFKC", text or "")
+    clues: list[dict[str, Any]] = []
+    for section, patterns in _EXAMPLE_SECTION_PATTERNS:
+        if section in seen:
+            continue
+        for pattern, label in patterns:
+            if not re.search(pattern, normalized, re.IGNORECASE):
+                continue
+            clue: dict[str, Any] = {"section": section, "matched_label": label}
+            if x is not None and y is not None and width > 0 and height > 0:
+                clue["x_ratio"] = round(min(1.0, max(0.0, x / width)), 3)
+                clue["top_ratio"] = round(min(1.0, max(0.0, 1.0 - y / height)), 3)
+            clues.append(clue)
+            seen.add(section)
+            break
+    return clues
+
+
+def _example_xobject_counts(resources: Any) -> dict[str, int]:
+    counts = {"xobjects": 0, "images": 0, "forms": 0}
+    visited: set[tuple[str, int, int] | tuple[str, int]] = set()
+
+    def walk(current_resources: Any) -> None:
+        current_resources = _resolved_pdf_object(current_resources)
+        if not hasattr(current_resources, "get"):
+            return
+        xobjects = _resolved_pdf_object(current_resources.get("/XObject"))
+        if not hasattr(xobjects, "values"):
+            return
+        for reference in xobjects.values():
+            if hasattr(reference, "idnum"):
+                identity: tuple[str, int, int] | tuple[str, int] = (
+                    "indirect",
+                    int(reference.idnum),
+                    int(getattr(reference, "generation", 0)),
+                )
+            else:
+                identity = ("direct", id(reference))
+            if identity in visited:
+                continue
+            visited.add(identity)
+            obj = _resolved_pdf_object(reference)
+            if not hasattr(obj, "get"):
+                continue
+            counts["xobjects"] += 1
+            subtype = str(obj.get("/Subtype") or "")
+            if subtype == "/Image":
+                counts["images"] += 1
+            elif subtype == "/Form":
+                counts["forms"] += 1
+                walk(obj.get("/Resources"))
+
+    walk(resources)
+    return counts
+
+
+def inspect_example_report(path: Path) -> dict[str, Any]:
+    """Return deterministic structural clues from a completed example report.
+
+    This deliberately does not infer a writable template or identify student values. Text
+    is used only to count content and locate a small, fixed set of likely section labels.
+    """
+
+    try:
+        reader = PdfReader(path)
+    except Exception as exc:
+        raise ValidationError("The example report is not a readable PDF.") from exc
+    if reader.is_encrypted:
+        raise ValidationError("Encrypted example reports are not supported.")
+    if not reader.pages:
+        raise ValidationError("The example report has no pages.")
+
+    warnings: list[str] = []
+    try:
+        all_form_fields = sorted(str(name) for name in (reader.get_fields() or {}))
+    except Exception as exc:
+        all_form_fields = []
+        warnings.append(f"Form fields could not be inspected ({type(exc).__name__}).")
+    form_fields = all_form_fields[:50]
+    if len(all_form_fields) > len(form_fields):
+        warnings.append("Only the first 50 form-field names are included in the analysis.")
+
+    pages: list[dict[str, Any]] = []
+    overall_font_names: Counter[str] = Counter()
+    overall_font_sizes: Counter[float] = Counter()
+    overall_sections: set[str] = set()
+    total_characters = 0
+    total_text_runs = 0
+    total_xobjects = 0
+    total_images = 0
+    total_forms = 0
+    explicit_continuation_pages: list[int] = []
+
+    for page_number, page in enumerate(reader.pages, start=1):
+        media_box = page.mediabox
+        raw_width = float(media_box.width)
+        raw_height = float(media_box.height)
+        rotation = int(getattr(page, "rotation", 0) or 0) % 360
+        display_width, display_height = (
+            (raw_height, raw_width) if rotation in {90, 270} else (raw_width, raw_height)
+        )
+        if math.isclose(display_width, display_height, abs_tol=0.5):
+            orientation = "square"
+        elif display_width > display_height:
+            orientation = "landscape"
+        else:
+            orientation = "portrait"
+
+        font_runs: Counter[str] = Counter()
+        font_sizes_by_name: dict[str, Counter[float]] = {}
+        all_sizes: Counter[float] = Counter()
+        section_clues: list[dict[str, Any]] = []
+        seen_sections: set[str] = set()
+        text_run_count = 0
+        continuation_label_found = False
+
+        def visit_text(text: Any, cm: Any, tm: Any, font: Any, font_size: Any) -> None:
+            nonlocal text_run_count, continuation_label_found
+            clean = normalize_spaces(str(text or ""))
+            if not clean:
+                return
+            text_run_count += 1
+            name = _example_font_name(font)
+            try:
+                size = round(float(font_size), 2)
+            except (TypeError, ValueError):
+                size = 0.0
+            if not math.isfinite(size) or size <= 0:
+                size = 0.0
+            if name:
+                font_runs[name] += 1
+                if size:
+                    font_sizes_by_name.setdefault(name, Counter())[size] += 1
+            if size:
+                all_sizes[size] += 1
+            x, y = _example_text_position(cm, tm)
+            section_clues.extend(
+                _example_section_clues(
+                    clean,
+                    x=x,
+                    y=y,
+                    width=raw_width,
+                    height=raw_height,
+                    seen=seen_sections,
+                )
+            )
+            continuation_label_found = bool(
+                continuation_label_found or _EXAMPLE_CONTINUATION_PATTERN.search(clean)
+            )
+
+        try:
+            extracted_text = page.extract_text(visitor_text=visit_text) or ""
+        except Exception as exc:
+            extracted_text = ""
+            warnings.append(
+                f"Page {page_number} text could not be extracted ({type(exc).__name__})."
+            )
+        character_count = len(normalize_spaces(extracted_text))
+        line_count = len(
+            [line for line in str(extracted_text).splitlines() if normalize_spaces(line)]
+        )
+        xobject_counts = _example_xobject_counts(page.get("/Resources"))
+        if not character_count:
+            if xobject_counts["images"]:
+                warnings.append(
+                    f"Page {page_number} may be scanned or image-only; OCR is not performed."
+                )
+            else:
+                warnings.append(f"Page {page_number} has no extractable text.")
+        if continuation_label_found:
+            explicit_continuation_pages.append(page_number)
+
+        font_entries = [
+            {
+                "name": name,
+                "run_count": font_runs[name],
+                "sizes": sorted(font_sizes_by_name.get(name, {})),
+            }
+            for name in sorted(font_runs, key=lambda item: (-font_runs[item], item))[:24]
+        ]
+        if len(font_runs) > len(font_entries):
+            warnings.append(f"Page {page_number} font details were limited to 24 fonts.")
+        page_result = {
+            "page": page_number,
+            "width_points": round(raw_width, 2),
+            "height_points": round(raw_height, 2),
+            "display_width_points": round(display_width, 2),
+            "display_height_points": round(display_height, 2),
+            "rotation": rotation,
+            "orientation": orientation,
+            "text_character_count": character_count,
+            "text_line_count": line_count,
+            "text_run_count": text_run_count,
+            "fonts": font_entries,
+            "font_sizes": sorted(all_sizes)[:30],
+            "xobject_resource_count": xobject_counts["xobjects"],
+            "image_xobject_count": xobject_counts["images"],
+            "form_xobject_count": xobject_counts["forms"],
+            "section_label_clues": section_clues,
+            "explicit_continuation_label": continuation_label_found,
+        }
+        pages.append(page_result)
+        overall_font_names.update(font_runs)
+        overall_font_sizes.update(all_sizes)
+        overall_sections.update(seen_sections)
+        total_characters += character_count
+        total_text_runs += text_run_count
+        total_xobjects += xobject_counts["xobjects"]
+        total_images += xobject_counts["images"]
+        total_forms += xobject_counts["forms"]
+
+    dimension_signatures = {
+        (page["display_width_points"], page["display_height_points"]) for page in pages
+    }
+    orientations = {page["orientation"] for page in pages}
+    if len(dimension_signatures) > 1:
+        warnings.append("Page dimensions vary within this example report.")
+    if len(orientations) > 1:
+        warnings.append("Page orientations vary within this example report.")
+    if any(page["orientation"] != "portrait" for page in pages):
+        warnings.append("At least one page is not portrait; verify that this is intentional.")
+    if not overall_font_names:
+        warnings.append("Font names could not be extracted from this report.")
+
+    possible_continuation_pages = list(range(2, len(pages) + 1))
+    return {
+        "analysis_version": 1,
+        "page_count": len(pages),
+        "multi_page": len(pages) > 1,
+        "form_field_count": len(all_form_fields),
+        "form_fields": form_fields,
+        "pages": pages,
+        "summary": {
+            "text_character_count": total_characters,
+            "text_run_count": total_text_runs,
+            "font_names": [
+                name
+                for name in sorted(
+                    overall_font_names,
+                    key=lambda item: (-overall_font_names[item], item),
+                )[:30]
+            ],
+            "font_sizes": sorted(overall_font_sizes)[:30],
+            "xobject_resource_count": total_xobjects,
+            "image_xobject_count": total_images,
+            "form_xobject_count": total_forms,
+            "section_label_clues": sorted(overall_sections),
+        },
+        "continuation_clues": {
+            "possible_continuation_pages": possible_continuation_pages,
+            "explicit_label_pages": explicit_continuation_pages,
+            "basis": (
+                ["Document contains more than one page; later pages may be continuations."]
+                if len(pages) > 1
+                else []
+            )
+            + (
+                ["Continuation wording was found in extractable text."]
+                if explicit_continuation_pages
+                else []
+            ),
+        },
+        "warnings": warnings,
+        "limitations": [
+            "Section labels are keyword clues, not confirmed field mappings.",
+            "Text coordinates are approximate for transformed or rotated PDF content.",
+            "PDF font names may be subset aliases and do not prove a font is installed.",
+            "Images and form XObjects are counted as resources; graph type and meaning are not inferred.",
+            "Image-only text is not recognized because OCR is not performed.",
+        ],
+    }
 
 
 def _wrap_lines(text: str, font_name: str, font_size: float, max_width: float) -> list[str]:

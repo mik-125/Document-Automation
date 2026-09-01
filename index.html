@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
     <title>Brightline Reports</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -11,156 +12,144 @@
   </head>
   <body>
     <div class="loading-bar hidden" id="loading-bar"></div>
-    <div class="app-shell">
-      <aside class="sidebar">
-        <a class="brand" href="#dashboard" data-nav="dashboard" aria-label="Brightline Reports home">
-          <span class="brand-mark">B</span><span>brightline</span>
-        </a>
-        <button class="sidebar-close" id="sidebar-close" aria-label="Hide sidebar">×</button>
+    <div class="app-shell" id="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <a class="brand" href="#inbox" data-nav="inbox" aria-label="Brightline Reports home">
+            <span class="brand-mark">B</span><span class="brand-name">brightline</span>
+          </a>
+          <button class="icon-button sidebar-toggle" id="sidebar-toggle" aria-label="Hide sidebar" aria-expanded="true">×</button>
+        </div>
+
         <div class="academy-switcher">
           <span class="academy-avatar">RI</span>
-          <div><strong>Royal IB</strong><small id="academy-summary">Local workspace</small></div>
+          <div class="academy-copy"><strong>Royal IB</strong><small>Single-academy MVP</small></div>
           <span class="local-badge">LOCAL</span>
         </div>
+
         <nav class="main-nav" aria-label="Primary navigation">
-          <a href="#dashboard" class="active" data-nav="dashboard"><span>▦</span>Overview</a>
-          <a href="#classes" data-nav="classes"><span>◇</span>Classes</a>
-          <a href="#students" data-nav="students"><span>♧</span>Students</a>
-          <a href="#inbox" data-nav="inbox"><span>⇩</span>Data inbox <b id="inbox-badge">0</b></a>
-          <a href="#reports" data-nav="reports"><span>▤</span>Reports</a>
-          <a href="#templates" data-nav="templates"><span>▧</span>Templates</a>
+          <a href="#inbox" class="active" data-nav="inbox"><span aria-hidden="true">⇩</span><b>Data Inbox</b><i id="inbox-badge">0</i></a>
+          <a href="#templates" data-nav="templates"><span aria-hidden="true">▧</span><b>Templates</b></a>
+          <a href="#reports" data-nav="reports"><span aria-hidden="true">▤</span><b>Reports</b></a>
+          <a href="#connections" data-nav="connections"><span aria-hidden="true">⌁</span><b>Connections</b><i class="connection-dot" id="nav-connection-dot"></i></a>
         </nav>
+
         <div class="sidebar-bottom">
-          <button class="text-button" id="reset-data"><span>↻</span> Clear local data</button>
-          <div class="privacy-note"><span>●</span><div><strong>Stored on this Mac</strong><small>Student data is excluded from Git.</small></div></div>
+          <button class="text-button" id="reset-data"><span>↻</span><b>Clear local data</b></button>
+          <div class="privacy-note"><span>●</span><div><strong>Private on this Mac</strong><small>Credentials and student data stay out of Git.</small></div></div>
         </div>
       </aside>
 
       <main class="workspace">
         <header class="topbar">
-          <button class="mobile-menu" id="mobile-menu" aria-label="Open navigation">☰</button>
-          <div class="crumb"><span id="page-kicker">REPORTING PERIOD</span><strong id="page-title">Report overview</strong></div>
-          <div class="top-actions"><label class="period-selector">Active period<select id="global-period-select" aria-label="Active reporting period"><option value="">No period yet</option></select></label><span class="server-status"><i></i> Local service connected</span></div>
+          <button class="icon-button sidebar-open" id="sidebar-open" aria-label="Show sidebar">☰</button>
+          <div class="crumb"><span id="page-kicker">REPORT INPUTS</span><strong id="page-title">Data Inbox</strong></div>
+          <div class="top-actions">
+            <label class="period-selector">Reporting period<select id="global-period-select" aria-label="Active reporting period"><option value="">No period yet</option></select></label>
+            <span class="server-status"><i></i> Local service connected</span>
+          </div>
         </header>
 
-        <section class="page active" id="dashboard">
-          <div class="period-bar">
-            <div><span class="eyebrow" id="period-label">No reporting period selected</span><p>WORKSPACE</p></div>
-            <button class="secondary-button" data-go="inbox">Manage reporting period</button>
-          </div>
-          <div class="hero-grid">
-            <article class="readiness-card">
-              <div class="card-label">REPORT READINESS <span class="live-dot">● Live</span></div>
-              <div class="readiness-stat"><span id="ready-count">0</span><span class="of">/ <span id="total-count">0</span> students ready</span></div>
-              <div class="progress"><i id="readiness-progress"></i></div>
-              <p id="readiness-copy">Import a homework CSV to begin.</p>
-              <button class="primary-button light" data-go="reports">Open class reports <span>→</span></button>
-            </article>
-            <article class="next-card">
-              <span class="next-icon">✦</span>
-              <div><span class="eyebrow">NEXT BEST ACTION</span><h2 id="next-action-title">Import academy data</h2><p id="next-action-copy">Start with the multi-class homework CSV.</p><button class="link-button" data-go="inbox">Open data inbox →</button></div>
-            </article>
-          </div>
-
-          <section class="section-block">
-            <div class="section-heading"><div><span class="eyebrow">DATA COVERAGE</span><h2>Everything each report needs</h2></div><button class="link-button" data-go="inbox">View data inbox →</button></div>
-            <div class="coverage-grid" id="coverage-grid"></div>
-          </section>
-
-          <section class="section-block">
-            <div class="section-heading"><div><span class="eyebrow">CLASS READINESS</span><h2>Progress by class</h2></div><button class="link-button" data-go="reports">All class reports →</button></div>
-            <div class="class-health-list" id="class-health-list"></div>
-          </section>
-        </section>
-
-        <section class="page" id="classes">
-          <div class="page-intro"><div><span class="eyebrow">CLASS DIRECTORY</span><h1>Classes</h1><p>STATUS</p></div><div class="button-row"><button class="secondary-button" data-go="inbox">Import class data</button><button class="primary-button" id="add-class">+ Add class</button></div></div>
-          <div class="class-filter-bar">
-            <label class="search"><span>⌕</span><input id="class-search" aria-label="Search classes" placeholder="Search class, teacher, or subject" /></label>
-            <select id="class-category-filter" aria-label="Filter classes by classification"><option value="all">All classifications</option></select>
-            <select id="class-sort" aria-label="Sort classes"><option value="classification">Sort: Classification</option><option value="name">Sort: Class name</option></select>
-          </div>
-          <div class="class-toolbar">
-            <label class="selection-control"><input id="select-all-classes" type="checkbox" aria-label="Select all visible classes" /> Select all visible classes</label>
-            <span class="muted" id="class-selection-count">0 selected</span>
-            <button class="secondary-button" id="delete-selected-classes" disabled>Delete</button>
-          </div>
-          <div class="class-grid" id="class-grid"></div>
-        </section>
-
-        <section class="page" id="students">
-          <div class="page-intro"><div><span class="eyebrow">NORMALIZED RECORDS</span><h1>Students</h1><p>STATUS</p></div><button class="primary-button" id="add-student">+ Add student</button></div>
-          <div class="toolbar">
-            <label class="search"><span>⌕</span><input id="student-search" placeholder="Search name or school" /></label>
-            <select id="student-class-filter"><option value="all">All classes</option></select>
-            <button class="secondary-button" id="delete-selected-students" disabled>Delete</button>
-          </div>
-          <div class="table-card"><table><thead><tr><th><input class="student-select" id="select-all-students" type="checkbox" aria-label="Select all visible students" /></th><th>Student</th><th>Class</th><th>Report completion</th><th></th></tr></thead><tbody id="students-table"></tbody></table></div>
-        </section>
-
-        <section class="page" id="inbox">
+        <section class="page active" id="inbox">
           <div class="page-intro">
-            <div><span class="eyebrow">AUTOMATION LAYER</span><h1>Data inbox</h1><p>Import the roster and homework first, then attach one comments PDF to one class.</p></div>
-            <div class="button-row"><button class="secondary-button" id="upload-comments">Upload comments PDF</button><button class="primary-button" id="upload-homework">Upload homework CSV</button></div>
-          </div>
-          <input type="file" id="homework-file-input" accept=".csv,text/csv" hidden />
-          <input type="file" id="comments-file-input" accept=".pdf,application/pdf" hidden />
-
-          <div class="import-guide">
-            <article><span class="step-number">1</span><div><strong>Student and homework CSV</strong><p>Imports every class, adds new students, updates matches, and applies your selected date range.</p></div><button class="link-button" id="guide-upload-csv">Choose CSV →</button></article>
-            <article><span class="step-number">2</span><div><strong>Weekly comments PDF</strong><p>Select its class and exam label. Exact names are matched inside that class only.</p></div><button class="link-button" id="guide-upload-pdf">Choose PDF →</button></article>
-            <article><span class="step-number">3</span><div><strong>Review exceptions</strong><p>Duplicate or missing names wait for your decision. The system never silently guesses.</p></div><button class="link-button" id="guide-review">Review queue →</button></article>
+            <div><span class="eyebrow">ONE RELIABLE PIPELINE</span><h1>Bring in this week’s report data</h1><p>Start with assignments, then weekly tests, then comments. Import from Google Sheets or use the manual fallback.</p></div>
+            <button class="secondary-button" data-go="connections">Manage API connections</button>
           </div>
 
-          <div class="inbox-layout">
-            <div class="inbox-list-card">
-              <div class="card-title-row"><div><span class="eyebrow">IMPORT HISTORY</span><h2>Uploaded data</h2></div><div class="import-history-controls"><span id="upload-count" class="muted">0 files</span><label class="selection-control"><input id="select-all-imports" type="checkbox" aria-label="Select all uploaded data" /> Select all</label><span id="import-selection-count" class="muted">0 selected</span><button class="secondary-button" id="delete-selected-imports" disabled>Delete</button></div></div>
+          <div class="source-grid" id="data-source-grid">
+            <article class="source-card">
+              <div class="source-card-head"><span class="source-icon assignment">01</span><span class="status-pill" id="assignment-source-status">Start here</span></div>
+              <h2>Assignment</h2><p>Class roster and assignment completion for every student.</p>
+              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="assignment">Upload</button></div>
+            </article>
+            <article class="source-card">
+              <div class="source-card-head"><span class="source-icon test">02</span><span class="status-pill neutral" id="test-source-status">After assignment</span></div>
+              <h2>Weekly Test</h2><p>Scores and maximum scores matched to the same students and week.</p>
+              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="weekly_test">Upload</button></div>
+            </article>
+            <article class="source-card">
+              <div class="source-card-head"><span class="source-icon comments">03</span><span class="status-pill neutral" id="comments-source-status">Last step</span></div>
+              <h2>Comments</h2><p>Teacher comments by student. Manual files may be CSV or one class-specific PDF.</p>
+              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="comments">Upload</button></div>
+            </article>
+          </div>
+
+          <input type="file" id="assignment-file-input" accept=".csv,text/csv" data-upload-file-kind="assignment" hidden />
+          <input type="file" id="weekly-test-file-input" accept=".csv,text/csv" data-upload-file-kind="weekly_test" hidden />
+          <input type="file" id="comments-file-input" accept=".csv,text/csv,.pdf,application/pdf" data-upload-file-kind="comments" hidden />
+
+          <section class="section-block">
+            <div class="section-heading"><div><span class="eyebrow">READINESS BY CLASS</span><h2>Required inputs</h2><p>Green checks mean every imported student in that class has the required data.</p></div></div>
+            <div class="readiness-table" id="data-readiness"></div>
+          </section>
+
+          <div class="inbox-layout section-block">
+            <div class="panel">
+              <div class="card-title-row"><div><span class="eyebrow">IMPORT HISTORY</span><h2>Recent data</h2></div><span id="upload-count" class="muted">0 imports</span></div>
               <div id="file-list" class="file-list"></div>
             </div>
             <aside class="review-queue">
-              <div><span class="eyebrow">REVIEW QUEUE</span><h2><span id="issue-count">0</span> items need a decision</h2><p>Choose using the student's school and grade whenever names collide.</p></div>
+              <span class="eyebrow">REVIEW QUEUE</span><h2><span id="issue-count">0</span> student matches need you</h2><p>The app never guesses when two records could be the same student.</p>
               <div id="issue-list" class="issue-list"></div>
             </aside>
           </div>
         </section>
 
-        <section class="page" id="reports">
-          <div class="page-intro">
-            <div><span class="eyebrow">GENERATED OUTPUT</span><h1>Reports by class</h1><p>Download one student, one class, or every ready report.</p></div>
-            <a class="primary-button button-link disabled" id="download-all" href="/api/reports/all.zip">Download all ready ZIP</a>
-          </div>
-          <div class="report-summary"><div><span id="report-class-count">0</span><small>classes imported</small></div><div><span id="report-ready-count">0</span><small>students ready</small></div><div><span id="report-period">—</span><small>active reporting period</small></div></div>
-          <div class="reports-by-class" id="reports-by-class"></div>
-          <section class="section-block report-history-block"><div class="section-heading"><div><span class="eyebrow">PRESERVED OUTPUT</span><h2>Report history</h2><p>Generated reports stay available even after newer periods are imported.</p></div><span class="muted" id="report-history-count">0 archived</span></div><div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Period</th><th>Revision</th><th>Generated</th><th></th></tr></thead><tbody id="report-history-table"></tbody></table></div></section>
-        </section>
-
         <section class="page" id="templates">
           <div class="page-intro">
-            <div><span class="eyebrow">ACADEMY-WIDE DESIGN</span><h1>Report template</h1><p>One portrait template is used for every class. Continuation pages are added only when comments overflow.</p></div>
-            <div class="button-row"><a class="secondary-button button-link" href="/api/template/download">Download fillable PDF</a><button class="primary-button" id="upload-template">Upload replacement PDF</button></div>
+            <div><span class="eyebrow">CLASS REPORT TEMPLATES</span><h1>Templates by class</h1><p>Upload completed PDF sample reports so Brightline can study the report design used for each class.</p></div>
           </div>
-          <input type="file" id="template-file-input" accept=".pdf,application/pdf" hidden />
 
-          <div class="template-workspace">
-            <aside class="template-sidebar">
-              <span class="eyebrow">ACTIVE TEMPLATE</span>
-              <h2 id="template-name">Royal IB report template</h2>
-              <span class="status-pill" id="template-status">Ready</span>
-              <dl><div><dt>Pages</dt><dd id="template-pages">2</dd></div><div><dt>Detected fields</dt><dd id="template-field-count">0</dd></div></dl>
-              <hr />
-              <h3>Dynamic content</h3>
-              <ul class="binding-list"><li>Student identity</li><li>Selected homework period</li><li>Weekly exam trend</li><li>Teacher comments</li><li>Automatic continuation pages</li></ul>
-              <p class="template-help">The generated Royal IB template includes fillable fields. Report downloads are flattened so their appearance is consistent.</p>
-            </aside>
-            <div class="template-preview-shell"><iframe id="template-preview" title="Active report template" src="/api/template/preview"></iframe></div>
-            <aside class="template-sidebar field-panel"><span class="eyebrow">FIELD CHECK</span><h3>Recognized PDF fields</h3><div id="template-fields" class="template-fields"></div><p>Replacement PDFs may use the same two-page design. The app overlays charts and text at the academy template positions.</p></aside>
+          <input type="file" id="example-report-input" accept=".pdf,application/pdf" multiple hidden />
+          <div class="table-card">
+            <table class="templates-table">
+              <thead><tr><th>Classes</th><th>Sample Report</th></tr></thead>
+              <tbody id="templates-table"></tbody>
+            </table>
           </div>
+        </section>
+
+        <section class="page" id="reports">
+          <div class="page-intro">
+            <div><span class="eyebrow">GENERATE AND EXPORT</span><h1>Student reports by class</h1><p>Brightline copies the class template, inserts only that student’s data, and exports the finished Google Doc as PDF.</p></div>
+            <button class="primary-button disabled" id="download-all" type="button">Download all ready ZIP</button>
+          </div>
+
+          <div class="report-control panel">
+            <div class="report-selectors">
+              <label>Class<select id="report-class-select"><option value="">Choose a class</option></select></label>
+              <label>Reporting period<select id="report-period-select"><option value="">Choose a period</option></select></label>
+            </div>
+            <div class="report-checklist" id="report-checklist"></div>
+            <div class="report-actions"><button class="secondary-button disabled" id="preview-report" type="button">Preview first ready student</button><button class="primary-button disabled" id="download-class-zip" type="button">Download class ZIP</button></div>
+          </div>
+
+          <div class="reports-by-class section-block" id="reports-by-class"></div>
+
+          <section class="section-block">
+            <div class="section-heading"><div><span class="eyebrow">REPORT HISTORY</span><h2>Previously generated PDFs</h2><p>Every completed generation keeps a local PDF record and revision number.</p></div><span class="muted" id="report-history-count">0 reports</span></div>
+            <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Period</th><th>Revision</th><th>Generated</th><th></th></tr></thead><tbody id="report-history-table"></tbody></table></div>
+          </section>
+        </section>
+
+        <section class="page" id="connections">
+          <div class="page-intro">
+            <div><span class="eyebrow">PERSONAL GOOGLE OAUTH</span><h1>Connect the report pipeline</h1><p>Sign in with your Google account. OAuth tokens stay only on this Mac, and Brightline creates its own output folder in My Drive.</p></div>
+          </div>
+
+          <div class="security-banner"><span>⌁</span><div><strong>Google uses OAuth, not a browser API key</strong><p>Enable Sheets, Docs, and Drive APIs, then connect the personal Google account that owns or can open the source files.</p></div></div>
+          <div class="connections-grid" id="connections-grid"></div>
+
+          <section class="connection-help section-block">
+            <span class="eyebrow">SETUP CHECKLIST</span><h2>What you need from Google Cloud</h2>
+            <ol><li>Configure the Google OAuth consent screen and add your account as a test user.</li><li>Create a Web application OAuth client with redirect URI <code>http://127.0.0.1:8000/api/google/oauth/callback</code>.</li><li>Download its JSON outside this repository and set <code>GOOGLE_OAUTH_CLIENT_FILE</code>.</li><li>Enable Google Sheets API, Google Docs API, and Google Drive API.</li><li>Click Connect Google account. Brightline creates a private <code>Brightline Reports</code> folder in My Drive.</li></ol>
+          </section>
         </section>
       </main>
     </div>
 
-    <div class="modal-backdrop hidden" id="modal-backdrop"><div class="modal" id="modal"></div></div>
-    <div class="toast hidden" id="toast"></div>
+    <div class="modal-backdrop hidden" id="modal-backdrop"><div class="modal" id="modal" role="dialog" aria-modal="true"></div></div>
+    <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
     <script src="app.js"></script>
   </body>
 </html>
