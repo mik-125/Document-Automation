@@ -6,6 +6,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _SERVER_DATA = tempfile.TemporaryDirectory()
 atexit.register(_SERVER_DATA.cleanup)
@@ -54,6 +55,81 @@ class WeekUploadWorkflowTests(unittest.TestCase):
             source_provider="manual",
         )
         return app_server.DB.state()["periods"][0]["id"]
+
+    def combined_import(self, scores=("0", "85"), *, confirm=False) -> str:
+        raw = [
+            ["과목명", "학생", "학년", "학교", "WEEK 1", "", "weekly test\n점수 (%)"],
+            ["", "", "", "", "7/13", "7/14", ""],
+            ["(2차) 09:00 [26SU] DP1 ESS H+S", "Student One", "10", "J1MS", "A", "F", scores[0]],
+            ["(2차) 09:00 [26SU] DP1 ESS H+S", "Student Two", "10", "J1MS", "B", "", scores[1]],
+        ]
+        values, _, preview = app_server._automatic_sheet_values(raw, "assignment")
+        self.assertEqual(preview["row_count"], 2)
+        self.assertEqual(preview["suggested_mapping"]["weekly_test_score"], "weekly test\n점수 (%)")
+        return app_server.import_mapped_table(
+            values=values, mapping=preview["suggested_mapping"],
+            kind="assignment", period=self.period(), source_name="Combined Sheet",
+            source_provider="google_sheets", confirm_replace=confirm,
+        )
+
+    def test_combined_sheet_saves_homework_and_test_scores_including_zero(self) -> None:
+        summary = self.combined_import()
+        state = app_server.DB.state()
+        self.assertEqual(len(state["students"]), 2)
+        self.assertIn("2 test scores saved", summary)
+        for student in state["students"]:
+            self.assertTrue(student["assignment_ready"])
+            self.assertTrue(student["weekly_test_ready"])
+            exam = app_server.DB.get_exams(student["id"], state["periods"][0]["id"])[0]
+            self.assertEqual(exam["score"], 0 if student["name"] == "Student One" else 85)
+            self.assertEqual(exam["max_score"], 100)
+        self.assertTrue(app_server.class_period_has_assignment_and_test(
+            state["classes"][0]["id"], state["periods"][0]["id"]
+        ))
+
+    def test_combined_sheet_blank_scores_preserve_existing_tests(self) -> None:
+        self.combined_import()
+        summary = self.combined_import(("", ""))
+        state = app_server.DB.state()
+        self.assertIn("0 test scores saved", summary)
+        self.assertTrue(all(student["weekly_test_ready"] for student in state["students"]))
+        for student in state["students"]:
+            self.assertEqual(len(app_server.DB.get_exams(student["id"], state["periods"][0]["id"])), 1)
+
+    def test_combined_sheet_missing_score_keeps_new_student_unready(self) -> None:
+        self.combined_import(("", "85"))
+        students = {student["name"]: student for student in app_server.DB.state()["students"]}
+        self.assertTrue(students["Student One"]["assignment_ready"])
+        self.assertFalse(students["Student One"]["weekly_test_ready"])
+
+    def test_combined_sheet_invalid_score_writes_nothing(self) -> None:
+        for value in ("101", "-1", "not a score", "NaN"):
+            with self.subTest(value=value):
+                with self.assertRaises((ValueError, app_server.IntegrationError)):
+                    self.combined_import(("50", value))
+                self.assertEqual(app_server.DB.state()["students"], [])
+                self.assertEqual(app_server.DB.state()["periods"], [])
+
+    def test_combined_sheet_score_replacement_needs_confirmation(self) -> None:
+        self.combined_import()
+        with self.assertRaises(app_server.IntegrationError) as raised:
+            self.combined_import(("20", "90"))
+        self.assertEqual(raised.exception.code, "replacement_confirmation_required")
+        self.assertEqual(len(app_server.DB.state()["files"]), 1)
+        self.combined_import(("20", "90"), confirm=True)
+        state = app_server.DB.state()
+        for student in state["students"]:
+            exam = app_server.DB.get_exams(student["id"], state["periods"][0]["id"])[0]
+            self.assertEqual(exam["score"], 20 if student["name"] == "Student One" else 90)
+
+    def test_combined_sheet_rolls_back_homework_if_test_write_fails(self) -> None:
+        with patch.object(app_server.DB, "upsert_exam", side_effect=RuntimeError("test write failed")):
+            with self.assertRaisesRegex(RuntimeError, "test write failed"):
+                self.combined_import()
+        state = app_server.DB.state()
+        self.assertEqual(state["students"], [])
+        self.assertEqual(state["periods"], [])
+        self.assertEqual(state["files"], [])
 
     def test_comments_are_locked_until_every_roster_student_has_a_test(self) -> None:
         period_id = self.import_assignment()
@@ -197,7 +273,7 @@ class UploadModalFrontendContractTests(unittest.TestCase):
             "The rendered Save button must be disabled until a week is selected.",
         )
 
-        save = self.section("saveUpload", "chooseAssignmentCsv")
+        save = self.section("saveUpload", "fieldsForKind")
         first_request = save.index("await api(")
         guard = re.search(
             r"if\s*\(\s*!target\s*\)\s*"
@@ -213,7 +289,7 @@ class UploadModalFrontendContractTests(unittest.TestCase):
         )
 
     def test_save_confirms_before_the_first_import_request(self) -> None:
-        save = self.section("saveUpload", "chooseAssignmentCsv")
+        save = self.section("saveUpload", "fieldsForKind")
         first_confirmation = save.find("confirm(")
         first_request = save.find("await api(")
         self.assertGreaterEqual(first_request, 0)
@@ -275,6 +351,19 @@ class UploadModalFrontendContractTests(unittest.TestCase):
         self.assertNotIn("upload-sheet-header", preview)
         self.assertRegex(preview, r"spreadsheet,\s*kind:\s*session\.kind")
 
+    def test_upload_modal_does_not_offer_csv(self) -> None:
+        render = self.section("renderUploadModal", "openUploadModal")
+        self.assertNotIn("Upload CSV", render)
+        self.assertIn("Upload comments PDF", render)
+
+    def test_single_combined_upload_replaces_weekly_test_upload(self) -> None:
+        html = (Path(__file__).resolve().parent / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Homework + test scores", html)
+        self.assertNotIn('data-upload-kind="weekly_test"', html)
+        self.assertIn('data-upload-kind="assignment"', html)
+        self.assertIn('data-upload-kind="comments"', html)
+        self.assertIn("Blank scores preserve existing results", self.javascript)
+
     def test_staged_google_sheet_shows_preview_without_mapping_or_date_fields(self) -> None:
         editor = self.section("uploadStageEditor", "stagedSourceRow")
         google_preview = re.search(
@@ -290,7 +379,7 @@ class UploadModalFrontendContractTests(unittest.TestCase):
             google_preview.start(), editor.index("Week name", google_preview.end())
         )
 
-        save = self.section("saveUpload", "chooseAssignmentCsv")
+        save = self.section("saveUpload", "fieldsForKind")
         google_branch = re.search(
             r'else if\s*\(stage\.mode\s*===\s*"google_sheet"\)\s*\{'
             r"(?P<body>[\s\S]*?)\}\s*else\s*\{",

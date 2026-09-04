@@ -75,6 +75,17 @@ class AutomaticAssignmentSheetDetectionTests(unittest.TestCase):
         self.assertEqual(values[0][-1], "8월 17일")
         self.assertEqual(preview["row_count"], 2)
 
+    def test_ignores_assessment_only_trailing_rows_in_preview(self) -> None:
+        values = self.assignment_sheet("8/17")
+        values.append(["", "", "", "F"])
+
+        selected, _, preview = app_server._automatic_sheet_values(
+            values, "assignment"
+        )
+
+        self.assertEqual(preview["row_count"], 2)
+        self.assertEqual(len(selected), 3)
+
     def test_rejects_a_workbook_when_no_assignment_tab_is_valid(self) -> None:
         worksheets = [
             {

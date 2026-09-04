@@ -29,6 +29,7 @@ from integrations import (
     REQUIRED_PLACEHOLDERS,
     SUPPORTED_PLACEHOLDERS,
     mapped_records,
+    normalize_header,
     parse_number,
     preview_table,
     report_replacements,
@@ -36,13 +37,16 @@ from integrations import (
 )
 from report_engine import (
     ValidationError,
+    generate_student_pdf,
     homework_records,
     inspect_example_report,
     inspect_homework_csv,
+    inspect_template,
     parse_date_label,
     parse_comment_pdf,
     student_payload,
 )
+from template_mapping import default_mapping, validate_mapping
 
 
 ROOT = Path(__file__).resolve().parent
@@ -50,6 +54,7 @@ DATA_DIR = Path(os.environ.get("BRIGHTLINE_DATA_DIR", ROOT / "data")).expanduser
 REPORT_DIR = DATA_DIR / "reports"
 EXPORT_DIR = DATA_DIR / "exports"
 EXAMPLE_DIR = DATA_DIR / "examples"
+PDF_TEMPLATE_DIR = DATA_DIR / "templates"
 MAX_REQUEST_BYTES = 60_000_000
 STATIC_FILES = {
     "": "index.html",
@@ -501,6 +506,11 @@ def app_state() -> dict[str, Any]:
     active_google_account = str(google["google_docs"].get("account_name") or "")
     for class_item in state["classes"]:
         template = class_template(class_item["id"])
+        pdf_template = DB.get_class_template_version(class_item["id"])
+        active_pdf_template = DB.get_class_template_version(
+            class_item["id"], published_only=True
+        )
+        pdf_ready = bool(active_pdf_template and active_pdf_template.get("ready"))
         examples = class_example_manifest(class_item["id"])
         example_profile = example_analysis_profile(examples)
         missing = list(template.get("missing_required") or [])
@@ -509,12 +519,13 @@ def app_state() -> dict[str, Any]:
         account_verified = bool(
             not active_google_account or template_account == active_google_account
         )
-        ready = bool(
+        google_template_ready = bool(
             template.get("document_id")
             and not missing
             and not invalid
             and account_verified
         )
+        ready = bool(pdf_ready or google_template_ready)
         item = {
             "class_id": class_item["id"],
             "document_id": str(template.get("document_id") or ""),
@@ -527,12 +538,42 @@ def app_state() -> dict[str, Any]:
                 "ready"
                 if ready
                 else (
-                    "needs_test"
-                    if template.get("document_id") and not account_verified
-                    else ("needs_mapping" if template else "missing")
+                    "needs_mapping"
+                    if pdf_template
+                    else (
+                        "needs_test"
+                        if template.get("document_id") and not account_verified
+                        else ("needs_mapping" if template else "missing")
+                    )
                 )
             ),
             "ready": ready,
+            "output_mode": (
+                "pdf_template"
+                if pdf_ready
+                else ("google_docs" if google_template_ready else "")
+            ),
+            "pdf_template": (
+                {
+                    "id": str(pdf_template.get("id") or ""),
+                    "name": str(pdf_template.get("name") or "Company report template"),
+                    "version": int(pdf_template.get("version") or 0),
+                    "status": str(pdf_template.get("status") or "draft"),
+                    "ready": pdf_ready,
+                    "active_version": int(active_pdf_template.get("version") or 0)
+                    if active_pdf_template
+                    else 0,
+                    "page_width": float(pdf_template.get("page_width") or 0),
+                    "page_height": float(pdf_template.get("page_height") or 0),
+                    "page_count": int(pdf_template.get("page_count") or 0),
+                    "mapping": pdf_template.get("mapping") or {},
+                    "created_at": str(pdf_template.get("created_at") or ""),
+                    "published_at": str(pdf_template.get("published_at") or ""),
+                    "preview_url": f"/api/templates/{class_item['id']}/pdf",
+                }
+                if pdf_template
+                else None
+            ),
             "example_count": len(examples),
             "examples": [
                 {
@@ -562,8 +603,11 @@ def app_state() -> dict[str, Any]:
             template_lookup.get(student["class_id"], {}).get("ready")
         )
         student["report_ready"] = bool(student.get("ready") and student["template_ready"])
-        student["google_ready"] = google_docs_ready
-        student["report_ready"] = bool(student["report_ready"] and google_docs_ready)
+        output_mode = str(template_lookup.get(student["class_id"], {}).get("output_mode") or "")
+        student["output_mode"] = output_mode
+        student["output_ready"] = bool(output_mode == "pdf_template" or google_docs_ready)
+        student["google_ready"] = student["output_ready"]
+        student["report_ready"] = bool(student["report_ready"] and student["output_ready"])
 
     period_status_lookup = {
         (item["class_id"], item["period_id"]): item for item in period_statuses
@@ -585,7 +629,14 @@ def app_state() -> dict[str, Any]:
                 "comments_ready": bool(input_status.get("comments_ready")),
                 "comments_allowed": bool(input_status.get("comments_allowed")),
                 "template_ready": bool(template_lookup.get(class_item["id"], {}).get("ready")),
-                "google_ready": google_docs_ready,
+                "output_ready": bool(
+                    template_lookup.get(class_item["id"], {}).get("output_mode") == "pdf_template"
+                    or google_docs_ready
+                ),
+                "google_ready": bool(
+                    template_lookup.get(class_item["id"], {}).get("output_mode") == "pdf_template"
+                    or google_docs_ready
+                ),
             }
         )
     state["data_status"] = data_status
@@ -656,6 +707,26 @@ _AUTOMATIC_SHEET_SCAN_ROWS = 50
 _AUTOMATIC_SHEET_MAX_HEADER_ROWS = 3
 
 
+def _sheet_preview(values: list[list[Any]]) -> dict[str, Any]:
+    preview = preview_table(values)
+    # Support the bilingual percentage heading used in the academy workbook.
+    score_headers = [
+        header for header in preview["headers"]
+        if normalize_header(header) in {
+            "weeklytest점수", "weeklytest점수percentage", "weeklytestpercentage",
+            "시험점수백분율", "주간시험점수",
+        }
+    ]
+    existing = preview["suggested_mapping"].get("weekly_test_score")
+    if len(set(score_headers + ([existing] if existing else []))) > 1:
+        raise IntegrationError(
+            "Use one test-score column for the selected week.", "ambiguous_test_score"
+        )
+    if score_headers:
+        preview["suggested_mapping"]["weekly_test_score"] = score_headers[0]
+    return preview
+
+
 def _is_assignment_date_header(value: Any) -> bool:
     """Return whether a heading is a supported assignment date label."""
 
@@ -716,12 +787,34 @@ def _automatic_sheet_candidate(
                 list(item) for item in values[index + header_depth :]
             ]
             try:
-                preview = preview_table(prepared_values)
+                preview = _sheet_preview(prepared_values)
             except IntegrationError:
                 continue
             if not preview.get("row_count"):
                 continue
             mapping = dict(preview.get("suggested_mapping") or {})
+            if {"student_name", "class_name"}.issubset(mapping):
+                header_indices = {
+                    header: column for column, header in enumerate(preview["headers"])
+                }
+                student_column = header_indices[mapping["student_name"]]
+                class_column = header_indices[mapping["class_name"]]
+                prepared_values = [prepared_values[0]] + [
+                    data_row
+                    for data_row in prepared_values[1:]
+                    if (
+                        student_column < len(data_row)
+                        and str(data_row[student_column]).strip()
+                    )
+                    or (
+                        class_column < len(data_row)
+                        and str(data_row[class_column]).strip()
+                    )
+                ]
+                if len(prepared_values) == 1:
+                    continue
+                preview = _sheet_preview(prepared_values)
+                mapping = dict(preview.get("suggested_mapping") or {})
             matched_required = sum(field in mapping for field in required)
             dated_columns = sum(
                 _is_assignment_date_header(header) for header in preview["headers"]
@@ -854,19 +947,20 @@ def _assignment_values_from_dated_columns(
         headers + [completed_header, total_header, excluded_header]
     ]
     for raw_row in values[1:]:
+        padded_row = (list(raw_row) + [""] * len(headers))[: len(headers)]
         completed = sum(
             1
             for index in indices
-            if index < len(raw_row) and str(raw_row[index]).strip().upper() in {"A", "B"}
+            if str(padded_row[index]).strip().upper() in {"A", "B"}
         )
         missed = sum(
             1
             for index in indices
-            if index < len(raw_row) and str(raw_row[index]).strip().upper() == "F"
+            if str(padded_row[index]).strip().upper() == "F"
         )
         excluded = len(indices) - completed - missed
         transformed.append(
-            list(raw_row) + [str(completed), str(completed + missed), str(excluded)]
+            padded_row + [str(completed), str(completed + missed), str(excluded)]
         )
     updated_mapping = dict(mapping)
     updated_mapping.update(
@@ -1130,6 +1224,16 @@ def _mapped_replacement_conflicts(
             )
             if has_value and differs:
                 conflicts.append(label)
+            if "_score" in record:
+                existing = next((
+                    exam for exam in DB.get_exams(student["id"], period["id"])
+                    if exam["label"] == _record_label("weekly_test", record, period)
+                ), None)
+                if existing and (
+                    not _same_number(existing.get("score"), record["_score"])
+                    or not _same_number(existing.get("max_score"), record["_maximum"])
+                ) and label not in conflicts:
+                    conflicts.append(label)
             continue
         destination = _record_label(kind, record, period)
         existing = next(
@@ -1269,7 +1373,9 @@ def import_mapped_table(
                     "_excluded": excluded,
                 }
             )
-        elif kind == "weekly_test":
+        if kind == "weekly_test" or (
+            kind == "assignment" and str(item.get("weekly_test_score") or "").strip()
+        ):
             score = parse_number(
                 item.get("weekly_test_score"), "Weekly Test percentage", required=True
             )
@@ -1283,7 +1389,7 @@ def import_mapped_table(
                     "Weekly Test maximum must be positive and not below the score."
                 )
             item.update({"_score": score, "_maximum": maximum})
-        elif not str(item.get("comment") or "").strip():
+        elif kind == "comments" and not str(item.get("comment") or "").strip():
             raise ValidationError("Every Comments row must include a teacher comment.")
         prepared.append(item)
 
@@ -1373,15 +1479,16 @@ def import_mapped_table(
                     source_provider,
                     connection=transaction,
                 )
-            else:
+            if kind != "assignment" or "_score" in record:
+                exam_kind = "weekly_test" if kind == "assignment" else kind
                 DB.upsert_exam(
                     student["id"],
                     class_record["id"],
                     {
-                        "label": _record_label(kind, record, period),
-                        "score": record.get("_score") if kind == "weekly_test" else None,
+                        "label": _record_label(exam_kind, record, period),
+                        "score": record.get("_score") if exam_kind == "weekly_test" else None,
                         "max_score": record.get("_maximum")
-                        if kind == "weekly_test"
+                        if exam_kind == "weekly_test"
                         else None,
                         "sections": [],
                         "comment": record.get("comment", "") if kind == "comments" else "",
@@ -1406,6 +1513,9 @@ def import_mapped_table(
                 else f"{updated} existing students matched"
             )
         )
+        if kind == "assignment":
+            test_count = sum("_score" in record for record in prepared)
+            summary += f" · {test_count} test scores saved"
         DB.add_import(
             source_name,
             f"{kind}_{'sheet' if source_provider == 'google_sheets' else 'csv'}",
@@ -1595,6 +1705,31 @@ def generate_report(
     preview: bool = False,
 ) -> Path:
     student = get_ready_student(student_id, period_id)
+    pdf_template = DB.get_class_template_version(
+        student["class_id"], published_only=True
+    )
+    period_folder = safe_filename(student.get("period_label", "period"), "period")
+    output = REPORT_DIR / period_folder / f"{student_id}-{uuid.uuid4().hex[:8]}.pdf"
+    if pdf_template and pdf_template.get("ready"):
+        template_path = Path(str(pdf_template.get("source_pdf_path") or "")).resolve()
+        template_root = PDF_TEMPLATE_DIR.resolve()
+        if template_root not in template_path.parents or not template_path.is_file():
+            raise ValidationError("The published company PDF template is unavailable.")
+        generate_student_pdf(
+            student,
+            template_path,
+            output,
+            mapping=dict(pdf_template.get("mapping") or {}),
+        )
+        if archive:
+            DB.archive_report(
+                student,
+                student["period_id"],
+                output,
+                template_version_id=str(pdf_template["id"]),
+            )
+        return output
+
     template = class_template(student["class_id"])
     if not template.get("document_id"):
         raise ValidationError("Connect a Google Docs template for this class first.")
@@ -1611,8 +1746,6 @@ def generate_report(
     if DB.get_setting("google_connection_disabled") == "1":
         raise ValidationError("Reconnect Google Workspace before generating reports.")
     output_folder_id = DB.get_setting("google_output_folder_id") or ""
-    period_folder = safe_filename(student.get("period_label", "period"), "period")
-    output = REPORT_DIR / period_folder / f"{student_id}-{uuid.uuid4().hex[:8]}.pdf"
     report_name = " - ".join(
         (
             safe_filename(student.get("class_name", "Class"), "Class"),
@@ -1672,7 +1805,7 @@ def generate_zip(class_id: str | None = None) -> tuple[Path | None, dict[str, An
                         ("weekly_test_ready", "Weekly Test score"),
                         ("comments_ready", "teacher comment"),
                         ("template_ready", "class template"),
-                        ("google_ready", "Google output connection"),
+                        ("google_ready", "report output"),
                     )
                     if not student.get(field)
                 ]
@@ -1888,6 +2021,17 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/google/oauth/start":
                 self._start_google_oauth()
                 return
+            pdf_template_match = re.fullmatch(r"/api/templates/([a-f0-9]+)/pdf", path)
+            if pdf_template_match:
+                template = DB.get_class_template_version(pdf_template_match.group(1))
+                if not template:
+                    raise ValidationError("Company PDF template not found.")
+                template_path = Path(str(template.get("source_pdf_path") or "")).resolve()
+                template_root = PDF_TEMPLATE_DIR.resolve()
+                if template_root not in template_path.parents:
+                    raise ValidationError("Company PDF template path is invalid.")
+                self._send_file(template_path, "application/pdf")
+                return
             archived_match = re.fullmatch(r"/api/reports/archive/([a-f0-9]+)", path)
             if archived_match:
                 report = DB.get_archived_report(archived_match.group(1))
@@ -2096,7 +2240,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "state": app_state()})
                 return
             template_match = re.fullmatch(
-                r"/api/templates/([a-f0-9]+)/(connect|test|disconnect|example|example-delete)", path
+                r"/api/templates/([a-f0-9]+)/(connect|test|disconnect|example|example-delete|pdf-upload|pdf-map|pdf-disconnect)", path
             )
             if template_match:
                 self._template_action(template_match.group(1), template_match.group(2), payload)
@@ -2109,7 +2253,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 if payload.get("confirm") is not True:
                     raise ValidationError("Reset confirmation is required.")
                 DB.clear_all()
-                for generated_folder in (REPORT_DIR, EXPORT_DIR, EXAMPLE_DIR):
+                for generated_folder in (REPORT_DIR, EXPORT_DIR, EXAMPLE_DIR, PDF_TEMPLATE_DIR):
                     shutil.rmtree(generated_folder, ignore_errors=True)
                 self._send_json({"ok": True, "state": app_state()})
                 return
@@ -2189,6 +2333,8 @@ class AppHandler(BaseHTTPRequestHandler):
             )
         pdf_bytes = decode_base64(payload.get("pdf_base64"), "Comments PDF")
         records = parse_comment_pdf(pdf_bytes, label, filename)
+        if not records:
+            raise ValidationError("No student comments could be extracted from this PDF.")
         matched = 0
         review = 0
         prepared: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
@@ -2446,6 +2592,116 @@ class AppHandler(BaseHTTPRequestHandler):
     def _template_action(self, class_id: str, action: str, payload: dict[str, Any]) -> None:
         if not DB.get_class(class_id):
             raise ValidationError("Class not found.")
+        if action == "pdf-disconnect":
+            if payload.get("confirm") is not True:
+                raise ValidationError("Template removal confirmation is required.")
+            template_id = str(payload.get("template_id") or "")
+            template = (
+                DB.get_template_version(template_id)
+                if template_id
+                else DB.get_class_template_version(class_id)
+            )
+            if not template or template.get("class_id") != class_id:
+                raise ValidationError("Company PDF template not found.")
+            deleted = DB.delete_template_version(str(template["id"]))
+            if deleted:
+                template_path = Path(str(deleted.get("source_pdf_path") or "")).resolve()
+                template_root = PDF_TEMPLATE_DIR.resolve()
+                if template_root in template_path.parents:
+                    template_path.unlink(missing_ok=True)
+            self._send_json(
+                {"ok": True, "message": "Company PDF template removed.", "state": app_state()}
+            )
+            return
+        if action == "pdf-upload":
+            filename = safe_filename(str(payload.get("filename") or "company-template.pdf"))
+            if not filename.casefold().endswith(".pdf"):
+                filename += ".pdf"
+            pdf_bytes = decode_base64(payload.get("pdf_base64"), "Company PDF template")
+            folder = PDF_TEMPLATE_DIR / class_id
+            folder.mkdir(parents=True, exist_ok=True)
+            template_id = uuid.uuid4().hex
+            temporary = folder / f".{template_id}.upload"
+            stored = folder / f"{template_id}-{filename}"
+            temporary.write_bytes(pdf_bytes)
+            try:
+                inspected = inspect_template(temporary)
+                mapping = validate_mapping(
+                    default_mapping(
+                        inspected["width"], inspected["height"], inspected["pages"]
+                    ),
+                    page_width=inspected["width"],
+                    page_height=inspected["height"],
+                    page_count=inspected["pages"],
+                )
+                temporary.replace(stored)
+                try:
+                    template = DB.create_template_version(
+                        class_id=class_id,
+                        name=filename,
+                        source_pdf_path=stored,
+                        source_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
+                        page_width=inspected["width"],
+                        page_height=inspected["height"],
+                        page_count=inspected["pages"],
+                        mapping=mapping,
+                    )
+                except Exception:
+                    stored.unlink(missing_ok=True)
+                    raise
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+            DB.add_import(
+                filename,
+                "report_template",
+                "complete",
+                f"Version {template['version']} uploaded · mapping confirmation required",
+                source_provider="manual",
+            )
+            self._send_json(
+                {
+                    "ok": True,
+                    "message": "Template uploaded. Confirm the suggested regions before generating reports.",
+                    "template_id": template["id"],
+                    "mapping": template["mapping"],
+                    "state": app_state(),
+                },
+                HTTPStatus.CREATED,
+            )
+            return
+        if action == "pdf-map":
+            template_id = str(payload.get("template_id") or "")
+            template = (
+                DB.get_template_version(template_id)
+                if template_id
+                else DB.get_class_template_version(class_id)
+            )
+            if not template or template.get("class_id") != class_id:
+                raise ValidationError("Company PDF template not found.")
+            mapping = validate_mapping(
+                payload.get("mapping"),
+                page_width=float(template["page_width"]),
+                page_height=float(template["page_height"]),
+                page_count=int(template["page_count"]),
+            )
+            published = payload.get("publish") is True
+            template = DB.update_template_mapping(
+                str(template["id"]), mapping, publish=published
+            )
+            self._send_json(
+                {
+                    "ok": True,
+                    "message": (
+                        "Template mapping published and ready for reports."
+                        if published
+                        else "Template mapping saved as a draft."
+                    ),
+                    "template_id": template["id"],
+                    "state": app_state(),
+                }
+            )
+            return
         if action == "disconnect":
             save_class_template(class_id, {})
             self._send_json({"ok": True, "state": app_state()})

@@ -172,6 +172,12 @@ def mapped_records(values: list[list[Any]], mapping: dict[str, Any]) -> list[dic
             for field, header in clean_mapping.items()
             for index in (header_indices[header],)
         }
+        # Google Sheets often retain formatting or assignment marks on a trailing
+        # row after its student cells have been cleared. That is not a student
+        # record, so ignore it when both identity cells are empty. A row with only
+        # one identity value remains an error because importing it would be unsafe.
+        if not record.get("student_name") and not record.get("class_name"):
+            continue
         if not any(record.values()):
             continue
         if not record.get("student_name") or not record.get("class_name"):

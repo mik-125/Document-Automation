@@ -52,31 +52,24 @@
 
         <section class="page active" id="inbox">
           <div class="page-intro">
-            <div><span class="eyebrow">ONE RELIABLE PIPELINE</span><h1>Bring in this week’s report data</h1><p>Start with assignments, then weekly tests, then comments. Import from Google Sheets or use the manual fallback.</p></div>
+            <div><span class="eyebrow">ONE RELIABLE PIPELINE</span><h1>Bring in this week’s report data</h1><p>Import homework and test scores from one Google Sheet, then add teacher comments.</p></div>
             <button class="secondary-button" data-go="connections">Manage API connections</button>
           </div>
 
           <div class="source-grid" id="data-source-grid">
             <article class="source-card">
               <div class="source-card-head"><span class="source-icon assignment">01</span><span class="status-pill" id="assignment-source-status">Start here</span></div>
-              <h2>Assignment</h2><p>Class roster and assignment completion for every student.</p>
+              <h2>Homework + test scores</h2><p>One Google Sheet for the class roster, homework marks, and weekly test scores.</p>
               <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="assignment">Upload</button></div>
             </article>
             <article class="source-card">
-              <div class="source-card-head"><span class="source-icon test">02</span><span class="status-pill neutral" id="test-source-status">After assignment</span></div>
-              <h2>Weekly Test</h2><p>Scores and maximum scores matched to the same students and week.</p>
-              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="weekly_test">Upload</button></div>
-            </article>
-            <article class="source-card">
-              <div class="source-card-head"><span class="source-icon comments">03</span><span class="status-pill neutral" id="comments-source-status">Last step</span></div>
-              <h2>Comments</h2><p>Teacher comments by student. Manual files may be CSV or one class-specific PDF.</p>
+              <div class="source-card-head"><span class="source-icon comments">02</span><span class="status-pill neutral" id="comments-source-status">Last step</span></div>
+              <h2>Comments</h2><p>Teacher comments by student. Use Google Sheets or one class-specific searchable PDF.</p>
               <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="comments">Upload</button></div>
             </article>
           </div>
 
-          <input type="file" id="assignment-file-input" accept=".csv,text/csv" data-upload-file-kind="assignment" hidden />
-          <input type="file" id="weekly-test-file-input" accept=".csv,text/csv" data-upload-file-kind="weekly_test" hidden />
-          <input type="file" id="comments-file-input" accept=".csv,text/csv,.pdf,application/pdf" data-upload-file-kind="comments" hidden />
+          <input type="file" id="comments-file-input" accept=".pdf,application/pdf" data-upload-file-kind="comments" hidden />
 
           <section class="section-block">
             <div class="section-heading"><div><span class="eyebrow">READINESS BY CLASS</span><h2>Required inputs</h2><p>Green checks mean every imported student in that class has the required data.</p></div></div>
@@ -97,9 +90,10 @@
 
         <section class="page" id="templates">
           <div class="page-intro">
-            <div><span class="eyebrow">CLASS REPORT TEMPLATES</span><h1>Templates by class</h1><p>Upload completed PDF sample reports so Brightline can study the report design used for each class.</p></div>
+            <div><span class="eyebrow">COMPANY PDF TEMPLATES</span><h1>Map each company’s report layout</h1><p>Upload a clean PDF template, confirm where Brightline should place identity fields, graphs, and comments, then reuse that mapping for every student.</p></div>
           </div>
 
+          <input type="file" id="company-template-input" accept=".pdf,application/pdf" hidden />
           <input type="file" id="example-report-input" accept=".pdf,application/pdf" multiple hidden />
           <div class="table-card">
             <table class="templates-table">
@@ -111,7 +105,7 @@
 
         <section class="page" id="reports">
           <div class="page-intro">
-            <div><span class="eyebrow">GENERATE AND EXPORT</span><h1>Student reports by class</h1><p>Brightline copies the class template, inserts only that student’s data, and exports the finished Google Doc as PDF.</p></div>
+            <div><span class="eyebrow">GENERATE AND EXPORT</span><h1>Student reports by class</h1><p>Brightline places the matched student data, performance graphs, and teacher comments into the published company PDF template.</p></div>
             <button class="primary-button disabled" id="download-all" type="button">Download all ready ZIP</button>
           </div>
 

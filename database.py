@@ -211,6 +211,26 @@ class Database:
                     generated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS template_versions (
+                    id TEXT PRIMARY KEY,
+                    class_id TEXT NOT NULL REFERENCES classes(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    source_pdf_path TEXT NOT NULL,
+                    source_sha256 TEXT NOT NULL,
+                    page_width REAL NOT NULL,
+                    page_height REAL NOT NULL,
+                    page_count INTEGER NOT NULL,
+                    mapping_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    created_at TEXT NOT NULL,
+                    published_at TEXT,
+                    UNIQUE(class_id, version)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_template_versions_class_status
+                ON template_versions(class_id, status, version DESC);
+
                 CREATE TABLE IF NOT EXISTS import_entities (
                     import_id TEXT NOT NULL REFERENCES imports(id) ON DELETE CASCADE,
                     entity_type TEXT NOT NULL,
@@ -242,6 +262,7 @@ class Database:
             self._ensure_column(db, "imports", "source_provider", "TEXT NOT NULL DEFAULT 'manual'")
             self._ensure_column(db, "report_archive", "google_doc_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(db, "report_archive", "google_template_id", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(db, "report_archive", "template_version_id", "TEXT NOT NULL DEFAULT ''")
             db.execute("DROP INDEX IF EXISTS idx_students_external_identity")
             db.execute(
                 "CREATE UNIQUE INDEX idx_students_external_identity "
@@ -1113,6 +1134,7 @@ class Database:
         *,
         google_doc_id: str = "",
         google_template_id: str = "",
+        template_version_id: str = "",
     ) -> dict[str, Any]:
         period = self.get_period(period_id)
         if not period:
@@ -1128,7 +1150,7 @@ class Database:
             db.execute(
                 "INSERT INTO report_archive(id, student_id, class_id, period_id, student_name, class_name, "
                 "period_label, revision, snapshot_json, pdf_path, generated_at, google_doc_id, "
-                "google_template_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "google_template_id, template_version_id) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     report_id,
                     student["id"],
@@ -1143,6 +1165,7 @@ class Database:
                     now_iso(),
                     google_doc_id,
                     google_template_id,
+                    template_version_id,
                 ),
             )
         return self.get_archived_report(report_id) or {}
@@ -1152,11 +1175,128 @@ class Database:
             row = db.execute("SELECT * FROM report_archive WHERE id = ?", (report_id,)).fetchone()
         return dict(row) if row else None
 
+    @staticmethod
+    def _template_version(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["mapping"] = json.loads(result.pop("mapping_json") or "{}")
+        except json.JSONDecodeError:
+            result["mapping"] = {}
+        result["ready"] = bool(
+            result.get("status") == "published"
+            and Path(str(result.get("source_pdf_path") or "")).is_file()
+        )
+        return result
+
+    def create_template_version(
+        self,
+        *,
+        class_id: str,
+        name: str,
+        source_pdf_path: Path,
+        source_sha256: str,
+        page_width: float,
+        page_height: float,
+        page_count: int,
+        mapping: dict[str, Any],
+    ) -> dict[str, Any]:
+        template_id = uuid.uuid4().hex
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM classes WHERE id = ?", (class_id,)).fetchone():
+                raise ValueError("Class not found.")
+            version_row = db.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM template_versions WHERE class_id = ?",
+                (class_id,),
+            ).fetchone()
+            version = int(version_row["version"] or 0) + 1
+            db.execute(
+                "INSERT INTO template_versions(id, class_id, name, version, source_pdf_path, "
+                "source_sha256, page_width, page_height, page_count, mapping_json, status, created_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?)",
+                (
+                    template_id,
+                    class_id,
+                    name.strip() or "Company report template",
+                    version,
+                    str(source_pdf_path),
+                    source_sha256,
+                    float(page_width),
+                    float(page_height),
+                    max(1, int(page_count)),
+                    json.dumps(mapping, ensure_ascii=False),
+                    now_iso(),
+                ),
+            )
+        result = self.get_template_version(template_id)
+        if not result:
+            raise ValueError("Template version could not be created.")
+        return result
+
+    def get_template_version(self, template_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM template_versions WHERE id = ?", (template_id,)
+            ).fetchone()
+        return self._template_version(row)
+
+    def get_class_template_version(
+        self, class_id: str, *, published_only: bool = False
+    ) -> dict[str, Any] | None:
+        clause = "AND status = 'published'" if published_only else ""
+        with self.connect() as db:
+            row = db.execute(
+                f"SELECT * FROM template_versions WHERE class_id = ? {clause} "
+                "ORDER BY version DESC LIMIT 1",
+                (class_id,),
+            ).fetchone()
+        return self._template_version(row)
+
+    def update_template_mapping(
+        self, template_id: str, mapping: dict[str, Any], *, publish: bool
+    ) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT class_id FROM template_versions WHERE id = ?", (template_id,)
+            ).fetchone()
+            if not row:
+                raise ValueError("Template version not found.")
+            if publish:
+                db.execute(
+                    "UPDATE template_versions SET status = 'superseded' "
+                    "WHERE class_id = ? AND status = 'published' AND id <> ?",
+                    (row["class_id"], template_id),
+                )
+            db.execute(
+                "UPDATE template_versions SET mapping_json = ?, status = ?, published_at = ? "
+                "WHERE id = ?",
+                (
+                    json.dumps(mapping, ensure_ascii=False),
+                    "published" if publish else "draft",
+                    now_iso() if publish else None,
+                    template_id,
+                ),
+            )
+        result = self.get_template_version(template_id)
+        if not result:
+            raise ValueError("Template version could not be updated.")
+        return result
+
+    def delete_template_version(self, template_id: str) -> dict[str, Any] | None:
+        existing = self.get_template_version(template_id)
+        if not existing:
+            return None
+        with self.connect() as db:
+            db.execute("DELETE FROM template_versions WHERE id = ?", (template_id,))
+        return existing
+
     def clear_all(self) -> None:
         with self.connect() as db:
             db.execute("DELETE FROM issues")
             db.execute("DELETE FROM report_archive")
             db.execute("DELETE FROM reports")
+            db.execute("DELETE FROM template_versions")
             db.execute("DELETE FROM period_exams")
             db.execute("DELETE FROM exams")
             db.execute("DELETE FROM homework_periods")

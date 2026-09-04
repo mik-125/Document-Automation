@@ -27,6 +27,7 @@ let loadingCount = 0;
 let toastTimer;
 let selectedReportClass = "";
 let pendingExampleClass = "";
+let pendingPdfTemplateClass = "";
 let generationBusy = false;
 let uploadSession = null;
 const UPLOAD_DRAFT_PERIODS_KEY = "brightline.uploadDraftPeriods.v1";
@@ -375,8 +376,7 @@ function renderSourceStatuses() {
   const testsReady = current.some(item => item.weekly_test_count > 0);
   const commentsReady = current.some(item => item.comment_count > 0);
   const statuses = [
-    ["#assignment-source-status", assignmentReady, assignmentReady ? "Imported" : "Start here"],
-    ["#test-source-status", testsReady, testsReady ? "Imported" : "After assignment"],
+    ["#assignment-source-status", assignmentReady && testsReady, assignmentReady ? (testsReady ? "Imported" : "Test scores missing") : "Start here"],
     ["#comments-source-status", commentsReady, commentsReady ? "Imported" : "Last step"],
   ];
   statuses.forEach(([selector, ready, label]) => {
@@ -415,6 +415,7 @@ function renderFiles() {
     comments_sheet: "Comments · Google Sheets",
     comments_pdf: "Comments PDF",
     example_report: "Example report",
+    report_template: "Company PDF template",
   };
   $("#file-list").innerHTML = state.files.map(file => `<div class="file-row"><span class="file-icon">${file.source_provider === "google_sheets" ? "API" : (file.name.split(".").pop() || "FILE").slice(0, 4).toUpperCase()}</span><div class="file-info"><strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(labels[file.kind] || file.kind)} · ${escapeHtml(file.summary)}${file.period_label ? ` · ${escapeHtml(file.period_label)}` : ""}</small></div><div class="file-meta"><span class="status-pill ${file.state === "review" ? "warn" : ""}">${file.state === "review" ? "Review" : "Imported"}</span><time>${escapeHtml(formatDateTime(file.created_at))}</time></div></div>`).join("");
 }
@@ -436,12 +437,20 @@ function renderTemplates() {
   }
   body.innerHTML = state.classes.map(classItem => {
     const template = templateForClass(classItem.id) || {};
+    const pdf = template.pdf_template;
     const profile = template.example_profile || {};
     const exampleCount = template.example_count || 0;
     const sampleSummary = exampleCount
       ? `${profile.multi_page_count || 0} multi-page · ${profile.image_xobject_count || 0} image/graph region${profile.image_xobject_count === 1 ? "" : "s"}`
       : "Upload a completed PDF report for this class.";
-    return `<tr><td class="template-class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.teacher || "Teacher not set")}</small></td><td class="template-sample-cell"><div class="template-sample-layout"><div class="template-sample-summary"><strong>${exampleCount ? `${exampleCount} sample report${exampleCount === 1 ? "" : "s"}` : "No sample report uploaded"}</strong><small>${escapeHtml(sampleSummary)}</small></div><div class="template-sample-actions"><button class="table-action" type="button" data-template-example="${classItem.id}">Upload sample report</button>${exampleCount ? `<button class="table-action" type="button" data-template-analysis="${classItem.id}">View uploaded report${exampleCount === 1 ? "" : "s"}</button>` : ""}</div></div></td></tr>`;
+    const activeVersionNote = pdf?.status !== "published" && pdf?.active_version
+      ? ` · Version ${pdf.active_version} remains active`
+      : "";
+    const pdfSummary = pdf
+      ? `Version ${pdf.version} · ${pdf.page_count} page${pdf.page_count === 1 ? "" : "s"} · ${pdf.status === "published" ? "Published" : "Mapping confirmation required"}${activeVersionNote}`
+      : "Upload the clean company PDF before generating reports.";
+    const pdfActions = `<button class="table-action" type="button" data-template-pdf-upload="${classItem.id}">${pdf ? "Upload new version" : "Upload PDF template"}</button>${pdf ? `<button class="table-action" type="button" data-template-pdf-map="${classItem.id}">${pdf.status === "published" ? "Review mapping" : "Confirm mapping"}</button><a class="table-action" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open PDF</a><button class="table-action danger" type="button" data-template-pdf-disconnect="${classItem.id}">Remove</button>` : ""}`;
+    return `<tr><td class="template-class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.teacher || "Teacher not set")}</small></td><td class="template-sample-cell"><div class="template-output-stack"><div class="template-sample-layout"><div class="template-sample-summary"><strong>${escapeHtml(pdf?.name || "No company template")}</strong><small>${escapeHtml(pdfSummary)}</small></div><div class="template-sample-actions">${pdfActions}</div></div><div class="template-sample-layout template-example-layout"><div class="template-sample-summary"><strong>${exampleCount ? `${exampleCount} completed sample${exampleCount === 1 ? "" : "s"}` : "No completed sample"}</strong><small>${escapeHtml(sampleSummary)}</small></div><div class="template-sample-actions"><button class="table-action" type="button" data-template-example="${classItem.id}">Upload sample report</button>${exampleCount ? `<button class="table-action" type="button" data-template-analysis="${classItem.id}">View analysis</button>` : ""}</div></div></div></td></tr>`;
   }).join("");
 }
 
@@ -450,7 +459,7 @@ function reportReason(student) {
   if (!student.weekly_test_ready) return "Weekly Test missing";
   if (!student.comments_ready) return "Comment missing";
   if (!student.template_ready) return "Template missing";
-  if (!student.google_ready) return "Google output missing";
+  if (!(student.output_ready ?? student.google_ready)) return "Report output missing";
   return "Ready";
 }
 
@@ -463,7 +472,7 @@ function renderReports() {
   $("#report-period-select").disabled = !selectedReportClass || !state.periods.length;
   const status = selectedClass ? statusForClass(selectedClass.id, selectedPeriod) : {};
   const checks = [
-    ["Assignment", status.assignment_ready], ["Weekly Test", status.weekly_test_ready], ["Comments", status.comments_ready], ["Template", status.template_ready], ["Google output", status.google_ready],
+    ["Assignment", status.assignment_ready], ["Weekly Test", status.weekly_test_ready], ["Comments", status.comments_ready], ["Template", status.template_ready], ["Report output", status.output_ready ?? status.google_ready],
   ];
   $("#report-checklist").innerHTML = checks.map(([label, ready]) => `<div class="check-card ${ready ? "done" : ""}"><span>${ready ? "✓" : "·"}</span><b>${escapeHtml(label)}</b></div>`).join("");
   const selectedStudents = selectedClass ? studentsForClass(selectedClass.id) : [];
@@ -564,22 +573,14 @@ function arrayBufferToBase64(buffer) {
 
 const UPLOAD_COPY = {
   assignment: {
-    eyebrow: "ASSIGNMENT",
-    title: "Upload assignment completion",
-    copy: "Add the class roster and assignment completion for the selected week.",
-    manual: "Upload CSV",
-  },
-  weekly_test: {
-    eyebrow: "WEEKLY TEST",
-    title: "Upload weekly test scores",
-    copy: "Scores are matched only to students in the selected week's Assignment roster.",
-    manual: "Upload CSV",
+    eyebrow: "HOMEWORK + TEST SCORES",
+    title: "Import this week’s student data",
+    copy: "Use one Google Sheet with student details, dated homework marks, and a Test score or weekly test 점수 (%) column. Percentages use 0–100. Blank scores preserve existing results; students without a score remain incomplete.",
   },
   comments: {
     eyebrow: "COMMENTS",
     title: "Upload student comments",
-    copy: "Use a CSV or Google Sheet, or one class-specific searchable PDF.",
-    manual: "Upload CSV or PDF",
+    copy: "Use a Google Sheet or one class-specific searchable PDF.",
   },
 };
 
@@ -689,7 +690,7 @@ function uploadPrerequisite() {
     ready: Boolean(eligible.length),
     message: eligible.length
       ? `${eligible.length} class${eligible.length === 1 ? " is" : "es are"} ready for Comments. Every imported student must already have Assignment and Weekly Test data.`
-      : `Import both Assignment and Weekly Test for ${target.label} before Comments.`,
+      : `Import homework and test scores together for ${target.label} before Comments.`,
   };
 }
 
@@ -739,7 +740,10 @@ function uploadMappingSelect(field, preview, selected, required) {
 function uploadStageEditor() {
   const stage = currentUploadStage();
   const target = uploadTargetPeriod();
-  if (!stage) return '<div class="staged-source-empty">No source selected. Choose Google Sheets or a local file above.</div>';
+  if (!stage) {
+    const sources = uploadSession?.kind === "comments" ? "Google Sheets or a comments PDF" : "Google Sheets";
+    return `<div class="staged-source-empty">No source selected. Choose ${sources} above.</div>`;
+  }
   if (stage.mode === "legacy_assignment") {
     const options = stage.inspection.dates.map(item => `<option value="${item.iso}">${escapeHtml(item.label)} · ${item.iso}</option>`).join("");
     const periodFields = target?.draft
@@ -798,7 +802,7 @@ function renderUploadModal() {
   const prerequisite = uploadPrerequisite();
   const stage = currentUploadStage();
   if (uploadSession.confirming && stage && target) {
-    const kindLabel = { assignment: "Assignment", weekly_test: "Weekly Test", comments: "Comments" }[uploadSession.kind];
+    const kindLabel = { assignment: "Homework + test scores", weekly_test: "Weekly Test", comments: "Comments" }[uploadSession.kind];
     openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">CONFIRM UPLOAD</span><h2>Check the source and week</h2><p>Nothing has been imported yet. Review these details before continuing.</p></div><div class="upload-modal-controls"><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving">×</button></div></div><div class="upload-confirmation-summary"><div><span>Source</span><strong>${escapeHtml(stage.name)}</strong></div><div><span>Data type</span><strong>${escapeHtml(kindLabel)}</strong></div><div><span>Week</span><strong>${escapeHtml(target.label)}</strong></div></div><div class="safety-note">Choose Go back if the source or week is not correct. Confirm upload will import this source only for the week shown above.</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button" type="button" data-upload-confirm>Confirm upload</button><button class="secondary-button upload-cancel-button" type="button" data-upload-confirm-back>Go back</button><span class="upload-modal-footer-note">This is the final check before data is imported.</span></div>`);
     $("#modal").classList.add("upload-modal");
     return;
@@ -806,10 +810,12 @@ function renderUploadModal() {
   const weekOptions = [...state.periods, ...uploadSession.draftPeriods]
     .map(period => `<option value="${period.id}" ${period.id === uploadSession.periodKey ? "selected" : ""}>${escapeHtml(period.label)}</option>`)
     .join("");
-  const manualDetail = uploadSession.kind === "comments" ? "CSV or one class PDF" : "CSV file";
-  const saveDisabled = !stage || !target || !prerequisite.ready || uploadSession.saving;
   const sourceDisabled = uploadSession.saving;
-  openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">${copy.eyebrow}</span><h2>${copy.title}</h2><p>${copy.copy}</p></div><div class="upload-modal-controls"><label class="upload-week-control"><span>Week</span><select id="upload-week-select" aria-label="Week" ${uploadSession.saving ? "disabled" : ""}>${weekOptions}</select></label><button class="upload-add-week" type="button" data-upload-add-week ${uploadSession.saving ? "disabled" : ""}>+ Add week</button><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving" ${uploadSession.saving ? "disabled" : ""}>×</button></div></div><div class="upload-modal-body"><div class="upload-prerequisite-copy ${prerequisite.ready ? "ready" : ""}"><span>${prerequisite.ready ? "✓" : "!"}</span><div>${escapeHtml(prerequisite.message)}</div></div><div class="upload-source-choices"><button class="upload-source-choice" type="button" data-upload-google ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">GS</span><span><strong>Import Google Sheet</strong><small>Preview the sheet before saving.</small></span></button><button class="upload-source-choice" type="button" data-upload-manual ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">FILE</span><span><strong>${copy.manual}</strong><small>${manualDetail}; held locally until Save.</small></span></button></div>${sheetSourceForm()}${stagedSourceRow()}${uploadStageEditor()}</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button ${saveDisabled ? "disabled" : ""}" type="button" data-upload-save ${saveDisabled ? "disabled" : ""}>${uploadSession.saving ? "Saving…" : "Save"}</button><button class="secondary-button upload-cancel-button" type="button" data-close-modal ${uploadSession.saving ? "disabled" : ""}>Cancel</button><span class="upload-modal-footer-note">Closing without Save discards the staged source. Added week options remain for this browser session.</span></div>`);
+  const pdfChoice = uploadSession.kind === "comments"
+    ? `<button class="upload-source-choice" type="button" data-upload-manual ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">PDF</span><span><strong>Upload comments PDF</strong><small>One searchable PDF for one class; held locally until Save.</small></span></button>`
+    : "";
+  const saveDisabled = !stage || !target || !prerequisite.ready || uploadSession.saving;
+  openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">${copy.eyebrow}</span><h2>${copy.title}</h2><p>${copy.copy}</p></div><div class="upload-modal-controls"><label class="upload-week-control"><span>Week</span><select id="upload-week-select" aria-label="Week" ${uploadSession.saving ? "disabled" : ""}>${weekOptions}</select></label><button class="upload-add-week" type="button" data-upload-add-week ${uploadSession.saving ? "disabled" : ""}>+ Add week</button><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving" ${uploadSession.saving ? "disabled" : ""}>×</button></div></div><div class="upload-modal-body"><div class="upload-prerequisite-copy ${prerequisite.ready ? "ready" : ""}"><span>${prerequisite.ready ? "✓" : "!"}</span><div>${escapeHtml(prerequisite.message)}</div></div><div class="upload-source-choices"><button class="upload-source-choice" type="button" data-upload-google ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">GS</span><span><strong>Import Google Sheet</strong><small>Preview the sheet before saving.</small></span></button>${pdfChoice}</div>${sheetSourceForm()}${stagedSourceRow()}${uploadStageEditor()}</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button ${saveDisabled ? "disabled" : ""}" type="button" data-upload-save ${saveDisabled ? "disabled" : ""}>${uploadSession.saving ? "Saving…" : "Save"}</button><button class="secondary-button upload-cancel-button" type="button" data-close-modal ${uploadSession.saving ? "disabled" : ""}>Cancel</button><span class="upload-modal-footer-note">Closing without Save discards the staged source. Added week options remain for this browser session.</span></div>`);
   $("#modal").classList.add("upload-modal");
   if (stage?.mode === "legacy_assignment" && target?.draft) {
     $("#upload-period-start").value = target.start_date || stage.inspection.dates[0]?.iso || "";
@@ -856,26 +862,11 @@ async function stageManualUpload(file) {
   if (!file || !uploadSession) return;
   const session = uploadSession;
   try {
-    if (session.kind === "comments" && (/\.pdf$/i.test(file.name) || file.type === "application/pdf")) {
-      session.stage = { mode: "comments_pdf", name: file.name, file, classId: "", label: file.name.replace(/\.pdf$/i, "") };
-    } else {
-      const text = await file.text();
-      if (session.kind === "assignment") {
-        try {
-          const inspection = await api("/api/csv/inspect", { method: "POST", body: JSON.stringify({ text }) });
-          if (uploadSession !== session) return;
-          session.stage = { mode: "legacy_assignment", name: file.name, text, inspection };
-        } catch (_inspectionError) {
-          const preview = await api("/api/tabular/preview", { method: "POST", body: JSON.stringify({ text }) });
-          if (uploadSession !== session) return;
-          session.stage = { mode: "mapped_csv", name: file.name, text, preview, mapping: { ...(preview.suggested_mapping || {}) } };
-        }
-      } else {
-        const preview = await api("/api/tabular/preview", { method: "POST", body: JSON.stringify({ text }) });
-        if (uploadSession !== session) return;
-        session.stage = { mode: "mapped_csv", name: file.name, text, preview, mapping: { ...(preview.suggested_mapping || {}) } };
-      }
+    const isPdf = /\.pdf$/i.test(file.name) || file.type === "application/pdf";
+    if (session.kind !== "comments" || !isPdf) {
+      throw new Error("Choose a searchable comments PDF. CSV uploads are no longer used.");
     }
+    session.stage = { mode: "comments_pdf", name: file.name, file, classId: "", label: file.name.replace(/\.pdf$/i, "") };
     session.view = "sources";
     renderUploadModal();
   } catch (error) {
@@ -1013,39 +1004,6 @@ async function saveUpload(confirmed = false) {
       renderUploadModal();
     }
     toast(error.message, "error");
-  }
-}
-
-async function chooseAssignmentCsv(file) {
-  if (!file) return;
-  const text = await file.text();
-  try {
-    const inspection = await api("/api/csv/inspect", { method: "POST", body: JSON.stringify({ text }) });
-    const dates = inspection.dates.map(item => `<option value="${item.iso}">${escapeHtml(item.label)} · ${item.iso}</option>`).join("");
-    openModal(`<span class="eyebrow">ASSIGNMENT CSV</span><h2>Select the reporting week</h2><p><strong>${escapeHtml(file.name)}</strong> contains ${inspection.record_count} student-class records across ${inspection.class_count} classes.</p><form id="assignment-import-form"><label><span>Period name</span><input id="assignment-period-name" value="Week ${state.periods.length + 1}" required /></label><div class="form-grid"><label><span>Start date</span><select id="assignment-period-start" required>${dates}</select></label><label><span>End date</span><select id="assignment-period-end" required>${dates}</select></label></div><div class="calculation-note">Existing academy rule: A and B are completed, F is incomplete, and X or blank is excluded.</div><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Import Assignment</button></div></form>`);
-    $("#assignment-period-end").value = inspection.dates.at(-1).iso;
-    $("#assignment-import-form").onsubmit = async event => {
-      event.preventDefault();
-      try {
-        const payload = { filename: file.name, text, period_label: $("#assignment-period-name").value.trim(), period_start: $("#assignment-period-start").value, period_end: $("#assignment-period-end").value };
-        let result;
-        try {
-          result = await api("/api/csv/import", { method: "POST", body: JSON.stringify(payload) });
-        } catch (error) {
-          if (error.code !== "replacement_confirmation_required" || !confirm(`${error.message}\n\nReplace the existing Assignment data?`)) throw error;
-          result = await api("/api/csv/import", { method: "POST", body: JSON.stringify({ ...payload, confirm_replace: true }) });
-        }
-        state = normalizeState(result.state);
-        closeModal(); render(); toast(result.summary);
-      } catch (error) { toast(error.message, "error"); }
-    };
-  } catch (error) {
-    try {
-      const preview = await api("/api/tabular/preview", { method: "POST", body: JSON.stringify({ text }) });
-      openMappingModal({ kind: "assignment", source: "manual", filename: file.name, text, preview });
-    } catch (fallbackError) { toast(fallbackError.message || error.message, "error"); }
-  } finally {
-    $("#assignment-file-input").value = "";
   }
 }
 
@@ -1282,6 +1240,120 @@ function reviewIssue(issueId) {
   };
 }
 
+const PDF_REGION_LABELS = {
+  student_name: "Student name",
+  class_name: "Class / subject",
+  school_grade: "School and grade",
+  reporting_week: "Reporting week",
+  homework_chart: "Homework graph",
+  homework_summary: "Homework summary",
+  weekly_test_chart: "Weekly-test graph",
+  weekly_test_summary: "Weekly-test summary",
+  teacher_comment: "Teacher comment",
+};
+
+function addPdfTemplate(classId) {
+  pendingPdfTemplateClass = classId;
+  $("#company-template-input").click();
+}
+
+async function uploadPdfTemplate(file) {
+  const classId = pendingPdfTemplateClass;
+  pendingPdfTemplateClass = "";
+  if (!classId || !file) return;
+  try {
+    if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") throw new Error("Choose a PDF template.");
+    const result = await api(`/api/templates/${classId}/pdf-upload`, {
+      method: "POST",
+      body: JSON.stringify({ filename: file.name, pdf_base64: arrayBufferToBase64(await file.arrayBuffer()) }),
+    });
+    state = normalizeState(result.state);
+    render();
+    toast(result.message, "warning");
+    showPdfMapping(classId);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    $("#company-template-input").value = "";
+  }
+}
+
+function mappingPercent(value) {
+  return Math.round(Number(value || 0) * 10000) / 100;
+}
+
+function pdfRegionEditor(region, pageCount) {
+  const box = region.box || {};
+  const pageOptions = Array.from({ length: pageCount }, (_, index) => `<option value="${index + 1}" ${Number(region.page || 1) === index + 1 ? "selected" : ""}>Page ${index + 1}</option>`).join("");
+  const fontFields = region.content_type === "text"
+    ? `<label><span>Font size</span><input data-map-font-size type="number" min="5" max="36" step="0.25" value="${escapeHtml(region.font_size || 8.5)}" /></label><label><span>Minimum</span><input data-map-font-min type="number" min="5" max="36" step="0.25" value="${escapeHtml(region.minimum_font_size || 6.5)}" /></label><label><span>Alignment</span><select data-map-align><option value="left" ${region.align === "left" ? "selected" : ""}>Left</option><option value="center" ${region.align === "center" ? "selected" : ""}>Center</option><option value="right" ${region.align === "right" ? "selected" : ""}>Right</option></select></label>`
+    : `<div class="mapping-region-type">Deterministic line graph</div>`;
+  return `<article class="mapping-region-row" data-mapping-region="${escapeHtml(region.key)}"><header><div><strong>${escapeHtml(PDF_REGION_LABELS[region.key] || region.key)}</strong><small>${escapeHtml(region.content_type)}</small></div><label><span>Page</span><select data-map-page>${pageOptions}</select></label></header><div class="mapping-coordinate-grid"><label><span>Left %</span><input data-map-field="x" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.x)}" /></label><label><span>Bottom %</span><input data-map-field="y" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.y)}" /></label><label><span>Width %</span><input data-map-field="width" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.width)}" /></label><label><span>Height %</span><input data-map-field="height" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.height)}" /></label>${fontFields}</div></article>`;
+}
+
+function showPdfMapping(classId) {
+  const classItem = classById(classId);
+  const pdf = templateForClass(classId)?.pdf_template;
+  if (!pdf) return toast("Upload a company PDF template first.", "error");
+  const mapping = pdf.mapping || {};
+  const regions = (mapping.regions || []).map(region => pdfRegionEditor(region, pdf.page_count || 1)).join("");
+  openModal(`<div class="mapping-modal-header"><div><span class="eyebrow">PDF TEMPLATE MAPPING</span><h2>${escapeHtml(classItem?.name || "Class")} · version ${pdf.version}</h2><p>Confirm where Brightline should place each student field. Coordinates are percentages of the PDF page, measured from the bottom-left.</p></div><a class="secondary-button button-link" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open source PDF</a></div><label><span>Mapping name</span><input id="pdf-mapping-name" value="${escapeHtml(mapping.name || "Company report layout")}" /></label><div class="mapping-region-list">${regions}</div><div class="safety-note">Publish only after checking the source PDF. Brightline will never guess a missing student match or silently clip an overflowing comment.</div><div class="modal-footer"><button class="secondary-button" id="pdf-map-draft" type="button">Save draft</button><button class="primary-button" id="pdf-map-publish" type="button">Publish mapping</button><button class="secondary-button" type="button" data-close-modal>Cancel</button></div>`);
+  $("#modal").classList.add("template-mapping-modal");
+  $("#pdf-map-draft").onclick = () => savePdfMapping(classId, false);
+  $("#pdf-map-publish").onclick = () => savePdfMapping(classId, true);
+}
+
+function collectPdfMapping(classId) {
+  const pdf = templateForClass(classId)?.pdf_template;
+  const mapping = structuredClone(pdf?.mapping || {});
+  mapping.name = $("#pdf-mapping-name").value.trim() || "Company report layout";
+  mapping.regions = (mapping.regions || []).map(region => {
+    const row = document.querySelector(`[data-mapping-region="${region.key}"]`);
+    const updated = { ...region, page: Number(row.querySelector("[data-map-page]").value), box: { ...region.box } };
+    row.querySelectorAll("[data-map-field]").forEach(input => { updated.box[input.dataset.mapField] = Number(input.value) / 100; });
+    if (region.content_type === "text") {
+      updated.font_size = Number(row.querySelector("[data-map-font-size]").value);
+      updated.minimum_font_size = Number(row.querySelector("[data-map-font-min]").value);
+      updated.align = row.querySelector("[data-map-align]").value;
+    }
+    return updated;
+  });
+  return mapping;
+}
+
+async function savePdfMapping(classId, publish) {
+  const pdf = templateForClass(classId)?.pdf_template;
+  if (!pdf) return;
+  try {
+    const result = await api(`/api/templates/${classId}/pdf-map`, {
+      method: "POST",
+      body: JSON.stringify({ template_id: pdf.id, mapping: collectPdfMapping(classId), publish }),
+    });
+    state = normalizeState(result.state);
+    closeModal();
+    render();
+    toast(result.message, publish ? "success" : "warning");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function disconnectPdfTemplate(classId) {
+  const pdf = templateForClass(classId)?.pdf_template;
+  if (!pdf || !confirm(`Remove ${pdf.name} version ${pdf.version} from ${classById(classId)?.name || "this class"}? Generated report history will remain available.`)) return;
+  try {
+    const result = await api(`/api/templates/${classId}/pdf-disconnect`, {
+      method: "POST",
+      body: JSON.stringify({ template_id: pdf.id, confirm: true }),
+    });
+    state = normalizeState(result.state);
+    render();
+    toast(result.message);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 function connectTemplate(classId) {
   const classItem = classById(classId);
   const template = templateForClass(classId) || {};
@@ -1425,8 +1497,7 @@ function bindEvents() {
     if (event.target.closest("[data-upload-google]")) { event.preventDefault(); beginGoogleUpload(); return; }
     if (event.target.closest("[data-upload-manual]")) {
       event.preventDefault();
-      const inputs = { assignment: "#assignment-file-input", weekly_test: "#weekly-test-file-input", comments: "#comments-file-input" };
-      $(inputs[uploadSession?.kind])?.click();
+      if (uploadSession?.kind === "comments") $("#comments-file-input")?.click();
       return;
     }
     if (event.target.closest("[data-upload-remove]")) {
@@ -1449,13 +1520,19 @@ function bindEvents() {
     if (event.target.closest("[data-upload-save]")) { event.preventDefault(); await saveUpload(); return; }
     const manual = event.target.closest("[data-manual-kind]");
     if (manual) {
-      const inputs = { assignment: "#assignment-file-input", weekly_test: "#weekly-test-file-input", comments: "#comments-file-input" };
-      $(inputs[manual.dataset.manualKind]).click(); return;
+      if (manual.dataset.manualKind === "comments") $("#comments-file-input")?.click();
+      return;
     }
     const sheet = event.target.closest("[data-sheet-kind]");
     if (sheet) { openGoogleSheetImport(sheet.dataset.sheetKind); return; }
     const issue = event.target.closest("[data-issue]");
     if (issue) { reviewIssue(issue.dataset.issue); return; }
+    const pdfUpload = event.target.closest("[data-template-pdf-upload]");
+    if (pdfUpload) { addPdfTemplate(pdfUpload.dataset.templatePdfUpload); return; }
+    const pdfMap = event.target.closest("[data-template-pdf-map]");
+    if (pdfMap) { showPdfMapping(pdfMap.dataset.templatePdfMap); return; }
+    const pdfDisconnect = event.target.closest("[data-template-pdf-disconnect]");
+    if (pdfDisconnect) { await disconnectPdfTemplate(pdfDisconnect.dataset.templatePdfDisconnect); return; }
     const connect = event.target.closest("[data-template-connect]");
     if (connect) { connectTemplate(connect.dataset.templateConnect); return; }
     const test = event.target.closest("[data-template-test]");
@@ -1535,6 +1612,7 @@ function bindEvents() {
     };
   });
   $("#example-report-input").onchange = event => uploadExamples(event.target.files);
+  $("#company-template-input").onchange = event => uploadPdfTemplate(event.target.files[0]);
   $("#preview-report").onclick = async event => {
     if (event.currentTarget.classList.contains("disabled")) return;
     await previewGenerated(event.currentTarget.dataset.studentId, event.currentTarget.dataset.periodId);

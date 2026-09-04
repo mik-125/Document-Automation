@@ -348,6 +348,27 @@ class TableMappingTests(unittest.TestCase):
         self.assertEqual(records[0]["student_id"], "S-1")
         self.assertEqual(records[1]["weekly_test_score"], "19")
 
+    def test_ignores_trailing_assessment_row_without_student_identity(self) -> None:
+        values = [
+            ["과목명", "학생", "학년", "학교", "7/13", "7/14"],
+            ["(2차) 09:00 [26SU] DP1 ESS H+S", "엄하진", "10", "J1MS", "A", "F"],
+            ["", "", "", "", "F", "A"],
+        ]
+        mapping = preview_table(values)["suggested_mapping"]
+        records = mapped_records(values, mapping)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["student_name"], "엄하진")
+        self.assertEqual(records[0]["class_name"], "(2차) 09:00 [26SU] DP1 ESS H+S")
+
+    def test_rejects_row_with_only_one_identity_value(self) -> None:
+        values = [
+            ["Class", "Student", "Score"],
+            ["Economics", "", "91"],
+        ]
+        with self.assertRaisesRegex(IntegrationError, "student name and class name"):
+            mapped_records(values, preview_table(values)["suggested_mapping"])
+
     def test_duplicate_headers_are_rejected(self) -> None:
         with self.assertRaises(IntegrationError):
             preview_table([["Student", "Student"], ["Mark", "Mark"]])
@@ -421,6 +442,25 @@ class TableMappingTests(unittest.TestCase):
         self.assertEqual(records[1]["assignment_completed"], "0")
         self.assertEqual(records[1]["assignment_total"], "0")
         self.assertEqual(records[1]["assignment_excluded"], "4")
+
+    def test_dated_assignment_counts_stay_aligned_when_trailing_cells_are_blank(self) -> None:
+        values, mapping, _ = app_server._assignment_values_from_dated_columns(
+            [
+                ["과목명", "학생", "학년", "학교", "7/13", "7/14", "7/15", "7/16", "7/17"],
+                ["(2차) 09:00 [26SU] DP1 ESS H+S", "엄지아", "10", "J1MS", "A", "A", "F"],
+            ],
+            {
+                "class_name": "과목명",
+                "student_name": "학생",
+                "grade": "학년",
+                "school": "학교",
+            },
+        )
+
+        records = mapped_records(values, mapping)
+        self.assertEqual(records[0]["assignment_completed"], "2")
+        self.assertEqual(records[0]["assignment_total"], "3")
+        self.assertEqual(records[0]["assignment_excluded"], "2")
 
 
 class ReportReplacementTests(unittest.TestCase):

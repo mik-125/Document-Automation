@@ -308,7 +308,7 @@ code {
 .disabled { cursor: not-allowed !important; opacity: 0.44; pointer-events: none; }
 .button-row, .source-actions, .report-actions { display: flex; align-items: center; gap: 9px; }
 
-.source-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; }
+.source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; }
 .source-card {
   min-width: 0;
   padding: 21px;
@@ -437,9 +437,11 @@ td small { margin-top: 3px; color: var(--muted); font-size: 9px; }
 }
 .table-action:hover { background: #f1f6f3; }
 .templates-table th:first-child,
-.templates-table td:first-child { width: 34%; }
+.templates-table td:first-child { width: 25%; }
 .template-class-cell strong { font-size: 12px; }
 .template-sample-layout { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.template-output-stack { display: grid; gap: 12px; }
+.template-example-layout { padding-top: 12px; border-top: 1px solid var(--line); }
 .template-sample-summary { min-width: 0; }
 .template-sample-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .placeholder-list { display: flex; max-width: 260px; flex-wrap: wrap; gap: 4px; }
@@ -543,6 +545,29 @@ input:focus, select:focus, textarea:focus { border-color: #78a9a1; }
 .modal > p { margin: 0 0 17px; color: var(--muted); line-height: 1.48; }
 .modal form { display: grid; gap: 14px; }
 .modal.upload-modal { width: min(760px, 100%); }
+.modal.template-mapping-modal {
+  width: min(1040px, 94vw);
+  max-height: 90vh;
+  overflow: auto;
+}
+.mapping-modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 17px; }
+.mapping-modal-header > div { min-width: 0; }
+.mapping-modal-header p { max-width: 720px; margin: 0; color: var(--muted); line-height: 1.48; }
+.mapping-modal-header .button-link { flex: 0 0 auto; }
+.mapping-region-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+.mapping-region-row { padding: 12px; border: 1px solid var(--line); border-radius: 9px; background: #f8faf9; }
+.mapping-region-row > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.mapping-region-row header strong,
+.mapping-region-row header small { display: block; }
+.mapping-region-row header small { margin-top: 2px; color: var(--muted); font-size: 8px; text-transform: uppercase; letter-spacing: 0.08em; }
+.mapping-region-row header label { min-width: 92px; }
+.mapping-coordinate-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.mapping-coordinate-grid label > span,
+.mapping-region-row header label > span { display: block; margin-bottom: 4px; color: var(--muted); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+.mapping-coordinate-grid input,
+.mapping-coordinate-grid select,
+.mapping-region-row header select { width: 100%; min-width: 0; padding: 8px; }
+.mapping-region-type { grid-column: 1 / -1; align-self: end; padding: 9px; border-radius: 7px; background: #eaf2ef; color: #39635c; font-size: 9px; font-weight: 700; }
 .upload-modal-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -800,6 +825,7 @@ input:focus, select:focus, textarea:focus { border-color: #78a9a1; }
   .row-actions { grid-column: 2; grid-row: 1 / span 2; }
   .readiness-row { grid-template-columns: minmax(160px, 1fr) repeat(4, 110px); min-width: 680px; }
   .readiness-table { overflow-x: auto; }
+  .mapping-coordinate-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 680px) {
@@ -819,6 +845,9 @@ input:focus, select:focus, textarea:focus { border-color: #78a9a1; }
   .form-grid, .mapping-grid, .placeholder-modal-list, .report-selectors, .analysis-summary-grid, .example-analysis-row { grid-template-columns: 1fr; }
   .template-sample-layout { align-items: stretch; flex-direction: column; }
   .template-sample-actions { justify-content: flex-start; }
+  .mapping-modal-header { align-items: stretch; flex-direction: column; }
+  .mapping-modal-header .button-link { width: 100%; }
+  .mapping-region-list { grid-template-columns: 1fr; }
   .report-checklist { grid-template-columns: 1fr 1fr; }
   .report-student-row { grid-template-columns: 1fr; }
   .report-data, .row-actions { grid-column: 1; grid-row: auto; }

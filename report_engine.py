@@ -20,6 +20,8 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
+from template_mapping import region_lookup
+
 
 BASE_WIDTH = 540.0
 BASE_HEIGHT = 780.0
@@ -263,6 +265,55 @@ def _cover_name(page_text: str) -> str | None:
     return candidate
 
 
+def _comment_heading(line: str) -> str | None:
+    """Recognize standalone name headings, not names mentioned in sentences."""
+    name = normalize_spaces(line)
+    name = re.sub(r"^\(\s*ON\s*\)\s*", "", name, flags=re.IGNORECASE)
+    if re.fullmatch(r"[가-힣]{2,5}", name):
+        return name
+    if re.fullmatch(r"[A-Z][a-z]+(?:[ '-][A-Z][a-z]+){0,3}", name):
+        return name
+    return None
+
+
+def _inline_comment_records(
+    pages: list[str], label: str, source_name: str
+) -> list[dict[str, Any]] | None:
+    # Layout extraction keeps Korean words on their visual lines. Ordinary
+    # extraction can put each word on a separate line, creating false headings.
+    lines = "\n\n".join(pages).splitlines()
+    headings = []
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        # Headings must be isolated from body text by whitespace/page breaks.
+        if index and lines[index - 1].strip():
+            continue
+        if index + 1 < len(lines) and lines[index + 1].strip():
+            continue
+        name = _comment_heading(line)
+        if name:
+            headings.append((index, name))
+    if not headings:
+        return None
+    if any(line.strip() for line in lines[:headings[0][0]]):
+        raise ValidationError(
+            "Comments appear before the first student heading. "
+            "Start the PDF with a student name on its own line."
+        )
+    records = []
+    for offset, (start, name) in enumerate(headings):
+        end = headings[offset + 1][0] if offset + 1 < len(headings) else len(lines)
+        comment = normalize_spaces("\n".join(lines[start + 1:end]))
+        if not comment:
+            raise ValidationError(f"No teacher comment could be extracted for {name}.")
+        records.append({
+            "name": name, "label": label, "score": None, "max_score": None,
+            "sections": [], "comment": comment, "source_name": source_name,
+        })
+    return records
+
+
 def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[dict[str, Any]]:
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -274,9 +325,25 @@ def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[di
     if not any(text.strip() for text in texts):
         raise ValidationError("The comments PDF has no searchable text. Scanned PDFs need OCR.")
 
+    layout_pages = [page.extract_text(extraction_mode="layout") or "" for page in reader.pages]
+    # Keep the legacy cover-page/score format, but recognize name + comment
+    # sections on the same page before the old short-page cover heuristic.
+    has_inline_heading = any(
+        any(_comment_heading(line) for line in page.splitlines())
+        and sum(bool(line.strip()) for line in page.splitlines()) > 1
+        for page in layout_pages
+    )
+    if has_inline_heading:
+        inline_records = _inline_comment_records(layout_pages, label, source_name)
+        if inline_records:
+            return inline_records
+
     covers = [(index, name) for index, text in enumerate(texts) if (name := _cover_name(text))]
     if not covers:
-        raise ValidationError("No student cover pages were found in the comments PDF.")
+        raise ValidationError(
+            "No student headings were found. Put each student name on its own line, "
+            "with a blank line before and after it, followed by their comment."
+        )
 
     records: list[dict[str, Any]] = []
     for cover_index, (page_index, name) in enumerate(covers):
@@ -849,9 +916,10 @@ def _draw_lines(
     top_y: float,
     font_size: float,
     leading: float,
+    font_name: str | None = None,
 ) -> None:
     text = c.beginText(x, top_y)
-    text.setFont(APP_FONT, font_size)
+    text.setFont(font_name or APP_FONT, font_size)
     text.setFillColor(INK)
     text.setLeading(leading)
     for line in lines:
@@ -998,7 +1066,10 @@ def _build_overlay_pages(student: dict[str, Any], width: float, height: float) -
         value_key="percent",
         label_key="label",
     )
-    latest = exams[-1] if exams else None
+    latest = next(
+        (exam for exam in reversed(exams) if exam.get("score") is not None),
+        None,
+    )
     if latest:
         section_copy = ", ".join(
             f"{item.get('question')}: {_format_number(item.get('score'))}/{_format_number(item.get('max_score'))}"
@@ -1050,29 +1121,239 @@ def _generated_continuation_page(width: float, height: float, page_number: int) 
     return PdfReader(io.BytesIO(buffer.getvalue())).pages[0]
 
 
-def generate_student_pdf(student: dict[str, Any], template_path: Path, output_path: Path) -> Path:
+def _mapped_font(region: dict[str, Any]) -> str:
+    requested = str(region.get("font_name") or "auto")
+    if requested == "auto":
+        return register_fonts()
+    if requested in pdfmetrics.getRegisteredFontNames() or requested in {
+        "Helvetica",
+        "Helvetica-Bold",
+        "Times-Roman",
+        "Times-Bold",
+        "Courier",
+        "Courier-Bold",
+    }:
+        return requested
+    return register_fonts()
+
+
+def _mapped_box(region: dict[str, Any], width: float, height: float) -> tuple[float, float, float, float]:
+    box = region["box"]
+    return (
+        float(box["x"]) * width,
+        float(box["y"]) * height,
+        float(box["width"]) * width,
+        float(box["height"]) * height,
+    )
+
+
+def _fit_mapped_text(
+    value: str,
+    region: dict[str, Any],
+    width: float,
+    height: float,
+) -> tuple[str, float, float, list[str]]:
+    font_name = _mapped_font(region)
+    preferred = float(region.get("font_size") or 8.5)
+    minimum = float(region.get("minimum_font_size") or min(6.5, preferred))
+    spacing = float(region.get("line_spacing") or 1.2)
+    size = preferred
+    while size + 0.001 >= minimum:
+        leading = size * spacing
+        lines = _wrap_lines(value, font_name, size, max(1, width))
+        if len(lines) * leading <= height + 0.01:
+            return font_name, size, leading, lines
+        size = round(size - 0.25, 2)
+    raise ValidationError(
+        f"{region['key'].replace('_', ' ').title()} does not fit its template region. "
+        "Increase the region or shorten the source text before generating the report."
+    )
+
+
+def _draw_mapped_text(
+    c: canvas.Canvas,
+    value: str,
+    region: dict[str, Any],
+    *,
+    width: float,
+    height: float,
+) -> None:
+    x, y, box_width, box_height = _mapped_box(region, width, height)
+    font_name, font_size, leading, lines = _fit_mapped_text(
+        str(value or ""), region, box_width, box_height
+    )
+    align = str(region.get("align") or "left")
+    c.setFont(font_name, font_size)
+    c.setFillColor(INK)
+    top_y = y + box_height - font_size
+    if align == "left":
+        _draw_lines(
+            c,
+            lines,
+            x=x,
+            top_y=top_y,
+            font_size=font_size,
+            leading=leading,
+            font_name=font_name,
+        )
+        return
+    for index, line in enumerate(lines):
+        line_y = top_y - index * leading
+        if align == "center":
+            c.drawCentredString(x + box_width / 2, line_y, line)
+        else:
+            c.drawRightString(x + box_width, line_y, line)
+
+
+def _mapped_values(student: dict[str, Any]) -> dict[str, str]:
+    completed = int(student.get("homework_completed") or 0)
+    incomplete = int(student.get("homework_incomplete") or 0)
+    excluded = int(student.get("homework_excluded") or 0)
+    percent = student.get("homework_percent")
+    exams = list(student.get("exams") or [])
+    latest = next(
+        (exam for exam in reversed(exams) if exam.get("score") is not None),
+        None,
+    )
+    if latest:
+        section_copy = ", ".join(
+            f"{item.get('question')}: {_format_number(item.get('score'))}/{_format_number(item.get('max_score'))}"
+            for item in latest.get("sections", [])
+        )
+        weekly_summary = (
+            f"{latest.get('label', 'Weekly test')}: "
+            f"{_format_number(latest.get('score'))}/{_format_number(latest.get('max_score'))}"
+            + (f"\n{section_copy}" if section_copy else "")
+        )
+    else:
+        weekly_summary = "No weekly-test score was supplied."
+    school_grade = " · ".join(
+        value
+        for value in (str(student.get("school") or ""), str(student.get("grade") or ""))
+        if value
+    )
+    period = str(student.get("period_label") or "")
+    if student.get("period_start") and student.get("period_end"):
+        period = f"{period} · {student['period_start']}–{student['period_end']}".strip(" ·")
+    return {
+        "student_name": str(student.get("name") or ""),
+        "class_name": str(student.get("class_name") or ""),
+        "school_grade": school_grade,
+        "reporting_week": period,
+        "homework_summary": (
+            f"Homework completion: {_format_number(percent)}%\n"
+            f"Completed: {completed} · Incomplete: {incomplete} · Excluded: {excluded}"
+        ),
+        "weekly_test_summary": weekly_summary,
+        "teacher_comment": _student_comment(student),
+    }
+
+
+def _build_mapped_overlay_pages(
+    student: dict[str, Any],
+    width: float,
+    height: float,
+    page_count: int,
+    mapping: dict[str, Any],
+) -> list[bytes]:
+    register_fonts()
+    regions = region_lookup(mapping)
+    values = _mapped_values(student)
+    homework_points = list(student.get("homework") or [])
+    test_points = [
+        {
+            "label": exam.get("label", "Test"),
+            "percent": (
+                float(exam["score"]) / float(exam["max_score"]) * 100
+                if exam.get("score") is not None and exam.get("max_score")
+                else None
+            ),
+        }
+        for exam in student.get("exams", [])
+    ]
+    overlays: list[bytes] = []
+    for page_number in range(1, page_count + 1):
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=(width, height), pageCompression=1)
+        for key, region in regions.items():
+            if int(region.get("page") or 1) != page_number:
+                continue
+            if region["content_type"] == "text":
+                _draw_mapped_text(c, values.get(key, ""), region, width=width, height=height)
+                continue
+            x, y, chart_width, chart_height = _mapped_box(region, width, height)
+            padding = min(chart_width, chart_height) * 0.04
+            if key == "homework_chart":
+                _draw_line_chart(
+                    c,
+                    homework_points,
+                    x=x + padding,
+                    y=y + padding,
+                    width=max(1, chart_width - padding * 2),
+                    height=max(1, chart_height - padding * 2),
+                    value_key="score",
+                    label_key="label",
+                )
+            elif key == "weekly_test_chart":
+                _draw_line_chart(
+                    c,
+                    test_points,
+                    x=x + padding,
+                    y=y + padding,
+                    width=max(1, chart_width - padding * 2),
+                    height=max(1, chart_height - padding * 2),
+                    value_key="percent",
+                    label_key="label",
+                )
+        # ReportLab omits a page entirely when it has no drawing operations. A
+        # mapped multi-page template may intentionally place every region on
+        # page one, so explicitly finalize every overlay page.
+        c.showPage()
+        c.save()
+        overlays.append(buffer.getvalue())
+    return overlays
+
+
+def generate_student_pdf(
+    student: dict[str, Any],
+    template_path: Path,
+    output_path: Path,
+    mapping: dict[str, Any] | None = None,
+) -> Path:
     template_reader = PdfReader(template_path)
     if template_reader.is_encrypted or not template_reader.pages:
         raise ValidationError("The active report template is unavailable.")
     first_box = template_reader.pages[0].mediabox
     width, height = float(first_box.width), float(first_box.height)
-    overlays = _build_overlay_pages(student, width, height)
+    overlays = (
+        _build_mapped_overlay_pages(
+            student,
+            width,
+            height,
+            len(template_reader.pages),
+            mapping,
+        )
+        if mapping
+        else _build_overlay_pages(student, width, height)
+    )
     writer = PdfWriter()
     for index, overlay_bytes in enumerate(overlays):
-        if index == 0:
+        if mapping:
+            background = copy.deepcopy(template_reader.pages[index])
+        elif index == 0:
             background = copy.deepcopy(template_reader.pages[0])
         elif len(template_reader.pages) > 1:
-            background = copy.deepcopy(template_reader.pages[1])
+            background = copy.deepcopy(template_reader.pages[min(index, len(template_reader.pages) - 1)])
         else:
             background = _generated_continuation_page(width, height, index + 1)
-        overlay = PdfReader(io.BytesIO(overlay_bytes)).pages[0]
-        background.merge_page(overlay)
-        background.pop(NameObject("/Annots"), None)
         writer.add_page(background)
+        overlay = PdfReader(io.BytesIO(overlay_bytes)).pages[0]
+        writer.pages[-1].merge_page(overlay)
+        writer.pages[-1].pop(NameObject("/Annots"), None)
     writer.add_metadata(
         {
             "/Title": f"Student Report - {student.get('name', '')}",
-            "/Author": "Royal IB",
+            "/Author": "Brightline Reports",
             "/Subject": str(student.get("class_name", "")),
         }
     )
