@@ -14,6 +14,7 @@ import shutil
 import time
 import urllib.parse
 import uuid
+import unicodedata
 import zipfile
 from datetime import UTC, date, datetime
 from http import HTTPStatus
@@ -951,12 +952,12 @@ def _assignment_values_from_dated_columns(
         completed = sum(
             1
             for index in indices
-            if str(padded_row[index]).strip().upper() in {"A", "B"}
+            if unicodedata.normalize("NFKC", str(padded_row[index])).strip().upper() in {"A", "B"}
         )
         missed = sum(
             1
             for index in indices
-            if str(padded_row[index]).strip().upper() == "F"
+            if unicodedata.normalize("NFKC", str(padded_row[index])).strip().upper() == "F"
         )
         excluded = len(indices) - completed - missed
         transformed.append(
@@ -1222,6 +1223,10 @@ def _mapped_replacement_conflicts(
                 != int(record["_excluded"])
                 or not _same_number(current.get("homework_percent"), record["_percent"])
             )
+            old_daily = json.loads(current.get("homework_json") or "[]")
+            if record.get("_daily") and old_daily and old_daily[0].get("label") != "Assignment summary":
+                daily_values = lambda entries: [(entry.get("date"), entry.get("value")) for entry in entries]
+                differs = differs or daily_values(old_daily) != daily_values(record["_daily"])
             if has_value and differs:
                 conflicts.append(label)
             if "_score" in record:
@@ -1276,6 +1281,11 @@ def import_mapped_table(
         or "assignment_percent" in mapping
     ):
         values, mapping, _ = _assignment_values_from_dated_columns(values, mapping)
+    if kind == "assignment":
+        mapping = dict(mapping)
+        for index, header in enumerate(values[0]):
+            if _is_assignment_date_header(str(header)):
+                mapping[f"_daily_{index}"] = str(header)
     records = mapped_records(values, mapping)
     if kind == "comments":
         comment_classes = {
@@ -1301,6 +1311,19 @@ def import_mapped_table(
     for record in records:
         item: dict[str, Any] = dict(record)
         if kind == "assignment":
+            daily = []
+            for field, header in mapping.items():
+                if not field.startswith("_daily_"):
+                    continue
+                day = parse_date_label(str(header), int(str(period["start_date"])[:4]))
+                if day is None or not period["start_date"] <= day.isoformat() <= period["end_date"]:
+                    raise ValidationError("Homework dates must belong to the selected reporting week.")
+                value = str(record.get(field) or "").strip()
+                grade = unicodedata.normalize("NFKC", value).upper()
+                daily.append({"date": day.isoformat(), "label": str(header), "value": value,
+                              "category": "completed" if grade in {"A", "B"} else "incomplete" if grade == "F" else "excluded",
+                              "score": {"A": 100, "B": 75, "F": 0}.get(grade)})
+            item["_daily"] = sorted(daily, key=lambda entry: entry["date"])
             percent_value = parse_number(item.get("assignment_percent"), "Assignment percent")
             if percent_value is not None:
                 if not 0 <= percent_value <= 100:
@@ -1452,7 +1475,7 @@ def import_mapped_table(
                 incomplete = total - completed
                 DB.update_homework(
                     student["id"],
-                    [
+                    record.get("_daily") or [
                         {
                             "date": period["end_date"],
                             "label": "Assignment summary",
@@ -1658,6 +1681,13 @@ def get_ready_student(student_id: str, period_id: str | None = None) -> dict[str
         raise ValidationError("Choose a reporting period for this class.")
     exams = DB.get_exams(student_id, student["period_id"])
     payload = student_payload(student, exams)
+    with DB.connect() as connection:
+        payload["test_history"] = [dict(row) for row in connection.execute(
+            "SELECT e.score, e.max_score, e.label, p.label AS period_label, p.end_date "
+            "FROM period_exams e JOIN periods p ON p.id = e.period_id "
+            "WHERE e.student_id = ? AND e.score IS NOT NULL AND p.end_date <= ? "
+            "ORDER BY p.end_date, e.label", (student_id, student["period_end"])
+        )]
     attempted = int(payload.get("homework_completed") or 0) + int(
         payload.get("homework_incomplete") or 0
     )

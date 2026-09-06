@@ -983,10 +983,8 @@ def _format_number(value: Any) -> str:
 
 def _student_comment(student: dict[str, Any]) -> str:
     exams = student.get("exams", [])
-    for exam in reversed(exams):
-        if exam.get("comment"):
-            return str(exam["comment"])
-    return "No teacher comment was supplied for this reporting period."
+    comments = [str(exam["comment"]) for exam in exams if str(exam.get("comment") or "").strip()]
+    return "\n\n".join(comments) or "No teacher comment was supplied for this reporting period."
 
 
 def _build_overlay_pages(student: dict[str, Any], width: float, height: float) -> list[bytes]:
@@ -1320,6 +1318,12 @@ def generate_student_pdf(
     output_path: Path,
     mapping: dict[str, Any] | None = None,
 ) -> Path:
+    if mapping and mapping.get("layout") == "royal_ib_weekly":
+        from weekly_report import generate_weekly_report
+        return generate_weekly_report(
+            student, output_path, font=register_fonts(),
+            font_size=float((mapping.get("typography") or {}).get("font_size", 10)),
+        )
     template_reader = PdfReader(template_path)
     if template_reader.is_encrypted or not template_reader.pages:
         raise ValidationError("The active report template is unavailable.")

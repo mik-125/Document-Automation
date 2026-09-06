@@ -68,7 +68,7 @@ class WeekUploadWorkflowTests(unittest.TestCase):
         self.assertEqual(preview["suggested_mapping"]["weekly_test_score"], "weekly test\n점수 (%)")
         return app_server.import_mapped_table(
             values=values, mapping=preview["suggested_mapping"],
-            kind="assignment", period=self.period(), source_name="Combined Sheet",
+            kind="assignment", period={**self.period(), "start_date": "2026-07-13", "end_date": "2026-07-17"}, source_name="Combined Sheet",
             source_provider="google_sheets", confirm_replace=confirm,
         )
 
@@ -83,6 +83,11 @@ class WeekUploadWorkflowTests(unittest.TestCase):
             exam = app_server.DB.get_exams(student["id"], state["periods"][0]["id"])[0]
             self.assertEqual(exam["score"], 0 if student["name"] == "Student One" else 85)
             self.assertEqual(exam["max_score"], 100)
+            import json
+            saved = app_server.DB.get_student_for_period(student["id"], state["periods"][0]["id"])
+            daily = json.loads(saved["homework_json"])
+            self.assertEqual([entry["date"] for entry in daily], ["2026-07-13", "2026-07-14"])
+            self.assertEqual([entry["value"] for entry in daily], ["A", "F"] if student["name"] == "Student One" else ["B", ""])
         self.assertTrue(app_server.class_period_has_assignment_and_test(
             state["classes"][0]["id"], state["periods"][0]["id"]
         ))

@@ -1299,6 +1299,17 @@ function showPdfMapping(classId) {
   const regions = (mapping.regions || []).map(region => pdfRegionEditor(region, pdf.page_count || 1)).join("");
   openModal(`<div class="mapping-modal-header"><div><span class="eyebrow">PDF TEMPLATE MAPPING</span><h2>${escapeHtml(classItem?.name || "Class")} · version ${pdf.version}</h2><p>Confirm where Brightline should place each student field. Coordinates are percentages of the PDF page, measured from the bottom-left.</p></div><a class="secondary-button button-link" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open source PDF</a></div><label><span>Mapping name</span><input id="pdf-mapping-name" value="${escapeHtml(mapping.name || "Company report layout")}" /></label><div class="mapping-region-list">${regions}</div><div class="safety-note">Publish only after checking the source PDF. Brightline will never guess a missing student match or silently clip an overflowing comment.</div><div class="modal-footer"><button class="secondary-button" id="pdf-map-draft" type="button">Save draft</button><button class="primary-button" id="pdf-map-publish" type="button">Publish mapping</button><button class="secondary-button" type="button" data-close-modal>Cancel</button></div>`);
   $("#modal").classList.add("template-mapping-modal");
+  const layoutControls = document.createElement("div");
+  layoutControls.innerHTML = `<label><span>Report layout</span><select id="pdf-layout"><option value="uploaded_pdf">Use uploaded PDF and mapped positions</option><option value="royal_ib_weekly">Royal IB weekly report</option></select></label><div id="royal-layout-options"><p>A clean Royal IB report with student details, daily homework grades, and weekly test results. Comments are arranged by subject; general feedback stays labelled separately. Long comments continue on another page.</p><label><span>Comment size (points)</span><input id="pdf-body-size" type="number" min="9" max="12" step="0.5" value="${escapeHtml(mapping.typography?.font_size || 10)}" /></label><small>Uses a Korean-compatible font. This layout replaces the uploaded page design, including old sample names.</small></div>`;
+  $(".mapping-region-list").before(layoutControls);
+  $("#pdf-layout").value = mapping.layout || "uploaded_pdf";
+  const updateLayout = () => {
+    const royal = $("#pdf-layout").value === "royal_ib_weekly";
+    $(".mapping-region-list").classList.toggle("hidden", royal);
+    $("#royal-layout-options").classList.toggle("hidden", !royal);
+  };
+  $("#pdf-layout").onchange = updateLayout;
+  updateLayout();
   $("#pdf-map-draft").onclick = () => savePdfMapping(classId, false);
   $("#pdf-map-publish").onclick = () => savePdfMapping(classId, true);
 }
@@ -1307,6 +1318,9 @@ function collectPdfMapping(classId) {
   const pdf = templateForClass(classId)?.pdf_template;
   const mapping = structuredClone(pdf?.mapping || {});
   mapping.name = $("#pdf-mapping-name").value.trim() || "Company report layout";
+  mapping.layout = $("#pdf-layout").value;
+  mapping.typography = { font_name: "auto", font_size: mapping.layout === "royal_ib_weekly" ? Number($("#pdf-body-size").value) : 10 };
+  if (mapping.layout === "royal_ib_weekly") return mapping;
   mapping.regions = (mapping.regions || []).map(region => {
     const row = document.querySelector(`[data-mapping-region="${region.key}"]`);
     const updated = { ...region, page: Number(row.querySelector("[data-map-page]").value), box: { ...region.box } };

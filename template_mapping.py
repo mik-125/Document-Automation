@@ -106,6 +106,13 @@ def validate_mapping(
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise TemplateMappingError("Template mapping must be an object.")
+    layout = str(payload.get("layout") or "uploaded_pdf")
+    if layout not in {"uploaded_pdf", "royal_ib_weekly"}:
+        raise TemplateMappingError("Choose a supported report layout.")
+    typography = payload.get("typography") or {}
+    body_font_size = _finite_number(typography.get("font_size", 10), "Body font size")
+    if not 9 <= body_font_size <= 12:
+        raise TemplateMappingError("Body font size must be between 9 and 12 points.")
     raw_regions = payload.get("regions")
     if not isinstance(raw_regions, list):
         raise TemplateMappingError("Template mapping needs a regions list.")
@@ -194,6 +201,8 @@ def validate_mapping(
     normalized_regions.sort(key=lambda item: REQUIRED_REGION_KEYS.index(item["key"]))
     return {
         "schema_version": 1,
+        "layout": layout,
+        "typography": {"font_name": "auto", "font_size": body_font_size},
         "name": str(payload.get("name") or "Company report layout").strip()[:120],
         "page_width": round(float(page_width), 2),
         "page_height": round(float(page_height), 2),
