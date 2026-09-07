@@ -28,7 +28,12 @@ def split_comment_sections(text: str) -> dict[str, str]:
     narrative_section = None
     intro = text.split(".", 1)[0]
     narrative = bool("수업" in intro and re.search(r"(?<![A-Za-z])[ABF](?![A-Za-z])", intro))
-    test_narrative = bool(re.search(r"주간\s*테스트", intro))
+    # A teacher's exam narrative stays together until an explicit heading.
+    # Incidental references to homework or sleep do not create new sections.
+    exam_narrative = bool(re.search(
+        r"(?:이번|금주)\s*(?:시험|테스트|Weekly\s+(?:Exam|Test))", intro, re.I
+    ))
+    test_narrative = exam_narrative or bool(re.search(r"주간\s*테스트", intro))
     for line in text.splitlines(keepends=True):
         heading = line.strip().strip("#* :：").strip().casefold()
         matching_heading = next(
@@ -46,6 +51,8 @@ def split_comment_sections(text: str) -> dict[str, str]:
                 continue
             if explicit_section:
                 section = explicit_section
+            elif exam_narrative:
+                section = "test"
             else:
                 clean = sentence.strip()
                 # The imported report narrative commonly follows learning

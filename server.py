@@ -734,6 +734,29 @@ def _is_assignment_date_header(value: Any) -> bool:
     return parse_date_label(str(value or "").strip(), year=2000) is not None
 
 
+def _assignment_period_from_headers(
+    headers: list[Any], proposed_start: Any
+) -> dict[str, str] | None:
+    """Infer a draft reporting range from dated assignment columns."""
+
+    try:
+        proposed_year = date.fromisoformat(str(proposed_start or "")).year
+    except ValueError:
+        return None
+    dates = [
+        parsed
+        for header in headers
+        if (parsed := parse_date_label(str(header or "").strip(), proposed_year))
+        is not None
+    ]
+    if not dates:
+        return None
+    return {
+        "start_date": min(dates).isoformat(),
+        "end_date": max(dates).isoformat(),
+    }
+
+
 def _flatten_sheet_header_rows(rows: list[list[Any]]) -> list[str]:
     """Combine a small multi-row heading into the single row imports consume.
 
@@ -2355,7 +2378,8 @@ class AppHandler(BaseHTTPRequestHandler):
         selected_class = DB.get_class(class_id)
         if not selected_class:
             raise ValidationError("Choose the class represented by this PDF.")
-        if not DB.get_period(period_id):
+        selected_period = DB.get_period(period_id)
+        if not selected_period:
             raise ValidationError("Choose the reporting period represented by this PDF.")
         if not class_period_has_assignment_and_test(class_id, period_id):
             raise ValidationError(
@@ -2367,6 +2391,7 @@ class AppHandler(BaseHTTPRequestHandler):
             raise ValidationError("No student comments could be extracted from this PDF.")
         matched = 0
         review = 0
+        unmatched_comments: list[dict[str, str]] = []
         prepared: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
         conflicts: list[str] = []
         destinations: set[tuple[str, str]] = set()
@@ -2423,6 +2448,13 @@ class AppHandler(BaseHTTPRequestHandler):
                     )
                     matched += 1
                 else:
+                    unmatched_comments.append({
+                        "name": record["name"],
+                        "reason": (
+                            "Multiple students have this name" if candidates
+                            else "No matching student in this class and week"
+                        ),
+                    })
                     DB.add_issue(
                         kind="ambiguous_comment" if candidates else "unmatched_comment",
                         class_id=class_id,
@@ -2434,8 +2466,20 @@ class AppHandler(BaseHTTPRequestHandler):
                         connection=transaction,
                     )
                     review += 1
+            missing_comments = [dict(row) for row in transaction.execute(
+                "SELECT s.id, s.name, s.school, s.grade FROM homework_periods h "
+                "JOIN students s ON s.id = h.student_id "
+                "WHERE s.class_id = ? AND h.period_id = ? AND NOT EXISTS ("
+                "SELECT 1 FROM period_exams e WHERE e.student_id = s.id "
+                "AND e.period_id = h.period_id "
+                "AND TRIM(COALESCE(e.comment, ''), ' ' || CHAR(9) || CHAR(10) || CHAR(13)) <> '') "
+                "ORDER BY s.name, s.school, s.grade, s.id",
+                (class_id, period_id),
+            )]
             import_state = "review" if review else "complete"
             summary = f"{matched} comments matched · {review} need review"
+            if missing_comments:
+                summary += f" · {len(missing_comments)} students missing comments"
             DB.add_import(
                 filename,
                 "comments_pdf",
@@ -2445,7 +2489,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 "manual",
                 connection=transaction,
             )
-        self._send_json({"ok": True, "summary": summary, "state": app_state()})
+        self._send_json({
+            "ok": True, "summary": summary, "state": app_state(),
+            "matching": {
+                "class_name": selected_class["name"],
+                "period_label": selected_period["label"],
+                "missing_comments": missing_comments,
+                "unmatched_comments": unmatched_comments,
+            },
+        })
 
     def _google_sheet_preview(self, payload: dict[str, Any]) -> None:
         if DB.get_setting("google_connection_disabled") == "1":
@@ -2468,16 +2520,21 @@ class AppHandler(BaseHTTPRequestHandler):
             tabs = workbook["tabs"]
         mark_google_service_verified("sheets", workspace)
         _, header_row, preview = _automatic_sheet_values(result["values"], kind)
-        self._send_json(
-            {
-                **preview,
-                "spreadsheet_id": result["spreadsheet_id"],
-                "spreadsheet_name": result["spreadsheet_name"],
-                "worksheet": result["worksheet"],
-                "tabs": tabs,
-                "header_row": header_row,
-            }
-        )
+        response = {
+            **preview,
+            "spreadsheet_id": result["spreadsheet_id"],
+            "spreadsheet_name": result["spreadsheet_name"],
+            "worksheet": result["worksheet"],
+            "tabs": tabs,
+            "header_row": header_row,
+        }
+        if kind == "assignment":
+            assignment_period = _assignment_period_from_headers(
+                preview["headers"], payload.get("period_start")
+            )
+            if assignment_period:
+                response["assignment_period"] = assignment_period
+        self._send_json(response)
 
     def _google_sheet_sync(self, payload: dict[str, Any]) -> None:
         if DB.get_setting("google_connection_disabled") == "1":

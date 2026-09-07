@@ -276,6 +276,34 @@ def _comment_heading(line: str) -> str | None:
     return None
 
 
+def _narrative_name(text: str) -> str | None:
+    match = re.match(
+        r"^(?:\(ON\)\s*)?([가-힣]{2,5})\s+학생(?:은|는|이)\s+\S",
+        normalize_spaces(text), re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
+def _is_comment_score_line(line: str) -> bool:
+    score = r"\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?"
+    return bool(re.fullmatch(
+        rf"(?:총점\s*[:：]\s*{score}|Q\s*\d+\s*\([^()]+\)\s*[:：]\s*{score}"
+        rf"(?:\s*\(\s*전체\s*평균\s*[:：]\s*{score}\s*\))?)",
+        normalize_spaces(line), re.IGNORECASE,
+    ))
+
+
+def _validate_comment_name(name: str, comment: str) -> None:
+    first_content = next((line for line in comment.splitlines()
+                          if line.strip() and not _is_comment_score_line(line)), "")
+    opening_name = _narrative_name(first_content)
+    if opening_name and opening_name != name:
+        raise ValidationError(
+            f"The heading names {name}, but the comment starts with {opening_name}. "
+            "Correct the student name before importing this PDF."
+        )
+
+
 def _inline_comment_records(
     pages: list[str], label: str, source_name: str
 ) -> list[dict[str, Any]] | None:
@@ -304,14 +332,50 @@ def _inline_comment_records(
     records = []
     for offset, (start, name) in enumerate(headings):
         end = headings[offset + 1][0] if offset + 1 < len(headings) else len(lines)
-        comment = normalize_spaces("\n".join(lines[start + 1:end]))
+        raw_comment = "\n".join(lines[start + 1:end])
+        comment = normalize_spaces(raw_comment)
         if not comment:
             raise ValidationError(f"No teacher comment could be extracted for {name}.")
+        _validate_comment_name(name, raw_comment)
         records.append({
             "name": name, "label": label, "score": None, "max_score": None,
             "sections": [], "comment": comment, "source_name": source_name,
         })
     return records
+
+
+def _narrative_comment_records(
+    pages: list[str], label: str, source_name: str
+) -> list[dict[str, Any]] | None:
+    """Read one student's narrative without guessing at names inside the prose."""
+    lines = [normalize_spaces(line) for page in pages for line in page.splitlines()]
+    introductions = [(index, name) for index, line in enumerate(lines)
+                     if (name := _narrative_name(line))]
+    if not introductions:
+        return None
+    start, name = introductions[0]
+    if any(line and not _is_comment_score_line(line) for line in lines[:start]):
+        # Explicit headings and separate legacy covers use the existing paths.
+        first_line = next((line for line in lines if line), "")
+        if _comment_heading(first_line) or (
+            pages and _cover_name(pages[0]) and start >= len(pages[0].splitlines())
+        ):
+            return None
+        raise ValidationError(
+            "Unassigned text appears before the student comment. "
+            "Start with the student's name and comment, optionally after exam scores."
+        )
+    if any(other_name != name for _, other_name in introductions[1:]):
+        raise ValidationError(
+            "This narrative PDF mentions more than one student and cannot be assigned safely. "
+            "Use one student's narrative per PDF, or put each student name on its own line "
+            "with a blank line before and after it."
+        )
+    return [{
+        "name": name, "label": label, "score": None, "max_score": None,
+        "sections": [], "comment": normalize_spaces(" ".join(lines[start:])),
+        "source_name": source_name,
+    }]
 
 
 def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[dict[str, Any]]:
@@ -326,6 +390,12 @@ def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[di
         raise ValidationError("The comments PDF has no searchable text. Scanned PDFs need OCR.")
 
     layout_pages = [page.extract_text(extraction_mode="layout") or "" for page in reader.pages]
+    # An opening student introduction is stronger evidence than an isolated
+    # body subheading such as "Atomic Structure", which can resemble a name.
+    narrative_records = _narrative_comment_records(layout_pages, label, source_name)
+    if narrative_records:
+        return narrative_records
+
     # Keep the legacy cover-page/score format, but recognize name + comment
     # sections on the same page before the old short-page cover heuristic.
     has_inline_heading = any(
@@ -342,7 +412,8 @@ def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[di
     if not covers:
         raise ValidationError(
             "No student headings were found. Put each student name on its own line, "
-            "with a blank line before and after it, followed by their comment."
+            "with a blank line before and after it, followed by their comment; "
+            "or start a single-student narrative with the student's name followed by 학생은."
         )
 
     records: list[dict[str, Any]] = []
@@ -388,6 +459,7 @@ def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[di
         elif score_match:
             comment_start = score_match.end()
         comment = body[comment_start:].strip(" -")
+        _validate_comment_name(name, comment)
         records.append(
             {
                 "name": name,

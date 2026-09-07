@@ -325,7 +325,7 @@ function openModal(html) {
   $("#modal").innerHTML = html;
   $("#modal").scrollTop = 0;
   $("#modal-backdrop").classList.remove("hidden");
-  requestAnimationFrame(() => $("#modal").querySelector("input, select, button")?.focus());
+  requestAnimationFrame(() => $("#modal").querySelector("input, select, button")?.focus({ preventScroll: true }));
 }
 
 function closeModal() {
@@ -594,6 +594,18 @@ function persistUploadDraftPeriods() {
   }
 }
 
+function clearUploadDraftPeriods() {
+  uploadDraftPeriods.splice(0);
+  lastUploadPeriodKey = "";
+  try {
+    if (typeof sessionStorage === "undefined") return;
+    sessionStorage.removeItem(UPLOAD_DRAFT_PERIODS_KEY);
+    sessionStorage.removeItem(UPLOAD_LAST_PERIOD_KEY);
+  } catch (_error) {
+    // Local data is still cleared when browser storage is unavailable.
+  }
+}
+
 function normalizedPeriodLabel(period) {
   return String(period?.label || "").trim().toLocaleLowerCase();
 }
@@ -752,8 +764,12 @@ function uploadStageEditor() {
     return `<div class="safety-note">Detected ${stage.inspection.record_count} student-class records across ${stage.inspection.class_count} classes. A/B are completed, F is incomplete, and X or blank is excluded.</div>${periodFields}`;
   }
   if (stage.mode === "comments_pdf") {
-    const eligibleClasses = state.classes.filter(item => statusForClassPeriod(item.id, target?.id || "").comments_allowed);
-    return `<div class="form-grid"><label><span>Class in this PDF</span><select id="upload-comments-class" required><option value="">Choose a ready class</option>${eligibleClasses.map(item => `<option value="${item.id}" ${item.id === stage.classId ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}</select></label><label><span>Comment label</span><input id="upload-comments-label" value="${escapeHtml(stage.label)}" required /></label></div><div class="safety-note">A Comments PDF represents one class. Uncertain student names go to the review queue; scores found in the PDF are ignored.</div>`;
+    const classOptions = state.classes.map(item => {
+      const status = statusForClassPeriod(item.id, target?.id || "");
+      const missing = status.comments_allowed ? "" : status.assignment_ready ? " — Weekly Test scores missing" : " — Homework missing for this week";
+      return `<option value="${item.id}" ${item.id === stage.classId ? "selected" : ""} ${status.comments_allowed ? "" : "disabled"}>${escapeHtml(item.name + missing)}</option>`;
+    }).join("");
+    return `<div class="form-grid"><label><span>Class in this PDF</span><select id="upload-comments-class" required><option value="">Choose the PDF's class</option>${classOptions}</select></label><label><span>Comment label</span><input id="upload-comments-label" value="${escapeHtml(stage.label)}" required /></label></div><div class="safety-note">Select the class named in your student data. Unavailable classes show what is missing for this week. Uncertain student names go to the review queue; scores found in the PDF are ignored.</div>`;
   }
   if (stage.mode === "google_sheet") {
     stage.previewRowsShown = Math.min(
@@ -803,7 +819,8 @@ function renderUploadModal() {
   const stage = currentUploadStage();
   if (uploadSession.confirming && stage && target) {
     const kindLabel = { assignment: "Homework + test scores", weekly_test: "Weekly Test", comments: "Comments" }[uploadSession.kind];
-    openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">CONFIRM UPLOAD</span><h2>Check the source and week</h2><p>Nothing has been imported yet. Review these details before continuing.</p></div><div class="upload-modal-controls"><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving">×</button></div></div><div class="upload-confirmation-summary"><div><span>Source</span><strong>${escapeHtml(stage.name)}</strong></div><div><span>Data type</span><strong>${escapeHtml(kindLabel)}</strong></div><div><span>Week</span><strong>${escapeHtml(target.label)}</strong></div></div><div class="safety-note">Choose Go back if the source or week is not correct. Confirm upload will import this source only for the week shown above.</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button" type="button" data-upload-confirm>Confirm upload</button><button class="secondary-button upload-cancel-button" type="button" data-upload-confirm-back>Go back</button><span class="upload-modal-footer-note">This is the final check before data is imported.</span></div>`);
+    const classSummary = stage.mode === "comments_pdf" ? `<div><span>Class</span><strong>${escapeHtml(state.classes.find(item => item.id === stage.classId)?.name || "")}</strong></div>` : "";
+    openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">CONFIRM UPLOAD</span><h2>Check the source and week</h2><p>Nothing has been imported yet. Review these details before continuing.</p></div><div class="upload-modal-controls"><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving">×</button></div></div><div class="upload-confirmation-summary"><div><span>Source</span><strong>${escapeHtml(stage.name)}</strong></div><div><span>Data type</span><strong>${escapeHtml(kindLabel)}</strong></div><div><span>Week</span><strong>${escapeHtml(target.label)}</strong><small>${escapeHtml(target.start_date || "")}–${escapeHtml(target.end_date || "")}</small></div>${classSummary}</div><div class="safety-note">Choose Go back if the source, class, or week is not correct. Confirm upload will import this source only for the selection shown above.</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button" type="button" data-upload-confirm>Confirm upload</button><button class="secondary-button upload-cancel-button" type="button" data-upload-confirm-back>Go back</button><span class="upload-modal-footer-note">This is the final check before data is imported.</span></div>`);
     $("#modal").classList.add("upload-modal");
     return;
   }
@@ -891,11 +908,26 @@ function beginGoogleUpload() {
 async function previewUploadSheet() {
   if (!uploadSession) return;
   const session = uploadSession;
+  const periodKey = session.periodKey;
+  const target = uploadTargetPeriod();
   const spreadsheet = $("#upload-sheet-url")?.value.trim();
   if (!spreadsheet) return toast("Enter a Google Sheets URL or ID.", "error");
   try {
-    const preview = await api("/api/google/sheets/preview", { method: "POST", body: JSON.stringify({ spreadsheet, kind: session.kind }) });
-    if (uploadSession !== session) return;
+    const preview = await api("/api/google/sheets/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        spreadsheet,
+        kind: session.kind,
+        period_start: target?.draft ? target.start_date : "",
+      }),
+    });
+    if (uploadSession !== session || session.periodKey !== periodKey) return;
+    const detectedPeriod = preview.assignment_period;
+    if (target?.draft && detectedPeriod?.start_date && detectedPeriod?.end_date) {
+      target.start_date = detectedPeriod.start_date;
+      target.end_date = detectedPeriod.end_date;
+      persistUploadDraftPeriods();
+    }
     session.stage = {
       mode: "google_sheet",
       name: `${preview.spreadsheet_name} · ${preview.worksheet}`,
@@ -997,7 +1029,8 @@ async function saveUpload(confirmed = false) {
     reconcileUploadDraftPeriods();
     closeModal();
     render();
-    toast(`${result.summary || "Upload saved."} · ${target.label}`);
+    if (stage.mode === "comments_pdf") showCommentImportResult(result);
+    else toast(`${result.summary || "Upload saved."} · ${target.label}`);
   } catch (error) {
     if (uploadSession === session) {
       session.saving = false;
@@ -1005,6 +1038,20 @@ async function saveUpload(confirmed = false) {
     }
     toast(error.message, "error");
   }
+}
+
+function showCommentImportResult(result) {
+  const matching = result.matching || {};
+  const missing = matching.missing_comments || [];
+  const unmatched = matching.unmatched_comments || [];
+  if (!missing.length && !unmatched.length) return toast(result.summary || "Comments saved.");
+  const missingList = missing.length
+    ? `<h3>Students without comments (${missing.length})</h3><p>No reports will be generated for these students until their comments are matched.</p><ul>${missing.map(student => `<li><strong>${escapeHtml(student.name)}</strong>${student.school ? ` · ${escapeHtml(student.school)}` : ""}${student.grade ? ` · Grade ${escapeHtml(student.grade)}` : ""}</li>`).join("")}</ul>`
+    : "";
+  const unmatchedList = unmatched.length
+    ? `<h3>PDF comments without a unique student match (${unmatched.length})</h3><p>These comments were not assigned and cannot be used in reports. Check the review queue in Data Inbox.</p><ul>${unmatched.map(comment => `<li><strong>${escapeHtml(comment.name)}</strong> · ${escapeHtml(comment.reason)}</li>`).join("")}</ul>`
+    : "";
+  openModal(`<span class="eyebrow">COMMENT MATCHING</span><h2>Some students still need attention</h2><p>${escapeHtml(matching.class_name || "")} · ${escapeHtml(matching.period_label || "")}</p><div class="safety-note">${escapeHtml(result.summary || "Matched comments saved.")}</div>${missingList}${unmatchedList}<div class="modal-footer"><button class="primary-button" type="button" data-close-modal>Close</button></div>`);
 }
 
 const FIELD_LABELS = {
@@ -1212,7 +1259,7 @@ function openCommentsPdfModal(file) {
         result = await api("/api/comments/pdf/import", { method: "POST", body: JSON.stringify({ ...payload, confirm_replace: true }) });
       }
       state = normalizeState(result.state);
-      closeModal(); render(); toast(result.summary, state.issues.length ? "warning" : "success");
+      closeModal(); render(); showCommentImportResult(result);
     } catch (error) { toast(error.message, "error"); }
   };
 }
@@ -1657,6 +1704,7 @@ function bindEvents() {
     if (!confirm("Clear imported students, reporting periods, local examples, and report history? Google credentials and Google Drive files are not deleted.")) return;
     try {
       const result = await api("/api/reset", { method: "POST", body: JSON.stringify({ confirm: true }) });
+      clearUploadDraftPeriods();
       state = normalizeState(result.state); render(); toast("Local student data cleared.");
     } catch (error) { toast(error.message, "error"); }
   };

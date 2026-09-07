@@ -37,9 +37,35 @@ class WeeklyReportTests(unittest.TestCase):
                                  {"layout": "royal_ib_weekly", "typography": {"font_size": 11}})
             reader = PdfReader(output)
             self.assertGreater(len(reader.pages), 1)
-            text = re.sub(r"\s", "", "".join(page.extract_text() for page in reader.pages))
+            content = [page.extract_text() for page in reader.pages]
+            # Strip the continuation header before rejoining a word across pages.
+            content[1:] = [text.split("코멘트 (계속)\n", 1)[1] for text in content[1:]]
+            text = re.sub(r"\s", "", "".join(content))
             for index in range(180):
                 self.assertEqual(text.count(f"문장{index:03d}"), 1)
+
+    def test_exam_continuation_has_no_repeated_masthead_or_lost_text(self):
+        comment = "이번 Weekly Exam 에서는 개념을 잘 이해했습니다. " + " ".join(
+            f"피드백{index:03d} 계산 과정과 단위도 꼼꼼하게 확인하세요." for index in range(120)
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "continuation.pdf"
+            generate_student_pdf(self.student(comment), Path("unused.pdf"), output,
+                                 {"layout": "royal_ib_weekly", "typography": {"font_size": 10}})
+            pages = PdfReader(output).pages
+            self.assertGreater(len(pages), 1)
+            content = []
+            for index, page in enumerate(pages):
+                text = page.extract_text()
+                if index:
+                    self.assertNotIn("WEEKLY REPORT", text)
+                    self.assertNotIn("엄세하", text)
+                    self.assertNotIn("DP1 ESS H+S", text)
+                content.append(text.split("위클리 테스트\n", 1)[1])
+            text = re.sub(r"\s", "", "".join(content))
+            self.assertIn(re.sub(r"\s", "", comment), text)
+            for index in range(120):
+                self.assertEqual(text.count(f"피드백{index:03d}"), 1)
 
     def test_layout_and_readable_font_choice_survive_validation(self):
         mapping = default_mapping(540, 780)

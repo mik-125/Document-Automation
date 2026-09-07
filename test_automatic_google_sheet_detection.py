@@ -47,6 +47,22 @@ class AutomaticAssignmentSheetDetectionTests(unittest.TestCase):
                 self.assertEqual(transformed[1][-3:], ["1", "1", "0"])
                 self.assertEqual(transformed[2][-3:], ["0", "1", "0"])
 
+    def test_infers_draft_period_from_dated_headers_using_proposed_year(self) -> None:
+        period = app_server._assignment_period_from_headers(
+            ["과목명", "학생", "7/13", "7/14", "7/15", "7/16", "7/17"],
+            "2026-09-07",
+        )
+
+        self.assertEqual(
+            period,
+            {"start_date": "2026-07-13", "end_date": "2026-07-17"},
+        )
+
+    def test_does_not_infer_a_period_without_a_valid_draft_date(self) -> None:
+        self.assertIsNone(
+            app_server._assignment_period_from_headers(["7/13", "7/17"], "")
+        )
+
     def test_selects_a_later_valid_assignment_worksheet(self) -> None:
         worksheets = [
             {

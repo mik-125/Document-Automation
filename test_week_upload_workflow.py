@@ -3,6 +3,8 @@ from __future__ import annotations
 import atexit
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -343,6 +345,43 @@ class UploadModalFrontendContractTests(unittest.TestCase):
                 "Closing an upload modal must not erase added week choices.",
             )
 
+    def test_clearing_local_data_also_clears_temporary_week_choices(self) -> None:
+        helper = self.section("clearUploadDraftPeriods", "normalizedPeriodLabel")
+        reset_handler = self.javascript[
+            self.javascript.index('$("#reset-data").onclick') :
+            self.javascript.index("\n  };", self.javascript.index('$("#reset-data").onclick'))
+        ]
+        self.assertIn("clearUploadDraftPeriods()", reset_handler)
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required for the reset behavior check.")
+        script = f'''
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+const removed = [];
+const context = {{sessionStorage: {{removeItem: key => removed.push(key)}}}};
+vm.runInNewContext(`
+const UPLOAD_DRAFT_PERIODS_KEY = "brightline.uploadDraftPeriods.v1";
+const UPLOAD_LAST_PERIOD_KEY = "brightline.uploadLastPeriod.v1";
+let uploadDraftPeriods = [{{label: "Week 2"}}, {{label: "Week 3"}}];
+let lastUploadPeriodKey = "draft-week-3";
+{helper}
+clearUploadDraftPeriods();
+result = {{drafts: uploadDraftPeriods, last: lastUploadPeriodKey}};
+`, context);
+assert.equal(context.result.drafts.length, 0);
+assert.equal(context.result.last, "");
+assert.deepEqual(removed, ["brightline.uploadDraftPeriods.v1", "brightline.uploadLastPeriod.v1"]);
+'''
+        subprocess.run(
+            [node, "-e", script],
+            cwd=Path(__file__).resolve().parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
     def test_google_sheet_source_only_asks_for_the_sheet_url(self) -> None:
         form = self.section("sheetSourceForm", "renderUploadModal")
         self.assertIn("upload-sheet-url", form)
@@ -356,10 +395,152 @@ class UploadModalFrontendContractTests(unittest.TestCase):
         self.assertNotIn("upload-sheet-header", preview)
         self.assertRegex(preview, r"spreadsheet,\s*kind:\s*session\.kind")
 
+    def test_google_sheet_preview_updates_only_the_selected_draft_week(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required for the upload UI behavior check.")
+        script = r'''
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync("app.js", "utf8");
+const previewSource = source.slice(source.indexOf("async function previewUploadSheet("), source.indexOf("async function saveUpload("));
+const draft = {id: "draft-week-1", label: "Week 1", start_date: "2026-09-07", end_date: "2026-09-13", draft: true};
+const session = {kind: "assignment", periodKey: draft.id, draftPeriods: [draft], stage: null, view: "sheet"};
+let request;
+let persisted = 0;
+let rendered = 0;
+const context = {
+  uploadSession: session,
+  uploadTargetPeriod: () => draft,
+  $: () => ({value: "sheet-id"}),
+  api: async (_url, options) => {
+    request = JSON.parse(options.body);
+    return {
+      spreadsheet_name: "Sample 2 - Brightline",
+      worksheet: "Sheet1",
+      headers: ["학생", "7/13", "7/17"],
+      sample_rows: [],
+      assignment_period: {start_date: "2026-07-13", end_date: "2026-07-17"},
+    };
+  },
+  persistUploadDraftPeriods: () => { persisted += 1; },
+  renderUploadModal: () => { rendered += 1; },
+  toast: error => { throw error; },
+};
+(async () => {
+  await vm.runInNewContext(previewSource + "\npreviewUploadSheet()", context);
+  assert.equal(request.period_start, "2026-09-07");
+  assert.equal(draft.start_date, "2026-07-13");
+  assert.equal(draft.end_date, "2026-07-17");
+  assert.equal(persisted, 1);
+  assert.equal(rendered, 1);
+  assert.equal(session.stage.mode, "google_sheet");
+})().catch(error => { console.error(error); process.exit(1); });
+'''
+        subprocess.run(
+            [node, "-e", script],
+            cwd=Path(__file__).resolve().parent,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
     def test_upload_modal_does_not_offer_csv(self) -> None:
         render = self.section("renderUploadModal", "openUploadModal")
         self.assertNotIn("Upload CSV", render)
         self.assertIn("Upload comments PDF", render)
+
+    def test_pdf_class_choices_explain_unavailable_classes_without_auto_selecting(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required for the upload UI behavior check.")
+        script = r'''
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync("app.js", "utf8");
+const editor = source.slice(source.indexOf("function uploadStageEditor("), source.indexOf("function stagedSourceRow("));
+const stage = {mode: "comments_pdf", classId: "", label: "Week 1"};
+const statuses = {
+  ess: {comments_allowed: true, assignment_ready: true},
+  chem: {comments_allowed: false, assignment_ready: true},
+  other: {comments_allowed: false, assignment_ready: false},
+};
+const context = {
+  currentUploadStage: () => stage,
+  uploadTargetPeriod: () => ({id: "week1"}),
+  state: {classes: [{id: "ess", name: "ESS"}, {id: "chem", name: "Chemistry"}, {id: "other", name: "Other"}]},
+  statusForClassPeriod: id => statuses[id],
+  escapeHtml: text => text,
+};
+let html = vm.runInNewContext(editor + "\nuploadStageEditor()", context);
+assert.match(html, /value="chem"[^>]*disabled[^>]*>Chemistry — Weekly Test scores missing/);
+assert.match(html, /value="other"[^>]*disabled[^>]*>Other — Homework missing for this week/);
+assert.doesNotMatch(html, /<option[^>]*selected/);
+assert.equal(stage.classId, "");
+statuses.chem.comments_allowed = true;
+stage.classId = "chem";
+html = vm.runInNewContext(editor + "\nuploadStageEditor()", context);
+assert.match(html, /value="chem"[^>]*selected[^>]*>Chemistry<\/option>/);
+assert.doesNotMatch(html, /value="chem"[^>]*disabled/);
+'''
+        subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
+                       check=True, capture_output=True, text=True)
+
+    def test_pdf_confirmation_identifies_the_selected_class(self) -> None:
+        render = self.section("renderUploadModal", "openUploadModal")
+        self.assertIn('stage.mode === "comments_pdf"', render)
+        self.assertIn('item.id === stage.classId', render)
+        self.assertIn('<span>Class</span>', render)
+        self.assertIn('${classSummary}', render)
+
+    def test_comment_matching_result_names_both_mismatch_directions(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required for the matching notification check.")
+        script = r'''
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync("app.js", "utf8");
+const helper = source.slice(source.indexOf("function showCommentImportResult("), source.indexOf("const FIELD_LABELS"));
+const escape = source.slice(source.indexOf("function escapeHtml("), source.indexOf("function formatNumber("));
+let html = "";
+let notice = "";
+const result = {summary: "1 matched", matching: {
+  class_name: "Chemistry", period_label: "Week 1",
+  missing_comments: [{name: "June", school: "School A", grade: "10"}],
+  unmatched_comments: [{name: "<img src=x onerror=alert(1)>", reason: "No matching student in this class and week"}],
+}};
+const context = {result, openModal: value => {html = value;}, toast: value => {notice = value;}};
+const run = () => vm.runInNewContext(escape + helper + "\nshowCommentImportResult(result)", context);
+run();
+assert.match(html, /Students without comments \(1\)/);
+assert.match(html, /June/);
+assert.match(html, /School A/);
+assert.match(html, /No reports will be generated/);
+assert.match(html, /PDF comments without a unique student match \(1\)/);
+assert.match(html, /No matching student in this class and week/);
+assert.match(html, /&lt;img/);
+assert.doesNotMatch(html, /<img/);
+assert.match(html, /data-close-modal/);
+assert.equal(notice, "");
+result.matching.missing_comments = [];
+html = "";
+run();
+assert.match(html, /without a unique student match/);
+assert.doesNotMatch(html, /Students without comments/);
+result.matching.unmatched_comments = [];
+html = "";
+run();
+assert.equal(html, "");
+assert.equal(notice, "1 matched");
+'''
+        subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
+                       check=True, capture_output=True, text=True)
+        self.assertIn("showCommentImportResult(result)", self.section("saveUpload", "showCommentImportResult"))
+        self.assertIn("showCommentImportResult(result)", self.section("openCommentsPdfModal", "reviewIssue"))
 
     def test_single_combined_upload_replaces_weekly_test_upload(self) -> None:
         html = (Path(__file__).resolve().parent / "index.html").read_text(encoding="utf-8")

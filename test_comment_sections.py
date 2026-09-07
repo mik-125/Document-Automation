@@ -37,6 +37,21 @@ class CommentSectionTests(unittest.TestCase):
         self.assertIn("91.25%", result["homework"])
         self.assertEqual(Counter("".join(result.values())), Counter(text))
 
+    def test_exam_narrative_keeps_order_and_incidental_homework_advice(self):
+        for intro in ("이번 시험에서", "이번 Weekly Exam 1 에서"):
+            text = (f"학생은 {intro} 개념을 잘 이해했습니다. 계산 과정도 정확합니다. "
+                    "여러 과제를 병행하므로 충분히 쉬세요. 앞으로도 복습하세요.")
+            self.assertEqual(split_comment_sections(text),
+                             {"homework": "", "test": text, "general": ""})
+
+    def test_explicit_heading_ends_exam_narrative(self):
+        text = "이번 Weekly Exam 에서는 계산을 잘했습니다.\n숙제\n과제를 제출하세요.\n총평\n잘했습니다."
+        result = split_comment_sections(text)
+        self.assertEqual(result["test"], "이번 Weekly Exam 에서는 계산을 잘했습니다.\n")
+        self.assertEqual(result["homework"], "숙제\n과제를 제출하세요.\n")
+        self.assertEqual(result["general"], "총평\n잘했습니다.")
+        self.assertEqual(result["test"] + result["homework"] + result["general"], text)
+
     def test_empty_and_whitespace_only_input(self):
         self.assertEqual(split_comment_sections(""), {"homework": "", "test": "", "general": ""})
         self.assertEqual(split_comment_sections(" \n\t")["general"], " \n\t")
