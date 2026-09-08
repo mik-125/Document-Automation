@@ -513,13 +513,13 @@ const result = {summary: "1 matched", matching: {
   missing_comments: [{name: "June", school: "School A", grade: "10"}],
   unmatched_comments: [{name: "<img src=x onerror=alert(1)>", reason: "No matching student in this class and week"}],
 }};
-const context = {result, openModal: value => {html = value;}, toast: value => {notice = value;}};
+const context = {UPLOAD_COPY: {weekly_test_comment: {title: "Weekly test comment"}}, result, openModal: value => {html = value;}, toast: value => {notice = value;}};
 const run = () => vm.runInNewContext(escape + helper + "\nshowCommentImportResult(result)", context);
 run();
-assert.match(html, /Students without comments \(1\)/);
+assert.match(html, /Students without Weekly test comment \(1\)/);
 assert.match(html, /June/);
 assert.match(html, /School A/);
-assert.match(html, /No reports will be generated/);
+assert.match(html, /can still generate reports/);
 assert.match(html, /PDF comments without a unique student match \(1\)/);
 assert.match(html, /No matching student in this class and week/);
 assert.match(html, /&lt;img/);
@@ -530,7 +530,7 @@ result.matching.missing_comments = [];
 html = "";
 run();
 assert.match(html, /without a unique student match/);
-assert.doesNotMatch(html, /Students without comments/);
+assert.doesNotMatch(html, /Students without Weekly test comment/);
 result.matching.unmatched_comments = [];
 html = "";
 run();
@@ -539,7 +539,7 @@ assert.equal(notice, "1 matched");
 '''
         subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
                        check=True, capture_output=True, text=True)
-        self.assertIn("showCommentImportResult(result)", self.section("saveUpload", "showCommentImportResult"))
+        self.assertIn("showCommentImportResult(result, session.kind)", self.section("saveUpload", "showCommentImportResult"))
         self.assertIn("showCommentImportResult(result)", self.section("openCommentsPdfModal", "reviewIssue"))
 
     def test_single_combined_upload_replaces_weekly_test_upload(self) -> None:
@@ -547,7 +547,9 @@ assert.equal(notice, "1 matched");
         self.assertIn("Homework + test scores", html)
         self.assertNotIn('data-upload-kind="weekly_test"', html)
         self.assertIn('data-upload-kind="assignment"', html)
-        self.assertIn('data-upload-kind="comments"', html)
+        self.assertNotIn('data-upload-kind="comments"', html)
+        for kind in ('homework_comment', 'weekly_test_comment', 'general_comment'):
+            self.assertIn(f'data-upload-kind="{kind}"', html)
         self.assertIn("Blank scores preserve existing results", self.javascript)
 
     def test_staged_google_sheet_shows_preview_without_mapping_or_date_fields(self) -> None:
@@ -574,6 +576,101 @@ assert.equal(notice, "1 matched");
         self.assertIsNotNone(google_branch)
         self.assertNotIn("mapping:", google_branch.group("body"))
         self.assertNotIn("header_row", google_branch.group("body"))
+
+    def test_comment_uploads_keep_section_class_week_and_require_review(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required for upload behavior checks.")
+        script = r'''
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync("app.js", "utf8");
+const save = source.slice(source.indexOf("async function saveUpload("), source.indexOf("function showCommentImportResult("));
+const sections = {homework_comment: "homework", weekly_test_comment: "weekly_test", general_comment: "general"};
+(async () => {
+  for (const [kind, section] of Object.entries(sections)) {
+    const requests = [];
+    const session = {kind, stage: {mode: "comments_pdf", name: "class.pdf", classId: "class-b", label: "Feedback", file: {arrayBuffer: async () => new ArrayBuffer(0)}}};
+    const context = {
+      uploadSession: session, COMMENT_SECTIONS: sections, state: {}, lastUploadPeriodKey: "", uploadDraftPeriods: [],
+      captureUploadFields() {}, currentUploadStage: () => session.stage,
+      uploadTargetPeriod: () => ({id: "week-2", label: "Week 2"}), uploadPrerequisite: () => ({ready: true}),
+      statusForClassPeriod: (classId, periodId) => ({comments_allowed: classId === "class-b" && periodId === "week-2"}),
+      renderUploadModal() {}, api: async (url, options) => {requests.push({url, payload: JSON.parse(options.body)}); return {state: {}};},
+      arrayBufferToBase64: () => "pdf-data", normalizeState: value => value,
+      reconcileUploadDraftPeriods() {}, closeModal() {}, render() {}, showCommentImportResult() {}, toast: message => {throw Error(message);},
+    };
+    vm.createContext(context); vm.runInContext(save, context);
+    await context.saveUpload();
+    assert.equal(requests.length, 0); assert.equal(session.confirming, true);
+    await context.saveUpload(true);
+    assert.deepEqual(requests, [{url: "/api/comments/pdf/import", payload: {filename: "class.pdf", class_id: "class-b", period_id: "week-2", comment_section: section, pdf_base64: "pdf-data"}}]);
+  }
+  const requests = [], errors = [];
+  const session = {kind: "homework_comment", stage: {mode: "comments_shared", classId: "class-b", comment: "   "}};
+  const context = {
+    uploadSession: session, COMMENT_SECTIONS: sections, state: {}, lastUploadPeriodKey: "", uploadDraftPeriods: [],
+    captureUploadFields() {}, currentUploadStage: () => session.stage,
+    uploadTargetPeriod: () => ({id: "week-2", label: "Week 2"}), uploadPrerequisite: () => ({ready: true}),
+    statusForClassPeriod: () => ({comments_allowed: true}), renderUploadModal() {},
+    api: async (url, options) => {requests.push({url, payload: JSON.parse(options.body)}); return {state: {}};},
+    normalizeState: value => value, reconcileUploadDraftPeriods() {}, closeModal() {}, render() {}, toast: message => errors.push(message),
+  };
+  vm.createContext(context); vm.runInContext(save, context);
+  await context.saveUpload(); assert.equal(requests.length, 0); assert.match(errors.pop(), /Enter a comment/);
+  session.stage.comment = "  Keep practising.  ";
+  await context.saveUpload(); assert.equal(requests.length, 0); assert.equal(session.confirming, true);
+  await context.saveUpload(true);
+  assert.deepEqual(requests, [{url: "/api/comments/shared", payload: {class_id: "class-b", period_id: "week-2", comment: "Keep practising."}}]);
+})().catch(error => {console.error(error); process.exit(1);});
+'''
+        subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
+                       check=True, capture_output=True, text=True)
+
+    def test_comment_modal_offers_only_allowed_sources(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required for modal behavior checks.")
+        script = r'''
+const assert = require("node:assert/strict"), fs = require("node:fs"), vm = require("node:vm");
+const source = fs.readFileSync("app.js", "utf8");
+const constants = source.slice(source.indexOf("const COMMENT_SECTIONS"), source.indexOf("function persistUploadDraftPeriods("));
+const modal = source.slice(source.indexOf("function renderUploadModal("), source.indexOf("function openUploadModal("));
+let html;
+const session = {kind: "homework_comment", draftPeriods: []};
+const context = {uploadSession: session, state: {periods: []}, uploadTargetPeriod: () => null,
+ uploadPrerequisite: () => ({ready: true}), currentUploadStage: () => null,
+ sheetSourceForm: () => "", stagedSourceRow: () => "", uploadStageEditor: () => "", escapeHtml: value => value,
+ openModal: value => {html = value;}, $: () => ({classList: {add() {}}}), bindSamplePreviewScroll() {}};
+vm.createContext(context); vm.runInContext(constants + modal, context);
+for (const kind of ["homework_comment", "weekly_test_comment", "general_comment", "assignment"]) {
+ session.kind = kind; context.renderUploadModal();
+ assert.equal(html.includes("data-upload-google"), kind === "assignment");
+ assert.equal(html.includes("data-upload-shared"), kind === "homework_comment");
+ assert.equal(html.includes("data-upload-manual"), kind !== "assignment");
+}
+'''
+        subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
+                       check=True, capture_output=True, text=True)
+
+    def test_report_reason_requires_homework_and_either_other_comment(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required for readiness behavior checks.")
+        script = r'''
+const assert = require("node:assert/strict"), fs = require("node:fs"), vm = require("node:vm");
+const source = fs.readFileSync("app.js", "utf8");
+const reason = source.slice(source.indexOf("function reportReason("), source.indexOf("function renderReports("));
+const context = {}; vm.createContext(context); vm.runInContext(reason, context);
+for (const homework of [false, true]) for (const weekly of [false, true]) for (const general of [false, true]) {
+ const student = {assignment_ready: true, weekly_test_ready: true, template_ready: true, output_ready: true,
+ homework_comment_ready: homework, weekly_test_comment_ready: weekly, general_comment_ready: general};
+ assert.equal(context.reportReason(student) === "Ready", homework && (weekly || general));
+}
+'''
+        subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
+                       check=True, capture_output=True, text=True)
 
     def test_new_week_dates_are_created_automatically(self) -> None:
         dates = self.section("nextWeekDates", "createDraftWeek")

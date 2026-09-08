@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from database import Database, normalize_student_name, normalize_value
+from comment_sections import COMMENT_SECTIONS, report_comment_sections
 from integrations import (
     GOOGLE_SCOPES,
     GoogleWorkspace,
@@ -415,7 +416,7 @@ def period_input_matrix() -> tuple[list[dict[str, Any]], dict[tuple[str, str], s
             "FROM homework_periods h JOIN students s ON s.id = h.student_id"
         ).fetchall()
         exam_rows = connection.execute(
-            "SELECT student_id, period_id, score, comment FROM period_exams"
+            "SELECT student_id, period_id, score, comment, comment_section FROM period_exams"
         ).fetchall()
 
     exam_flags: dict[tuple[str, str], dict[str, bool]] = {}
@@ -423,7 +424,9 @@ def period_input_matrix() -> tuple[list[dict[str, Any]], dict[tuple[str, str], s
         key = (str(row["student_id"]), str(row["period_id"]))
         flags = exam_flags.setdefault(key, {"weekly_test": False, "comments": False})
         flags["weekly_test"] = bool(flags["weekly_test"] or row["score"] is not None)
-        flags["comments"] = bool(flags["comments"] or str(row["comment"] or "").strip())
+        section = str(row["comment_section"])
+        flags[f"{section}_comment"] = bool(flags.get(f"{section}_comment") or str(row["comment"] or "").strip())
+        flags["comments"] = bool(flags.get("homework_comment") and (flags.get("weekly_test_comment") or flags.get("general_comment")))
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     rosters: dict[tuple[str, str], set[str]] = {}
@@ -443,6 +446,7 @@ def period_input_matrix() -> tuple[list[dict[str, Any]], dict[tuple[str, str], s
                 ),
                 "weekly_test": bool(flags.get("weekly_test")),
                 "comments": bool(flags.get("comments")),
+                **{f"{section}_comment": bool(flags.get(f"{section}_comment")) for section in COMMENT_SECTIONS},
             }
         )
         rosters.setdefault((class_id, period_id), set()).add(student_id)
@@ -460,6 +464,8 @@ def period_input_matrix() -> tuple[list[dict[str, Any]], dict[tuple[str, str], s
                 "assignment_count": assignment_count,
                 "weekly_test_count": weekly_test_count,
                 "comment_count": comment_count,
+                **{f"{section}_comment_count": sum(item[f"{section}_comment"] for item in students) for section in COMMENT_SECTIONS},
+                **{f"{section}_comment_ready": bool(students) and all(item[f"{section}_comment"] for item in students) for section in COMMENT_SECTIONS},
                 "assignment_ready": bool(students)
                 and assignment_count == len(students),
                 "weekly_test_ready": bool(students)
@@ -625,6 +631,8 @@ def app_state() -> dict[str, Any]:
                 "assignment_count": int(input_status.get("assignment_count") or 0),
                 "weekly_test_count": int(input_status.get("weekly_test_count") or 0),
                 "comment_count": int(input_status.get("comment_count") or 0),
+                **{f"{section}_comment_count": int(input_status.get(f"{section}_comment_count") or 0) for section in COMMENT_SECTIONS},
+                **{f"{section}_comment_ready": bool(input_status.get(f"{section}_comment_ready")) for section in COMMENT_SECTIONS},
                 "assignment_ready": bool(input_status.get("assignment_ready")),
                 "weekly_test_ready": bool(input_status.get("weekly_test_ready")),
                 "comments_ready": bool(input_status.get("comments_ready")),
@@ -1719,8 +1727,11 @@ def get_ready_student(student_id: str, period_id: str | None = None) -> dict[str
         raise ValidationError("This student still needs Assignment data.")
     if not any(exam.get("score") is not None for exam in exams):
         raise ValidationError("This student still needs a Weekly Test score.")
-    if not any(str(exam.get("comment") or "").strip() for exam in exams):
-        raise ValidationError("This student still needs a teacher comment.")
+    payload["comments_by_section"] = report_comment_sections(exams)
+    if not payload["comments_by_section"]["homework"]:
+        raise ValidationError("This student still needs a homework comment.")
+    if not (payload["comments_by_section"]["weekly_test"] or payload["comments_by_section"]["general"]):
+        raise ValidationError("This student still needs a weekly test or general comment.")
     return payload
 
 
@@ -2205,6 +2216,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json({"ok": True, "summary": summary, "state": app_state()})
                 return
+            if path == "/api/comments/shared":
+                self._import_shared_comment(payload)
+                return
             if path == "/api/comments/pdf/import":
                 self._import_comments_pdf(payload)
                 return
@@ -2370,11 +2384,49 @@ class AppHandler(BaseHTTPRequestHandler):
         )
         self._send_json({"ok": True, "summary": summary, "state": app_state()})
 
+    def _import_shared_comment(self, payload: dict[str, Any]) -> None:
+        class_id = str(payload.get("class_id") or "")
+        period_id = str(payload.get("period_id") or "")
+        if not isinstance(payload.get("comment"), str):
+            raise ValidationError("Enter a homework comment for this class and week.")
+        comment = payload["comment"].strip()
+        if payload.get("comment_section", "homework") != "homework":
+            raise ValidationError("Shared comments are available only for homework.")
+        if not comment:
+            raise ValidationError("Enter a homework comment for this class and week.")
+        if not DB.get_class(class_id) or not DB.get_period(period_id):
+            raise ValidationError("Choose a class and reporting period.")
+        if not class_period_has_assignment_and_test(class_id, period_id):
+            raise ValidationError("Import Assignment and Weekly Test data for this class before Comments.")
+        _, rosters = period_input_matrix()
+        student_ids = sorted(rosters.get((class_id, period_id), set()))
+        if payload.get("confirm_replace") is not True and any(
+            exam.get("comment_section") == "homework" and str(exam.get("comment") or "").strip() not in {"", comment}
+            for student_id in student_ids for exam in DB.get_exams(student_id, period_id)
+        ):
+            raise IntegrationError("This would replace existing homework comments. Confirm replacement to continue.", "replacement_confirmation_required")
+        entities = {"exam": set()}
+        with DB.connect() as transaction:
+            for student_id in student_ids:
+                transaction.execute("UPDATE period_exams SET comment = '' WHERE student_id = ? AND period_id = ? AND comment_section = 'homework'", (student_id, period_id))
+                exam_id = DB.upsert_exam(student_id, class_id, {
+                    "label": _comment_label("homework"), "comment": comment,
+                    "comment_section": "homework", "source_name": "Shared homework comment",
+                }, period_id, connection=transaction)
+                entities["exam"].add(exam_id)
+            summary = f"Homework comment applied to {len(student_ids)} students."
+            import_id = DB.add_import("Shared homework comment", "comments_shared", "complete", summary, period_id, connection=transaction)
+            DB.link_import_entities(import_id, entities, connection=transaction)
+        self._send_json({"ok": True, "summary": summary, "state": app_state()})
+
     def _import_comments_pdf(self, payload: dict[str, Any]) -> None:
         filename = str(payload.get("filename") or "teacher-comments.pdf")
         class_id = str(payload.get("class_id") or "")
         period_id = str(payload.get("period_id") or DB.period_id_for_class(class_id) or "")
-        label = _comment_label(payload.get("label"))
+        section = str(payload.get("comment_section", "weekly_test"))
+        if section not in COMMENT_SECTIONS:
+            raise ValidationError("Choose a valid comment section.")
+        label = _comment_label(payload.get("label")) if "comment_section" not in payload else _comment_label(section)
         selected_class = DB.get_class(class_id)
         if not selected_class:
             raise ValidationError("Choose the class represented by this PDF.")
@@ -2405,6 +2457,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 for student in DB.find_students_by_name(class_id, record["name"])
                 if student_period_has_assignment_and_test(student["id"], period_id)
             ]
+            record["comment_section"] = section
             record["score"] = None
             record["max_score"] = None
             prepared.append((record, candidates))
@@ -2419,7 +2472,8 @@ class AppHandler(BaseHTTPRequestHandler):
                     (
                         exam
                         for exam in DB.get_exams(candidates[0]["id"], period_id)
-                        if exam["label"] == record["label"]
+                        if (exam.get("comment_section", "weekly_test") == section if "comment_section" in payload else exam["label"] == record["label"])
+                        and str(exam.get("comment") or "").strip() not in {"", str(record.get("comment") or "").strip()}
                     ),
                     None,
                 )
@@ -2435,10 +2489,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 + ". Confirm replacement to continue.",
                 "replacement_confirmation_required",
             )
+        entities = {"exam": set(), "issue": set()}
         with DB.connect() as transaction:
             for record, candidates in prepared:
                 if len(candidates) == 1:
-                    DB.upsert_exam(
+                    if "comment_section" in payload:
+                        transaction.execute("UPDATE period_exams SET comment = '' WHERE student_id = ? AND period_id = ? AND comment_section = ?", (candidates[0]["id"], period_id, section))
+                    exam_id = DB.upsert_exam(
                         candidates[0]["id"],
                         class_id,
                         record,
@@ -2446,6 +2503,7 @@ class AppHandler(BaseHTTPRequestHandler):
                         "manual",
                         connection=transaction,
                     )
+                    entities["exam"].add(exam_id)
                     matched += 1
                 else:
                     unmatched_comments.append({
@@ -2455,7 +2513,7 @@ class AppHandler(BaseHTTPRequestHandler):
                             else "No matching student in this class and week"
                         ),
                     })
-                    DB.add_issue(
+                    issue_id = DB.add_issue(
                         kind="ambiguous_comment" if candidates else "unmatched_comment",
                         class_id=class_id,
                         source_name=filename,
@@ -2465,22 +2523,25 @@ class AppHandler(BaseHTTPRequestHandler):
                         period_id=period_id,
                         connection=transaction,
                     )
+                    entities["issue"].add(issue_id)
                     review += 1
             missing_comments = [dict(row) for row in transaction.execute(
                 "SELECT s.id, s.name, s.school, s.grade FROM homework_periods h "
                 "JOIN students s ON s.id = h.student_id "
                 "WHERE s.class_id = ? AND h.period_id = ? AND NOT EXISTS ("
                 "SELECT 1 FROM period_exams e WHERE e.student_id = s.id "
-                "AND e.period_id = h.period_id "
+                "AND e.period_id = h.period_id AND e.comment_section = ? "
                 "AND TRIM(COALESCE(e.comment, ''), ' ' || CHAR(9) || CHAR(10) || CHAR(13)) <> '') "
                 "ORDER BY s.name, s.school, s.grade, s.id",
-                (class_id, period_id),
+                (class_id, period_id, section),
             )]
             import_state = "review" if review else "complete"
             summary = f"{matched} comments matched · {review} need review"
+            if "comment_section" in payload:
+                summary = f"{section.replace('_', ' ').title()}: {summary}"
             if missing_comments:
                 summary += f" · {len(missing_comments)} students missing comments"
-            DB.add_import(
+            import_id = DB.add_import(
                 filename,
                 "comments_pdf",
                 import_state,
@@ -2489,6 +2550,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 "manual",
                 connection=transaction,
             )
+            DB.link_import_entities(import_id, entities, connection=transaction)
         self._send_json({
             "ok": True, "summary": summary, "state": app_state(),
             "matching": {
@@ -2911,6 +2973,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 "This student still needs Assignment and Weekly Test data for the selected period."
             )
         record = dict(issue["payload"])
+        section = record.get("comment_section", "weekly_test")
+        if section not in COMMENT_SECTIONS:
+            raise ValidationError("Choose a valid comment section.")
         record["label"] = _comment_label(record.get("label"))
         if not str(record.get("comment") or "").strip():
             raise ValidationError("This review item does not contain a teacher comment.")
@@ -2918,7 +2983,8 @@ class AppHandler(BaseHTTPRequestHandler):
             (
                 exam
                 for exam in DB.get_exams(student_id, period_id)
-                if exam["label"] == record["label"]
+                if exam.get("comment_section", "weekly_test") == section
+                and str(exam.get("comment") or "").strip() not in {"", str(record.get("comment") or "").strip()}
             ),
             None,
         )
@@ -2932,14 +2998,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 "This match would replace a different existing comment. Confirm replacement to continue.",
                 "replacement_confirmation_required",
             )
-        DB.upsert_exam(
-            student_id,
-            issue["class_id"],
-            record,
-            period_id,
-            "manual",
-        )
-        DB.resolve_issue(issue_id)
+        import_id = DB.import_id_for_entity("issue", issue_id)
+        with DB.connect() as transaction:
+            transaction.execute("UPDATE period_exams SET comment = '' WHERE student_id = ? AND period_id = ? AND comment_section = ?", (student_id, period_id, section))
+            exam_id = DB.upsert_exam(student_id, issue["class_id"], record, period_id, "manual", connection=transaction)
+            if import_id:
+                DB.link_import_entities(import_id, {"exam": {exam_id}}, connection=transaction)
+            DB.resolve_issue(issue_id, connection=transaction)
         self._send_json({"ok": True, "state": app_state()})
 
     def log_message(self, format: str, *args: Any) -> None:

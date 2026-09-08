@@ -204,9 +204,10 @@ class CommentPdfImportTests(unittest.TestCase):
         }])
         for name, text, score in [("Mark", "His first comment.", 80), ("June", "Her second comment.", 60)]:
             student = app_server.DB.find_students_by_name(self.class_id, name)[0]
+            app_server.DB.upsert_exam(student["id"], self.class_id, {"label": "Homework", "comment_section": "homework", "comment": "Homework feedback."}, self.period_id)
             payload = app_server.get_ready_student(student["id"], self.period_id)
             from report_engine import _student_comment
-            self.assertEqual(_student_comment(payload), text)
+            self.assertIn(text, _student_comment(payload))
             exams = app_server.DB.get_exams(student["id"], self.period_id)
             self.assertIn(score, [exam["score"] for exam in exams])
         issue = app_server.DB.state()["issues"][0]
@@ -318,7 +319,7 @@ class CommentPdfImportTests(unittest.TestCase):
             for student in app_server.DB.state()["students"]:
                 for options in ({"archive": False, "preview": True}, {"archive": True}):
                     with self.subTest(student=student["id"], options=options):
-                        with self.assertRaisesRegex(ValidationError, "teacher comment"):
+                        with self.assertRaisesRegex(ValidationError, "homework comment"):
                             app_server.generate_report(student["id"], self.period_id, **options)
             render_pdf.assert_not_called()
             google.assert_not_called()
@@ -328,6 +329,7 @@ class CommentPdfImportTests(unittest.TestCase):
         self.upload(["Mark", "", "Mark's saved comment.", "", "Unknown", "",
                      "No report for this name.", "", "김민준", "", "An uncertain comment."])
         mark = app_server.DB.find_students_by_name(self.class_id, "Mark")[0]
+        app_server.DB.upsert_exam(mark["id"], self.class_id, {"label": "Homework", "comment_section": "homework", "comment": "Homework feedback."}, self.period_id)
         output = Path(self.folder.name)
         report = output / "mark.pdf"
         report.write_bytes(comments_pdf([["Generated report"]]))

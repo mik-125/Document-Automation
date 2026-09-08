@@ -21,6 +21,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
 from template_mapping import region_lookup
+from comment_sections import report_comment_sections
 
 
 BASE_WIDTH = 540.0
@@ -1055,6 +1056,13 @@ def _format_number(value: Any) -> str:
 
 def _student_comment(student: dict[str, Any]) -> str:
     exams = student.get("exams", [])
+    if "comments_by_section" in student or any("comment_section" in exam for exam in exams):
+        parts = student.get("comments_by_section") or report_comment_sections(exams)
+        return "\n\n".join(
+            f"{label}\n{parts.get(key, '')}" for key, label in (
+                ("homework", "과제이행도"), ("weekly_test", "위클리 테스트"), ("general", "종합 코멘트")
+            ) if str(parts.get(key) or "").strip()
+        )
     comments = [str(exam["comment"]) for exam in exams if str(exam.get("comment") or "").strip()]
     return "\n\n".join(comments) or "No teacher comment was supplied for this reporting period."
 
@@ -1305,6 +1313,7 @@ def _mapped_values(student: dict[str, Any]) -> dict[str, str]:
     period = str(student.get("period_label") or "")
     if student.get("period_start") and student.get("period_end"):
         period = f"{period} · {student['period_start']}–{student['period_end']}".strip(" ·")
+    parts = student.get("comments_by_section")
     return {
         "student_name": str(student.get("name") or ""),
         "class_name": str(student.get("class_name") or ""),
@@ -1313,9 +1322,12 @@ def _mapped_values(student: dict[str, Any]) -> dict[str, str]:
         "homework_summary": (
             f"Homework completion: {_format_number(percent)}%\n"
             f"Completed: {completed} · Incomplete: {incomplete} · Excluded: {excluded}"
+            + (f"\n\n{parts['homework']}" if parts and parts.get("homework") else "")
         ),
-        "weekly_test_summary": weekly_summary,
-        "teacher_comment": _student_comment(student),
+        "weekly_test_summary": weekly_summary + (
+            f"\n\n{parts['weekly_test']}" if parts and parts.get("weekly_test") else ""
+        ),
+        "teacher_comment": str(parts.get("general") or "") if parts is not None else _student_comment(student),
     }
 
 
@@ -1443,4 +1455,5 @@ def student_payload(student: dict[str, Any], exams: list[dict[str, Any]]) -> dic
     payload = dict(student)
     payload["homework"] = json.loads(payload.pop("homework_json") or "[]")
     payload["exams"] = exams
+    payload["comments_by_section"] = report_comment_sections(exams)
     return payload

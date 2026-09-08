@@ -374,10 +374,13 @@ function renderSourceStatuses() {
   const current = periodInputStatuses(periodId);
   const assignmentReady = current.some(item => item.assignment_count > 0);
   const testsReady = current.some(item => item.weekly_test_count > 0);
-  const commentsReady = current.some(item => item.comment_count > 0);
+
   const statuses = [
     ["#assignment-source-status", assignmentReady && testsReady, assignmentReady ? (testsReady ? "Imported" : "Test scores missing") : "Start here"],
-    ["#comments-source-status", commentsReady, commentsReady ? "Imported" : "Last step"],
+    ...Object.entries(COMMENT_SECTIONS).map(([kind, section]) => {
+      const ready = current.some(item => item[`${section}_comment_count`] > 0);
+      return [`#${kind}-source-status`, ready, ready ? "Imported" : kind === "homework_comment" ? "Required" : "Choose 3 or 4, or both"];
+    }),
   ];
   statuses.forEach(([selector, ready, label]) => {
     const element = $(selector);
@@ -392,7 +395,7 @@ function renderReadiness() {
     return;
   }
   const cell = (ready, count, total, label) => `<div class="check-cell ${ready ? "done" : ""}"><span class="check-mark">${ready ? "✓" : "·"}</span><span>${count}/${total} ${escapeHtml(label)}</span></div>`;
-  $("#data-readiness").innerHTML = `<div class="readiness-row header"><span>Class and period</span><span>Assignment</span><span>Weekly Test</span><span>Comments</span><span>Template</span></div>${state.classes.map(classItem => {
+  $("#data-readiness").innerHTML = `<div class="readiness-row header"><span>Class and period</span><span>Assignment</span><span>Weekly Test</span><span>과제이행도 + (3 or 4)</span><span>Template</span></div>${state.classes.map(classItem => {
     const status = statusForClass(classItem.id, classItem.selected_period_id);
     const total = status.student_count || 0;
     return `<div class="readiness-row"><div class="class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.selected_period_label || "No reporting period")}</small></div>${cell(status.assignment_ready, status.assignment_count || 0, total, "ready")}${cell(status.weekly_test_ready, status.weekly_test_count || 0, total, "ready")}${cell(status.comments_ready, status.comment_count || 0, total, "ready")}${cell(status.template_ready, status.template_ready ? 1 : 0, 1, "connected")}</div>`;
@@ -414,6 +417,7 @@ function renderFiles() {
     comments_csv: "Comments CSV",
     comments_sheet: "Comments · Google Sheets",
     comments_pdf: "Comments PDF",
+    comments_shared: "Shared 과제이행도 comment",
     example_report: "Example report",
     report_template: "Company PDF template",
   };
@@ -457,7 +461,8 @@ function renderTemplates() {
 function reportReason(student) {
   if (!student.assignment_ready) return "Assignment missing";
   if (!student.weekly_test_ready) return "Weekly Test missing";
-  if (!student.comments_ready) return "Comment missing";
+  if (!student.homework_comment_ready) return "과제이행도 comment missing";
+  if (!student.weekly_test_comment_ready && !student.general_comment_ready) return "Weekly test or general comment missing";
   if (!student.template_ready) return "Template missing";
   if (!(student.output_ready ?? student.google_ready)) return "Report output missing";
   return "Ready";
@@ -472,7 +477,7 @@ function renderReports() {
   $("#report-period-select").disabled = !selectedReportClass || !state.periods.length;
   const status = selectedClass ? statusForClass(selectedClass.id, selectedPeriod) : {};
   const checks = [
-    ["Assignment", status.assignment_ready], ["Weekly Test", status.weekly_test_ready], ["Comments", status.comments_ready], ["Template", status.template_ready], ["Report output", status.output_ready ?? status.google_ready],
+    ["Assignment", status.assignment_ready], ["Weekly Test", status.weekly_test_ready], ["과제이행도 + (3 or 4)", status.comments_ready], ["Template", status.template_ready], ["Report output", status.output_ready ?? status.google_ready],
   ];
   $("#report-checklist").innerHTML = checks.map(([label, ready]) => `<div class="check-card ${ready ? "done" : ""}"><span>${ready ? "✓" : "·"}</span><b>${escapeHtml(label)}</b></div>`).join("");
   const selectedStudents = selectedClass ? studentsForClass(selectedClass.id) : [];
@@ -491,7 +496,7 @@ function renderReports() {
   $("#download-all").disabled = readyCount === 0;
 
   if (!state.classes.length) {
-    $("#reports-by-class").innerHTML = emptyState("No reports to prepare", "Import Assignment, Weekly Test, and Comments data first.", true);
+    $("#reports-by-class").innerHTML = emptyState("No reports to prepare", "Import homework + scores, 과제이행도 comments, and weekly test or general comments first.", true);
   } else {
     $("#reports-by-class").innerHTML = state.classes.map(classItem => {
       const students = studentsForClass(classItem.id);
@@ -571,16 +576,28 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
+const COMMENT_SECTIONS = { homework_comment: "homework", weekly_test_comment: "weekly_test", general_comment: "general" };
+
 const UPLOAD_COPY = {
   assignment: {
     eyebrow: "HOMEWORK + TEST SCORES",
     title: "Import this week’s student data",
     copy: "Use one Google Sheet with student details, dated homework marks, and a Test score or weekly test 점수 (%) column. Percentages use 0–100. Blank scores preserve existing results; students without a score remain incomplete.",
   },
-  comments: {
-    eyebrow: "COMMENTS",
-    title: "Upload student comments",
-    copy: "Use a Google Sheet or one class-specific searchable PDF.",
+  homework_comment: {
+    eyebrow: "02 · REQUIRED",
+    title: "과제이행도 comment",
+    copy: "Upload one searchable PDF with every student’s homework comment, or write one comment for everyone in the selected class and week. It appears beside the homework graph.",
+  },
+  weekly_test_comment: {
+    eyebrow: "03 · CHOOSE 3 OR 4, OR BOTH",
+    title: "Weekly test comment",
+    copy: "Upload one searchable PDF with every student’s weekly test comment. It appears beside the weekly test graph, continuing below when needed.",
+  },
+  general_comment: {
+    eyebrow: "04 · CHOOSE 3 OR 4, OR BOTH",
+    title: "General comment",
+    copy: "Upload one searchable PDF with every student’s general comment. It appears in the general comment section.",
   },
 };
 
@@ -730,11 +747,11 @@ function captureUploadFields() {
     );
     stage.mapping = { ...retainedMapping, ...visibleMapping };
   }
-  if (stage.mode === "comments_pdf") {
+  if (stage.mode === "comments_pdf" || stage.mode === "comments_shared") {
+    const sharedComment = $("#upload-shared-comment");
+    if (sharedComment) stage.comment = sharedComment.value.trim();
     const classSelect = $("#upload-comments-class");
-    const commentLabel = $("#upload-comments-label");
     if (classSelect) stage.classId = classSelect.value;
-    if (commentLabel) stage.label = commentLabel.value.trim();
   }
 }
 
@@ -753,7 +770,7 @@ function uploadStageEditor() {
   const stage = currentUploadStage();
   const target = uploadTargetPeriod();
   if (!stage) {
-    const sources = uploadSession?.kind === "comments" ? "Google Sheets or a comments PDF" : "Google Sheets";
+    const sources = COMMENT_SECTIONS[uploadSession?.kind] ? (uploadSession.kind === "homework_comment" ? "a comments PDF or a shared comment" : "a comments PDF") : "Google Sheets";
     return `<div class="staged-source-empty">No source selected. Choose ${sources} above.</div>`;
   }
   if (stage.mode === "legacy_assignment") {
@@ -763,13 +780,16 @@ function uploadStageEditor() {
       : `<div class="safety-note">This file will update <strong>${escapeHtml(target?.label || "the selected week")}</strong> (${escapeHtml(target?.start_date || "")}–${escapeHtml(target?.end_date || "")}).</div>`;
     return `<div class="safety-note">Detected ${stage.inspection.record_count} student-class records across ${stage.inspection.class_count} classes. A/B are completed, F is incomplete, and X or blank is excluded.</div>${periodFields}`;
   }
-  if (stage.mode === "comments_pdf") {
+  if (stage.mode === "comments_pdf" || stage.mode === "comments_shared") {
+    const shared = stage.mode === "comments_shared";
     const classOptions = state.classes.map(item => {
       const status = statusForClassPeriod(item.id, target?.id || "");
       const missing = status.comments_allowed ? "" : status.assignment_ready ? " — Weekly Test scores missing" : " — Homework missing for this week";
       return `<option value="${item.id}" ${item.id === stage.classId ? "selected" : ""} ${status.comments_allowed ? "" : "disabled"}>${escapeHtml(item.name + missing)}</option>`;
     }).join("");
-    return `<div class="form-grid"><label><span>Class in this PDF</span><select id="upload-comments-class" required><option value="">Choose the PDF's class</option>${classOptions}</select></label><label><span>Comment label</span><input id="upload-comments-label" value="${escapeHtml(stage.label)}" required /></label></div><div class="safety-note">Select the class named in your student data. Unavailable classes show what is missing for this week. Uncertain student names go to the review queue; scores found in the PDF are ignored.</div>`;
+    const classField = `<label><span>${shared ? "Class for this comment" : "Class in this PDF"}</span><select id="upload-comments-class" required><option value="">${shared ? "Choose a class" : "Choose the PDF’s class"}</option>${classOptions}</select></label>`;
+    if (shared) return `${classField}<label><span>Comment for every student</span><textarea id="upload-shared-comment" rows="6" required>${escapeHtml(stage.comment || "")}</textarea></label><div class="safety-note">This comment applies to every student in this class for ${escapeHtml(target?.label || "the selected week")} only.</div>`;
+    return `${classField}<div class="safety-note">Select the class named in your student data. Unavailable classes show what is missing for this week. Uncertain student names go to the review queue; scores found in the PDF are ignored.</div>`;
   }
   if (stage.mode === "google_sheet") {
     stage.previewRowsShown = Math.min(
@@ -800,8 +820,8 @@ function stagedSourceRow() {
   const stage = currentUploadStage();
   if (!stage) return "";
   const target = uploadTargetPeriod();
-  const extension = stage.mode === "google_sheet" ? "GS" : stage.mode === "comments_pdf" ? "PDF" : "CSV";
-  const source = stage.mode === "google_sheet" ? "Google Sheets" : "Local file";
+  const extension = stage.mode === "google_sheet" ? "GS" : stage.mode === "comments_pdf" ? "PDF" : stage.mode === "comments_shared" ? "TEXT" : "CSV";
+  const source = stage.mode === "google_sheet" ? "Google Sheets" : stage.mode === "comments_shared" ? "Shared comment" : "Local file";
   return `<div class="staged-source-list"><div class="staged-source-row"><span class="staged-source-icon">${extension}</span><div class="staged-source-details"><strong>${escapeHtml(stage.name)}</strong><small>${source} · staged, not imported</small></div><span class="staged-source-meta">${escapeHtml(target?.label || "Choose week")}</span><button class="staged-source-remove" type="button" data-upload-remove aria-label="Remove staged source">×</button></div></div>`;
 }
 
@@ -818,9 +838,9 @@ function renderUploadModal() {
   const prerequisite = uploadPrerequisite();
   const stage = currentUploadStage();
   if (uploadSession.confirming && stage && target) {
-    const kindLabel = { assignment: "Homework + test scores", weekly_test: "Weekly Test", comments: "Comments" }[uploadSession.kind];
-    const classSummary = stage.mode === "comments_pdf" ? `<div><span>Class</span><strong>${escapeHtml(state.classes.find(item => item.id === stage.classId)?.name || "")}</strong></div>` : "";
-    openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">CONFIRM UPLOAD</span><h2>Check the source and week</h2><p>Nothing has been imported yet. Review these details before continuing.</p></div><div class="upload-modal-controls"><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving">×</button></div></div><div class="upload-confirmation-summary"><div><span>Source</span><strong>${escapeHtml(stage.name)}</strong></div><div><span>Data type</span><strong>${escapeHtml(kindLabel)}</strong></div><div><span>Week</span><strong>${escapeHtml(target.label)}</strong><small>${escapeHtml(target.start_date || "")}–${escapeHtml(target.end_date || "")}</small></div>${classSummary}</div><div class="safety-note">Choose Go back if the source, class, or week is not correct. Confirm upload will import this source only for the selection shown above.</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button" type="button" data-upload-confirm>Confirm upload</button><button class="secondary-button upload-cancel-button" type="button" data-upload-confirm-back>Go back</button><span class="upload-modal-footer-note">This is the final check before data is imported.</span></div>`);
+    const kindLabel = uploadSession.kind === "assignment" ? "Homework + test scores" : copy.title;
+    const classSummary = stage.mode === "comments_pdf" || stage.mode === "comments_shared" ? `<div><span>Class</span><strong>${escapeHtml(state.classes.find(item => item.id === stage.classId)?.name || "")}</strong></div>` : "";
+    openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">CONFIRM UPLOAD</span><h2>Check the source and week</h2><p>Nothing has been imported yet. Review these details before continuing.</p></div><div class="upload-modal-controls"><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving">×</button></div></div><div class="upload-confirmation-summary"><div><span>Source</span><strong>${escapeHtml(stage.name)}</strong></div><div><span>Data type</span><strong>${escapeHtml(kindLabel)}</strong></div><div><span>Week</span><strong>${escapeHtml(target.label)}</strong><small>${escapeHtml(target.start_date || "")}–${escapeHtml(target.end_date || "")}</small></div>${classSummary}${stage.mode === "comments_shared" ? `<div><span>Comment for every student</span><p class="shared-comment-preview">${escapeHtml(stage.comment)}</p></div>` : ""}</div><div class="safety-note">Choose Go back if the source, class, or week is not correct. Confirm upload will import this source only for the selection shown above.</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button" type="button" data-upload-confirm>Confirm upload</button><button class="secondary-button upload-cancel-button" type="button" data-upload-confirm-back>Go back</button><span class="upload-modal-footer-note">This is the final check before data is imported.</span></div>`);
     $("#modal").classList.add("upload-modal");
     return;
   }
@@ -828,11 +848,11 @@ function renderUploadModal() {
     .map(period => `<option value="${period.id}" ${period.id === uploadSession.periodKey ? "selected" : ""}>${escapeHtml(period.label)}</option>`)
     .join("");
   const sourceDisabled = uploadSession.saving;
-  const pdfChoice = uploadSession.kind === "comments"
+  const pdfChoice = COMMENT_SECTIONS[uploadSession.kind]
     ? `<button class="upload-source-choice" type="button" data-upload-manual ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">PDF</span><span><strong>Upload comments PDF</strong><small>One searchable PDF for one class; held locally until Save.</small></span></button>`
     : "";
   const saveDisabled = !stage || !target || !prerequisite.ready || uploadSession.saving;
-  openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">${copy.eyebrow}</span><h2>${copy.title}</h2><p>${copy.copy}</p></div><div class="upload-modal-controls"><label class="upload-week-control"><span>Week</span><select id="upload-week-select" aria-label="Week" ${uploadSession.saving ? "disabled" : ""}>${weekOptions}</select></label><button class="upload-add-week" type="button" data-upload-add-week ${uploadSession.saving ? "disabled" : ""}>+ Add week</button><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving" ${uploadSession.saving ? "disabled" : ""}>×</button></div></div><div class="upload-modal-body"><div class="upload-prerequisite-copy ${prerequisite.ready ? "ready" : ""}"><span>${prerequisite.ready ? "✓" : "!"}</span><div>${escapeHtml(prerequisite.message)}</div></div><div class="upload-source-choices"><button class="upload-source-choice" type="button" data-upload-google ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">GS</span><span><strong>Import Google Sheet</strong><small>Preview the sheet before saving.</small></span></button>${pdfChoice}</div>${sheetSourceForm()}${stagedSourceRow()}${uploadStageEditor()}</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button ${saveDisabled ? "disabled" : ""}" type="button" data-upload-save ${saveDisabled ? "disabled" : ""}>${uploadSession.saving ? "Saving…" : "Save"}</button><button class="secondary-button upload-cancel-button" type="button" data-close-modal ${uploadSession.saving ? "disabled" : ""}>Cancel</button><span class="upload-modal-footer-note">Closing without Save discards the staged source. Added week options remain for this browser session.</span></div>`);
+  openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">${copy.eyebrow}</span><h2>${copy.title}</h2><p>${copy.copy}</p></div><div class="upload-modal-controls"><label class="upload-week-control"><span>Week</span><select id="upload-week-select" aria-label="Week" ${uploadSession.saving ? "disabled" : ""}>${weekOptions}</select></label><button class="upload-add-week" type="button" data-upload-add-week ${uploadSession.saving ? "disabled" : ""}>+ Add week</button><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving" ${uploadSession.saving ? "disabled" : ""}>×</button></div></div><div class="upload-modal-body"><div class="upload-prerequisite-copy ${prerequisite.ready ? "ready" : ""}"><span>${prerequisite.ready ? "✓" : "!"}</span><div>${escapeHtml(prerequisite.message)}</div></div><div class="upload-source-choices">${uploadSession.kind === "assignment" ? `<button class="upload-source-choice" type="button" data-upload-google ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">GS</span><span><strong>Import Google Sheet</strong><small>Preview the sheet before saving.</small></span></button>` : ""}${pdfChoice}${uploadSession.kind === "homework_comment" ? `<button class="upload-source-choice" type="button" data-upload-shared ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">TEXT</span><span><strong>Write one comment for everyone</strong><small>Applies only to the class and week you choose.</small></span></button>` : ""}</div>${sheetSourceForm()}${stagedSourceRow()}${uploadStageEditor()}</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button ${saveDisabled ? "disabled" : ""}" type="button" data-upload-save ${saveDisabled ? "disabled" : ""}>${uploadSession.saving ? "Saving…" : "Save"}</button><button class="secondary-button upload-cancel-button" type="button" data-close-modal ${uploadSession.saving ? "disabled" : ""}>Cancel</button><span class="upload-modal-footer-note">Closing without Save discards the staged source. Added week options remain for this browser session.</span></div>`);
   $("#modal").classList.add("upload-modal");
   if (stage?.mode === "legacy_assignment" && target?.draft) {
     $("#upload-period-start").value = target.start_date || stage.inspection.dates[0]?.iso || "";
@@ -880,7 +900,7 @@ async function stageManualUpload(file) {
   const session = uploadSession;
   try {
     const isPdf = /\.pdf$/i.test(file.name) || file.type === "application/pdf";
-    if (session.kind !== "comments" || !isPdf) {
+    if (!COMMENT_SECTIONS[session.kind] || !isPdf) {
       throw new Error("Choose a searchable comments PDF. CSV uploads are no longer used.");
     }
     session.stage = { mode: "comments_pdf", name: file.name, file, classId: "", label: file.name.replace(/\.pdf$/i, "") };
@@ -892,7 +912,7 @@ async function stageManualUpload(file) {
 }
 
 function beginGoogleUpload() {
-  if (!uploadSession) return;
+  if (!uploadSession || uploadSession.kind !== "assignment") return;
   const connection = state.connections.google_sheets || {};
   if (!connection.configured || connection.status === "disconnected") {
     closeModal();
@@ -977,14 +997,19 @@ async function saveUpload(confirmed = false) {
     };
   } else if (stage.mode === "comments_pdf") {
     if (!stage.classId) return toast("Choose the class represented by this Comments PDF.", "error");
-    if (!stage.label) return toast("Enter a comment label.", "error");
     url = "/api/comments/pdf/import";
     payload = {
       filename: stage.name,
       class_id: stage.classId,
       period_id: target.id,
-      label: stage.label,
+      comment_section: COMMENT_SECTIONS[session.kind],
     };
+  } else if (stage.mode === "comments_shared") {
+    if (session.kind !== "homework_comment") return toast("Shared comments are only available for 과제이행도.", "error");
+    if (!stage.classId) return toast("Choose the class for this comment.", "error");
+    if (!stage.comment?.trim()) return toast("Enter a comment for this class.", "error");
+    url = "/api/comments/shared";
+    payload = { class_id: stage.classId, period_id: target.id, comment: stage.comment.trim() };
   } else if (stage.mode === "google_sheet") {
     url = "/api/google/sheets/sync";
     payload = { kind: session.kind, spreadsheet: stage.spreadsheet, worksheet: stage.worksheet, ...period };
@@ -995,6 +1020,8 @@ async function saveUpload(confirmed = false) {
     url = "/api/tabular/import";
     payload = { kind: session.kind, filename: stage.name, text: stage.text, mapping: stage.mapping, ...period };
   }
+
+  if (COMMENT_SECTIONS[session.kind] && !statusForClassPeriod(stage.classId, target.id).comments_allowed) return toast("Import homework and test scores for this class and week first.", "error");
 
   if (!confirmed) {
     session.confirming = true;
@@ -1029,7 +1056,7 @@ async function saveUpload(confirmed = false) {
     reconcileUploadDraftPeriods();
     closeModal();
     render();
-    if (stage.mode === "comments_pdf") showCommentImportResult(result);
+    if (stage.mode === "comments_pdf") showCommentImportResult(result, session.kind);
     else toast(`${result.summary || "Upload saved."} · ${target.label}`);
   } catch (error) {
     if (uploadSession === session) {
@@ -1040,13 +1067,14 @@ async function saveUpload(confirmed = false) {
   }
 }
 
-function showCommentImportResult(result) {
+function showCommentImportResult(result, kind = "weekly_test_comment") {
+  const sectionLabel = UPLOAD_COPY[kind]?.title || "Comments";
   const matching = result.matching || {};
   const missing = matching.missing_comments || [];
   const unmatched = matching.unmatched_comments || [];
   if (!missing.length && !unmatched.length) return toast(result.summary || "Comments saved.");
   const missingList = missing.length
-    ? `<h3>Students without comments (${missing.length})</h3><p>No reports will be generated for these students until their comments are matched.</p><ul>${missing.map(student => `<li><strong>${escapeHtml(student.name)}</strong>${student.school ? ` · ${escapeHtml(student.school)}` : ""}${student.grade ? ` · Grade ${escapeHtml(student.grade)}` : ""}</li>`).join("")}</ul>`
+    ? `<h3>Students without ${escapeHtml(sectionLabel)} (${missing.length})</h3><p>${kind === "homework_comment" ? "These students need a 과제이행도 comment before their reports can be generated." : "These students can still generate reports if they have a 과제이행도 comment and the other comment type (weekly test or general)."} Complete students remain available for reports.</p><ul>${missing.map(student => `<li><strong>${escapeHtml(student.name)}</strong>${student.school ? ` · ${escapeHtml(student.school)}` : ""}${student.grade ? ` · Grade ${escapeHtml(student.grade)}` : ""}</li>`).join("")}</ul>`
     : "";
   const unmatchedList = unmatched.length
     ? `<h3>PDF comments without a unique student match (${unmatched.length})</h3><p>These comments were not assigned and cannot be used in reports. Check the review queue in Data Inbox.</p><ul>${unmatched.map(comment => `<li><strong>${escapeHtml(comment.name)}</strong> · ${escapeHtml(comment.reason)}</li>`).join("")}</ul>`
@@ -1558,7 +1586,16 @@ function bindEvents() {
     if (event.target.closest("[data-upload-google]")) { event.preventDefault(); beginGoogleUpload(); return; }
     if (event.target.closest("[data-upload-manual]")) {
       event.preventDefault();
-      if (uploadSession?.kind === "comments") $("#comments-file-input")?.click();
+      if (COMMENT_SECTIONS[uploadSession?.kind]) $("#comments-file-input")?.click();
+      return;
+    }
+    if (event.target.closest("[data-upload-shared]")) {
+      event.preventDefault();
+      if (uploadSession?.kind === "homework_comment") {
+        setUploadStage({ mode: "comments_shared", name: "Shared 과제이행도 comment", classId: "", comment: "" });
+        uploadSession.view = "sources";
+        renderUploadModal();
+      }
       return;
     }
     if (event.target.closest("[data-upload-remove]")) {
@@ -1668,7 +1705,7 @@ function bindEvents() {
     input.onchange = async event => {
       const file = event.target.files[0];
       event.target.value = "";
-      if (!uploadSession || uploadSession.kind !== event.target.dataset.uploadFileKind) return;
+      if (!uploadSession || !COMMENT_SECTIONS[uploadSession.kind]) return;
       await stageManualUpload(file);
     };
   });

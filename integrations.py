@@ -319,6 +319,13 @@ def report_replacements(student: dict[str, Any]) -> dict[str, str]:
     comment = "\n\n".join(
         str(exam.get("comment") or "").strip() for exam in commented
     ) or "No teacher comment"
+    parts = student.get("comments_by_section")
+    if parts is not None:
+        if parts.get("homework"):
+            assignment_summary += "\n\n" + str(parts["homework"])
+        if parts.get("weekly_test"):
+            test_summary += "\n\n" + str(parts["weekly_test"])
+        comment = str(parts.get("general") or "")
     external_id = str(student.get("external_student_id") or student.get("id") or "")
     return {
         "student_name": str(student.get("name") or ""),

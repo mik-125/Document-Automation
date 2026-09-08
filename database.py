@@ -10,6 +10,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from comment_sections import COMMENT_SECTIONS, report_comment_sections
+
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
@@ -259,6 +261,7 @@ class Database:
             self._ensure_column(db, "students", "external_source", "TEXT NOT NULL DEFAULT 'manual'")
             self._ensure_column(db, "homework_periods", "source_provider", "TEXT NOT NULL DEFAULT 'manual'")
             self._ensure_column(db, "period_exams", "source_provider", "TEXT NOT NULL DEFAULT 'manual'")
+            self._ensure_column(db, "period_exams", "comment_section", "TEXT NOT NULL DEFAULT 'weekly_test'")
             self._ensure_column(db, "imports", "source_provider", "TEXT NOT NULL DEFAULT 'manual'")
             self._ensure_column(db, "report_archive", "google_doc_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(db, "report_archive", "google_template_id", "TEXT NOT NULL DEFAULT ''")
@@ -881,6 +884,9 @@ class Database:
         source_provider: str = "manual",
         connection: sqlite3.Connection | None = None,
     ) -> None:
+        section = record.get("comment_section", "weekly_test")
+        if section not in COMMENT_SECTIONS:
+            raise ValueError("Choose a valid comment section.")
         period_id = period_id or self.period_id_for_class(class_id)
         with self._connection_scope(connection) as db:
             if not period_id or not db.execute(
@@ -888,14 +894,16 @@ class Database:
             ).fetchone():
                 raise ValueError("Choose a reporting period before importing comments.")
             existing = db.execute(
-                "SELECT id FROM period_exams WHERE student_id = ? AND period_id = ? AND label = ?",
+                "SELECT id, comment_section FROM period_exams WHERE student_id = ? AND period_id = ? AND label = ?",
                 (student_id, period_id, record["label"]),
             ).fetchone()
+            if existing and "comment_section" not in record:
+                section = existing["comment_section"]
             exam_id = str(existing["id"]) if existing else uuid.uuid4().hex
             db.execute(
                 "INSERT INTO period_exams(id, student_id, class_id, period_id, label, score, max_score, "
-                "sections_json, comment, source_name, imported_at, source_provider) "
-                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "sections_json, comment, source_name, imported_at, source_provider, comment_section) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(student_id, period_id, label) DO UPDATE SET "
                 "score = COALESCE(excluded.score, period_exams.score), "
                 "max_score = COALESCE(excluded.max_score, period_exams.max_score), "
@@ -903,7 +911,7 @@ class Database:
                 "ELSE period_exams.sections_json END, comment = CASE WHEN excluded.comment <> '' "
                 "THEN excluded.comment ELSE period_exams.comment END, "
                 "source_name = excluded.source_name, imported_at = excluded.imported_at, "
-                "source_provider = excluded.source_provider",
+                "source_provider = excluded.source_provider, comment_section = excluded.comment_section",
                 (
                     exam_id,
                     student_id,
@@ -917,6 +925,7 @@ class Database:
                     record.get("source_name", ""),
                     now_iso(),
                     source_provider,
+                    section,
                 ),
             )
         return exam_id
@@ -954,8 +963,8 @@ class Database:
             row = db.execute("SELECT * FROM imports WHERE id = ?", (import_id,)).fetchone()
         return dict(row) if row else None
 
-    def link_import_entities(self, import_id: str, entities: dict[str, set[str]]) -> None:
-        with self.connect() as db:
+    def link_import_entities(self, import_id: str, entities: dict[str, set[str]], connection: sqlite3.Connection | None = None) -> None:
+        with self._connection_scope(connection) as db:
             if not db.execute("SELECT 1 FROM imports WHERE id = ?", (import_id,)).fetchone():
                 raise ValueError("Uploaded data record not found.")
             for entity_type, entity_ids in entities.items():
@@ -1119,8 +1128,8 @@ class Database:
         issue["candidate_ids"] = json.loads(issue.pop("candidate_ids_json"))
         return issue
 
-    def resolve_issue(self, issue_id: str) -> None:
-        with self.connect() as db:
+    def resolve_issue(self, issue_id: str, connection: sqlite3.Connection | None = None) -> None:
+        with self._connection_scope(connection) as db:
             db.execute(
                 "UPDATE issues SET status = 'resolved', resolved_at = ? WHERE id = ?",
                 (now_iso(), issue_id),
@@ -1386,7 +1395,9 @@ class Database:
                 }
             )
             scored_exams = [exam for exam in student["exams"] if exam.get("score") is not None]
-            commented_exams = [exam for exam in student["exams"] if exam.get("comment")]
+            student["comments_by_section"] = report_comment_sections(student["exams"])
+            for section, text in student["comments_by_section"].items():
+                student[f"{section}_comment_ready"] = bool(text)
             student["latest_exam"] = scored_exams[-1] if scored_exams else None
             student["assignment_ready"] = bool(
                 student["homework_completed"] + student["homework_incomplete"] > 0
@@ -1394,7 +1405,8 @@ class Database:
                 or student["homework_percent"] is not None
             )
             student["weekly_test_ready"] = bool(scored_exams)
-            student["comments_ready"] = bool(commented_exams)
+            student["comments_ready"] = bool(student["homework_comment_ready"] and (
+                student["weekly_test_comment_ready"] or student["general_comment_ready"]))
             student["ready"] = bool(
                 student["assignment_ready"]
                 and student["weekly_test_ready"]

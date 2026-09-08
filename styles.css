@@ -323,6 +323,7 @@ code {
 .source-icon.assignment { background: #e0efe8; color: #236c61; }
 .source-icon.test { background: #e9edfb; color: #4b62b3; }
 .source-icon.comments { background: #fbedd9; color: #a46924; }
+.source-icon.required { background: #fee2e2; color: #b91c1c; }
 .source-card h2 { margin: 18px 0 6px; font: 600 22px Fraunces, serif; }
 .source-card p { min-height: 43px; margin: 0 0 18px; color: var(--muted); font-size: 12px; line-height: 1.48; }
 .source-actions { flex-wrap: wrap; }
@@ -869,3 +870,5 @@ input:focus, select:focus, textarea:focus { border-color: #78a9a1; }
   .upload-modal-footer-note { order: 0; margin: 0; text-align: left; }
   .file-meta { display: none; }
 }
+
+.shared-comment-preview { white-space: pre-wrap; overflow-wrap: anywhere; }

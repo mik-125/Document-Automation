@@ -77,3 +77,17 @@ def split_comment_sections(text: str) -> dict[str, str]:
                     section = narrative_section or ("test" if test_intro or test and not homework else "general")
             sections[section].append(sentence)
     return {section: "".join(parts) for section, parts in sections.items()}
+
+
+COMMENT_SECTIONS = ("homework", "weekly_test", "general")
+
+
+def report_comment_sections(exams):
+    """Keep each complete comment in its explicitly selected report section."""
+    parts = {section: [] for section in COMMENT_SECTIONS}
+    for exam in exams:
+        section = exam.get("comment_section") or "weekly_test"
+        text = str(exam.get("comment") or "").strip()
+        if section in parts and text:
+            parts[section].append(text)
+    return {section: "\n\n".join(texts) for section, texts in parts.items()}

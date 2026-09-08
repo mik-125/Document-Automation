@@ -52,27 +52,37 @@
 
         <section class="page active" id="inbox">
           <div class="page-intro">
-            <div><span class="eyebrow">ONE RELIABLE PIPELINE</span><h1>Bring in this week’s report data</h1><p>Import homework and test scores from one Google Sheet, then add teacher comments.</p></div>
+            <div><span class="eyebrow">ONE RELIABLE PIPELINE</span><h1>Bring in this week’s report data</h1><p>Complete 1 and 2, then provide 3 or 4—or both. Each report needs homework + test scores, a 과제이행도 comment, and at least one weekly test or general comment.</p></div>
             <button class="secondary-button" data-go="connections">Manage API connections</button>
           </div>
 
           <div class="source-grid" id="data-source-grid">
             <article class="source-card">
-              <div class="source-card-head"><span class="source-icon assignment">01</span><span class="status-pill" id="assignment-source-status">Start here</span></div>
+              <div class="source-card-head"><span class="source-icon assignment required">01</span><span class="status-pill" id="assignment-source-status">Start here</span></div>
               <h2>Homework + test scores</h2><p>One Google Sheet for the class roster, homework marks, and weekly test scores.</p>
               <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="assignment">Upload</button></div>
             </article>
             <article class="source-card">
-              <div class="source-card-head"><span class="source-icon comments">02</span><span class="status-pill neutral" id="comments-source-status">Last step</span></div>
-              <h2>Comments</h2><p>Teacher comments by student. Use Google Sheets or one class-specific searchable PDF.</p>
-              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="comments">Upload</button></div>
+              <div class="source-card-head"><span class="source-icon comments required">02</span><span class="status-pill neutral" id="homework_comment-source-status">Required</span></div>
+              <h2>과제이행도 comment</h2><p>Required. Upload a class PDF or write one comment for every student in the selected class and week. Appears beside the homework graph.</p>
+              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="homework_comment">Add comment</button></div>
+            </article>
+            <article class="source-card">
+              <div class="source-card-head"><span class="source-icon comments">03</span><span class="status-pill neutral" id="weekly_test_comment-source-status">Choose 3 or 4, or both</span></div>
+              <h2>Weekly test comment</h2><p>Upload one PDF with every student’s weekly test comment. Provide this, general comments, or both.</p>
+              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="weekly_test_comment">Upload PDF</button></div>
+            </article>
+            <article class="source-card">
+              <div class="source-card-head"><span class="source-icon comments">04</span><span class="status-pill neutral" id="general_comment-source-status">Choose 3 or 4, or both</span></div>
+              <h2>General comment</h2><p>Upload one PDF with every student’s general comment. Provide this, weekly test comments, or both.</p>
+              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="general_comment">Upload PDF</button></div>
             </article>
           </div>
 
           <input type="file" id="comments-file-input" accept=".pdf,application/pdf" data-upload-file-kind="comments" hidden />
 
           <section class="section-block">
-            <div class="section-heading"><div><span class="eyebrow">READINESS BY CLASS</span><h2>Required inputs</h2><p>Green checks mean every imported student in that class has the required data.</p></div></div>
+            <div class="section-heading"><div><span class="eyebrow">READINESS BY CLASS</span><h2>Required inputs</h2><p>Green checks mean every imported student in that class has the required data. Students with complete inputs can generate reports while others remain incomplete.</p></div></div>
             <div class="readiness-table" id="data-readiness"></div>
           </section>
 

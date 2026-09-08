@@ -14,7 +14,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Paragraph
 
-from comment_sections import split_comment_sections
+from comment_sections import report_comment_sections, split_comment_sections
 from report_charts import draw_homework_chart, draw_test_chart
 
 GREEN = HexColor("#00B451")
@@ -126,10 +126,18 @@ def generate_weekly_report(student: dict[str, Any], output: Path, *, font: str,
         if "BrightlineBody" not in pdfmetrics.getRegisteredFontNames():
             pdfmetrics.registerFont(TTFont("BrightlineBody", str(body_path)))
         font = "BrightlineBody"
-    all_sections = [split_comment_sections(str(exam["comment"])) for exam in student.get("exams", [])
-                    if str(exam.get("comment") or "").strip()]
-    parts = {key: "\n\n".join(section[key] for section in all_sections if section[key].strip())
-             for key in ("homework", "test", "general")}
+    exams = student.get("exams", [])
+    if "comments_by_section" in student or any("comment_section" in exam for exam in exams):
+        selected = student.get("comments_by_section") or report_comment_sections(exams)
+        parts = {"homework": str(selected.get("homework") or ""),
+                 "test": str(selected.get("weekly_test") or ""),
+                 "general": str(selected.get("general") or "")}
+    else:
+        # Retain compatibility for old standalone payloads without section metadata.
+        all_sections = [split_comment_sections(str(exam["comment"])) for exam in exams
+                        if str(exam.get("comment") or "").strip()]
+        parts = {key: "\n\n".join(section[key] for section in all_sections if section[key].strip())
+                 for key in ("homework", "test", "general")}
     output.parent.mkdir(parents=True, exist_ok=True)
     c = canvas.Canvas(str(output), pagesize=(WIDTH, HEIGHT), pageCompression=1)
     c.setTitle(f"Student Report - {student.get('name', '')}")
@@ -146,27 +154,32 @@ def generate_weekly_report(student: dict[str, Any], output: Path, *, font: str,
     homework_overflow = _flow(c, homework, 244, 515, 255, 408)
     if not homework:
         _flow(c, [_paragraph("과제 코멘트가 별도로 제공되지 않았습니다.", font, 9)], 244, 515, 255, 408)
-    _section(c, "위클리 테스트", 380, 61, font, header_height=31)
-    history = student.get("test_history", [exam for exam in student.get("exams", []) if exam.get("score") is not None])
+    test = [_paragraph(parts["test"], font, font_size)] if parts["test"].strip() else []
+    general = [_paragraph(parts["general"], font, font_size)] if parts["general"].strip() else []
+    # Short weekly feedback leaves room for a separate general section on page one.
+    # Longer sections continue under their own heading, without mixing categories.
+    general_on_first = bool(general) and not homework_overflow and (
+        not test or test[0].wrap(255, 124)[1] <= 124
+    )
+    _section(c, "위클리 테스트", 380, 201 if general_on_first else 61, font, header_height=31)
+    history = student.get("test_history", [exam for exam in exams if exam.get("score") is not None])
     draw_test_chart(c, history, x=LEFT + 8, y=217, width=200, height=118, font_name=font)
     if len(history) == 1:
         _fit_label(c, "1주 기록 · 다음 주부터 추이 표시", LEFT + 16, 208, 200, font, 7, 7)
-    test = [_paragraph(parts["test"], font, font_size)] if parts["test"].strip() else []
-    pending = _flow(c, test, 244, 335, 255, 211)
-    if not test:
-        _flow(c, [_paragraph("테스트 코멘트가 별도로 제공되지 않았습니다.", font, 9)], 244, 335, 255, 211)
-    if homework_overflow:
-        pending += [_paragraph("과제 코멘트 (계속)", font, 10)] + homework_overflow
-    if parts["general"].strip():
-        pending += [_paragraph("종합 코멘트", font, 10), _paragraph(parts["general"], font, font_size)]
-    pending = _flow(c, pending, LEFT + 7, 190, RIGHT - LEFT - 14, 71)
+    test_pending = _flow(c, test, 244, 335, 255, 211)
+    if general_on_first:
+        _section(c, "종합 코멘트", 190, 61, font)
+        general = _flow(c, general, LEFT + 10, 154, RIGHT - LEFT - 20, 71)
+    else:
+        test_pending = _flow(c, test_pending, LEFT + 7, 190, RIGHT - LEFT - 14, 71)
     c.showPage()
-    title = "위클리 테스트" if not homework_overflow and not parts["general"].strip() else "코멘트 (계속)"
-    while pending:
-        before = pending
-        pending = _continuation(c, pending, title, font)
-        if pending == before:
-            raise ValueError("The comment cannot fit the report page. Check its formatting.")
-        c.showPage()
+    for title, pending in (("과제이행도 (계속)", homework_overflow),
+                           ("위클리 테스트", test_pending), ("종합 코멘트", general)):
+        while pending:
+            before = pending
+            pending = _continuation(c, pending, title, font)
+            if pending == before:
+                raise ValueError("The comment cannot fit the report page. Check its formatting.")
+            c.showPage()
     c.save()
     return output

@@ -1477,6 +1477,8 @@ class DatabaseReadinessTests(unittest.TestCase):
                 period["id"],
                 "google_sheets",
             )
+            self.assertFalse(database.state()["students"][0]["comments_ready"])
+            database.upsert_exam(student["id"], class_item["id"], {"label": "Homework feedback", "comment_section": "homework", "comment": "Complete homework."}, period["id"])
             ready = database.state()["students"][0]
             self.assertTrue(ready["assignment_ready"])
             self.assertTrue(ready["weekly_test_ready"])
