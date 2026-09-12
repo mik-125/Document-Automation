@@ -1533,6 +1533,26 @@ class FrontendContractTests(unittest.TestCase):
         self.assertTrue(app_server.is_json_content_type("application/json; charset=utf-8"))
         self.assertFalse(app_server.is_json_content_type("text/plain"))
 
+    def test_public_origin_requires_password_and_rejects_other_origins(self) -> None:
+        with patch.dict(os.environ, {"BRIGHTLINE_PUBLIC_URL": "https://demo.ngrok-free.dev",
+                                     "BRIGHTLINE_PASSWORD": "a-long-test-password"}):
+            self.assertTrue(app_server.local_request_context("demo.ngrok-free.dev", "https://demo.ngrok-free.dev", "same-origin"))
+            for host, origin, site in [
+                ("other.ngrok-free.dev", "", ""),
+                ("demo.ngrok-free.dev:8000", "", ""),
+                ("demo.ngrok-free.dev", "http://demo.ngrok-free.dev", ""),
+                ("demo.ngrok-free.dev", "https://evil.example", ""),
+                ("demo.ngrok-free.dev", "https://demo.ngrok-free.dev", "cross-site"),
+            ]:
+                self.assertFalse(app_server.local_request_context(host, origin, site))
+            with patch.dict(os.environ, {"BRIGHTLINE_PASSWORD": ""}):
+                self.assertFalse(app_server.local_request_context("demo.ngrok-free.dev"))
+                with self.assertRaises(ValueError):
+                    app_server.public_origin()
+            with patch.dict(os.environ, {"BRIGHTLINE_PUBLIC_URL": "http://demo.ngrok-free.dev"}):
+                with self.assertRaises(ValueError):
+                    app_server.public_origin()
+
     def test_oauth_return_can_load_static_app_without_opening_cross_site_apis(self) -> None:
         self.assertTrue(
             app_server.local_get_request_context(

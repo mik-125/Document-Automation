@@ -131,14 +131,32 @@ def report_zip_member_name(student: dict[str, Any]) -> str:
     ) + ".pdf"
 
 
+def public_origin() -> str:
+    value = os.environ.get("BRIGHTLINE_PUBLIC_URL", "").strip().rstrip("/")
+    if not value:
+        return ""
+    parts = urllib.parse.urlsplit(value)
+    if (
+        parts.scheme != "https" or not parts.hostname
+        or parts.username or parts.password or parts.path or parts.query or parts.fragment
+        or parts.port not in (None, 443) or parts.hostname in LOOPBACK_HOSTS
+    ):
+        raise ValueError("BRIGHTLINE_PUBLIC_URL must be an HTTPS origin without a path.")
+    if len(os.environ.get("BRIGHTLINE_PASSWORD", "")) < 16:
+        raise ValueError("Public access requires a BRIGHTLINE_PASSWORD of at least 16 characters.")
+    return f"https://{parts.hostname}"
+
+
 def local_request_context(host: str, origin: str = "", fetch_site: str = "") -> bool:
     if fetch_site.casefold() == "cross-site":
         return False
     try:
         host_parts = urllib.parse.urlsplit(f"//{host}")
         host_name = (host_parts.hostname or "").casefold()
+        public = public_origin()
+        is_public = bool(public and host_name == urllib.parse.urlsplit(public).hostname)
         if (
-            host_name not in LOOPBACK_HOSTS
+            (host_name not in LOOPBACK_HOSTS and not is_public)
             or host_parts.username
             or host_parts.password
             or host_parts.path
@@ -146,14 +164,19 @@ def local_request_context(host: str, origin: str = "", fetch_site: str = "") -> 
             or host_parts.fragment
         ):
             return False
+        if is_public and host_parts.port not in (None, 443):
+            return False
         if not origin:
             return True
         origin_parts = urllib.parse.urlsplit(origin)
         origin_name = (origin_parts.hostname or "").casefold()
-        if origin_parts.scheme != "http" or origin_name != host_name:
+        scheme = "https" if is_public else "http"
+        if (origin_parts.scheme != scheme or origin_name != host_name
+            or origin_parts.username or origin_parts.password or origin_parts.path
+            or origin_parts.query or origin_parts.fragment):
             return False
-        host_port = host_parts.port or 80
-        origin_port = origin_parts.port or 80
+        host_port = host_parts.port or (443 if is_public else 80)
+        origin_port = origin_parts.port or (443 if is_public else 80)
         return host_port == origin_port
     except ValueError:
         return False
@@ -2642,7 +2665,9 @@ class AppHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "summary": summary, "state": app_state()})
 
     def _start_google_oauth(self) -> None:
-        flow = GoogleWorkspace.authorization_flow(GOOGLE_OAUTH_REDIRECT_URI)
+        redirect_uri = (public_origin() + "/api/google/oauth/callback"
+                        if public_origin() else GOOGLE_OAUTH_REDIRECT_URI)
+        flow = GoogleWorkspace.authorization_flow(redirect_uri)
         authorization_url, state = flow.authorization_url(
             access_type="offline",
             prompt="consent",
@@ -2672,7 +2697,7 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             credentials = complete_google_oauth(
                 flow,
-                f"{GOOGLE_OAUTH_REDIRECT_URI}?{urllib.parse.urlparse(self.path).query}",
+                f"{flow.redirect_uri}?{urllib.parse.urlparse(self.path).query}",
             )
             GoogleWorkspace.save_oauth_credentials(credentials)
             workspace = GoogleWorkspace.from_env()
@@ -3012,6 +3037,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 def run(host: str = "127.0.0.1", port: int = 8000) -> None:
+    public_origin()  # Validate public access before opening the listener.
     if host not in LOOPBACK_HOSTS:
         raise RuntimeError(
             "This MVP is local-only. Put it behind authenticated HTTPS before sharing it."

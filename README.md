@@ -57,6 +57,21 @@ export BRIGHTLINE_PASSWORD="use-a-long-unique-password"
 
 Do not expose this development server directly to a network. A future hosted version must sit behind authenticated HTTPS.
 
+### Private ngrok sharing
+
+Set `BRIGHTLINE_PUBLIC_URL` to your exact ngrok HTTPS origin (no path), and set
+`BRIGHTLINE_PASSWORD` to a unique password of at least 16 characters before starting
+the server. Keep the listener on `127.0.0.1`. Start ngrok with
+`ngrok http http://127.0.0.1:8000 --url YOUR_HTTPS_ORIGIN --inspect=false`.
+The public link requires the Brightline username and password; all authenticated
+visitors share the same data and administrative access. Share only with trusted
+operators. Do not use this as a student or parent portal.
+
+For Google connections, register `YOUR_HTTPS_ORIGIN/api/google/oauth/callback`
+in your Google OAuth client's authorized redirect URIs. Existing local redirect
+URIs can remain. Ngrok forwards traffic through its service; your Mac must remain
+awake and both processes must stay running. Stop ngrok to take the link offline.
+
 ## Report template placeholders
 
 Use these exact placeholders in ordinary Google Docs text or table cells:
