@@ -71,6 +71,7 @@ def default_mapping(page_width: float, page_height: float, page_count: int = 1) 
         "page_width": round(float(page_width), 2),
         "page_height": round(float(page_height), 2),
         "page_count": max(1, int(page_count)),
+        "continuation_regions": default_continuation_regions(page_count, []),
         "regions": [
             _region("class_name", 0.63, 0.90, 0.30, 0.035),
             _region("student_name", 0.63, 0.855, 0.30, 0.04, font_size=10),
@@ -83,6 +84,26 @@ def default_mapping(page_width: float, page_height: float, page_count: int = 1) 
             _region("teacher_comment", 0.08, 0.065, 0.85, 0.13, font_size=7.4),
         ],
     }
+
+
+def default_continuation_regions(page_count: int, regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    occupied_pages: set[int] = set()
+    for region in regions:
+        try:
+            occupied_pages.add(int(region.get("page") or 1))
+        except (TypeError, ValueError):
+            # The mapping validator reports malformed pages with the field name.
+            continue
+    return [
+        {
+            "key": f"continuation_{page}", "content_type": "text", "page": page,
+            "box": {"x": 0.08, "y": 0.08, "width": 0.84, "height": 0.78},
+            "font_name": "auto", "font_size": 10, "minimum_font_size": 10,
+            "line_spacing": 1.2, "align": "left", "required": False,
+        }
+        for page in range(2, min(int(page_count), 3) + 1)
+        if page not in occupied_pages
+    ]
 
 
 def _finite_number(value: Any, label: str) -> float:
@@ -116,27 +137,44 @@ def validate_mapping(
     raw_regions = payload.get("regions")
     if not isinstance(raw_regions, list):
         raise TemplateMappingError("Template mapping needs a regions list.")
+    raw_continuations = payload.get("continuation_regions")
+    if raw_continuations is None:
+        raw_continuations = default_continuation_regions(
+            page_count, [region for region in raw_regions if isinstance(region, dict)]
+        )
+    if not isinstance(raw_continuations, list):
+        raise TemplateMappingError("Continuation areas must be a list.")
 
     normalized_regions: list[dict[str, Any]] = []
+    continuation_regions: list[dict[str, Any]] = []
+    continuation_pages: set[int] = set()
     seen: set[str] = set()
-    for raw in raw_regions:
+    for index, raw in enumerate(raw_regions + raw_continuations):
+        continuation = index >= len(raw_regions)
         if not isinstance(raw, dict):
             raise TemplateMappingError("Every template region must be an object.")
         key = str(raw.get("key") or "").strip()
-        if key not in REGION_TYPES:
+        if not continuation and key not in REGION_TYPES:
             raise TemplateMappingError(f"Unsupported template region: {key or 'unnamed'}.")
         if key in seen:
             raise TemplateMappingError(f"Template region {key} appears more than once.")
         seen.add(key)
-        content_type = str(raw.get("content_type") or REGION_TYPES[key])
-        if content_type != REGION_TYPES[key]:
-            raise TemplateMappingError(f"Template region {key} must be {REGION_TYPES[key]}.")
+        expected_type = "text" if continuation else REGION_TYPES[key]
+        content_type = str(raw.get("content_type") or expected_type)
+        if content_type != expected_type:
+            raise TemplateMappingError(f"Template region {key} must be {expected_type}.")
         try:
             page = int(raw.get("page") or 1)
         except (TypeError, ValueError) as exc:
             raise TemplateMappingError(f"Template region {key} has an invalid page.") from exc
         if page < 1 or page > max(1, int(page_count)):
             raise TemplateMappingError(f"Template region {key} points outside the template pages.")
+        if continuation:
+            if page not in {2, 3} or key != f"continuation_{page}":
+                raise TemplateMappingError("Continuation areas must use page 2 or 3 and its matching key.")
+            if page in continuation_pages:
+                raise TemplateMappingError("Only one continuation area is allowed per page.")
+            continuation_pages.add(page)
         raw_box = raw.get("box")
         if not isinstance(raw_box, dict):
             raise TemplateMappingError(f"Template region {key} needs a box.")
@@ -191,7 +229,21 @@ def validate_mapping(
             if fit not in {"contain", "cover"}:
                 raise TemplateMappingError(f"Template region {key} has invalid chart fitting.")
             region.update({"fit": fit, "show_grid": bool(raw.get("show_grid", True))})
-        normalized_regions.append(region)
+        (continuation_regions if continuation else normalized_regions).append(region)
+
+    for continuation in continuation_regions:
+        box = continuation["box"]
+        for region in normalized_regions:
+            other = region["box"]
+            if region["page"] == continuation["page"] and (
+                box["x"] < other["x"] + other["width"]
+                and other["x"] < box["x"] + box["width"]
+                and box["y"] < other["y"] + other["height"]
+                and other["y"] < box["y"] + box["height"]
+            ):
+                raise TemplateMappingError(
+                    f"Continuation area on page {continuation['page']} overlaps {region['key']}."
+                )
 
     missing = [key for key in REQUIRED_REGION_KEYS if key not in seen]
     if missing:
@@ -208,6 +260,7 @@ def validate_mapping(
         "page_height": round(float(page_height), 2),
         "page_count": max(1, int(page_count)),
         "regions": normalized_regions,
+        "continuation_regions": sorted(continuation_regions, key=lambda region: region["page"]),
     }
 
 

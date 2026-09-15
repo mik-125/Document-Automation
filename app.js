@@ -451,8 +451,8 @@ function renderTemplates() {
       ? ` · Version ${pdf.active_version} remains active`
       : "";
     const pdfSummary = pdf
-      ? `Version ${pdf.version} · ${pdf.page_count} page${pdf.page_count === 1 ? "" : "s"} · ${pdf.status === "published" ? "Published" : "Mapping confirmation required"}${activeVersionNote}`
-      : "Upload the clean company PDF before generating reports.";
+      ? `Version ${pdf.version} · ${pdf.page_count} template page${pdf.page_count === 1 ? "" : "s"} · Automatic report length · ${pdf.status === "published" ? "Published" : "Mapping confirmation required"}${activeVersionNote}`
+      : "Upload one clean PDF containing 1–3 pages. Brightline uses only the pages needed.";
     const pdfActions = `<button class="table-action" type="button" data-template-pdf-upload="${classItem.id}">${pdf ? "Upload new version" : "Upload PDF template"}</button>${pdf ? `<button class="table-action" type="button" data-template-pdf-map="${classItem.id}">${pdf.status === "published" ? "Review mapping" : "Confirm mapping"}</button><a class="table-action" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open PDF</a><button class="table-action danger" type="button" data-template-pdf-disconnect="${classItem.id}">Remove</button>` : ""}`;
     return `<tr><td class="template-class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.teacher || "Teacher not set")}</small></td><td class="template-sample-cell"><div class="template-output-stack"><div class="template-sample-layout"><div class="template-sample-summary"><strong>${escapeHtml(pdf?.name || "No company template")}</strong><small>${escapeHtml(pdfSummary)}</small></div><div class="template-sample-actions">${pdfActions}</div></div><div class="template-sample-layout template-example-layout"><div class="template-sample-summary"><strong>${exampleCount ? `${exampleCount} completed sample${exampleCount === 1 ? "" : "s"}` : "No completed sample"}</strong><small>${escapeHtml(sampleSummary)}</small></div><div class="template-sample-actions"><button class="table-action" type="button" data-template-example="${classItem.id}">Upload sample report</button>${exampleCount ? `<button class="table-action" type="button" data-template-analysis="${classItem.id}">View analysis</button>` : ""}</div></div></div></td></tr>`;
   }).join("");
@@ -788,7 +788,7 @@ function uploadStageEditor() {
       return `<option value="${item.id}" ${item.id === stage.classId ? "selected" : ""} ${status.comments_allowed ? "" : "disabled"}>${escapeHtml(item.name + missing)}</option>`;
     }).join("");
     const classField = `<label><span>${shared ? "Class for this comment" : "Class in this PDF"}</span><select id="upload-comments-class" required><option value="">${shared ? "Choose a class" : "Choose the PDF’s class"}</option>${classOptions}</select></label>`;
-    if (shared) return `${classField}<label><span>Comment for every student</span><textarea id="upload-shared-comment" rows="6" required>${escapeHtml(stage.comment || "")}</textarea></label><div class="safety-note">This comment applies to every student in this class for ${escapeHtml(target?.label || "the selected week")} only.</div>`;
+    if (shared) return `${classField}<button class="secondary-button" type="button" data-upload-shared-pdf>Upload shared comment PDF</button><p>Review or edit the text below. Use ___ 학생은 where a student’s name belongs. Brightline replaces ___ with each student’s name when saved.</p><label><span>Comment for every student</span><textarea id="upload-shared-comment" rows="6" required>${escapeHtml(stage.comment || "")}</textarea></label><div class="safety-note">This comment applies to every student in this class for ${escapeHtml(target?.label || "the selected week")} only.</div>`;
     return `${classField}<div class="safety-note">Select the class named in your student data. Unavailable classes show what is missing for this week. Uncertain student names go to the review queue; scores found in the PDF are ignored.</div>`;
   }
   if (stage.mode === "google_sheet") {
@@ -849,10 +849,10 @@ function renderUploadModal() {
     .join("");
   const sourceDisabled = uploadSession.saving;
   const pdfChoice = COMMENT_SECTIONS[uploadSession.kind]
-    ? `<button class="upload-source-choice" type="button" data-upload-manual ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">PDF</span><span><strong>Upload comments PDF</strong><small>One searchable PDF for one class; held locally until Save.</small></span></button>`
+    ? `<button class="upload-source-choice" type="button" data-upload-manual ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">PDF</span><span><strong>Individual student comments</strong><small>Upload comments PDF with each student’s name and their own comment.</small></span></button>`
     : "";
   const saveDisabled = !stage || !target || !prerequisite.ready || uploadSession.saving;
-  openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">${copy.eyebrow}</span><h2>${copy.title}</h2><p>${copy.copy}</p></div><div class="upload-modal-controls"><label class="upload-week-control"><span>Week</span><select id="upload-week-select" aria-label="Week" ${uploadSession.saving ? "disabled" : ""}>${weekOptions}</select></label><button class="upload-add-week" type="button" data-upload-add-week ${uploadSession.saving ? "disabled" : ""}>+ Add week</button><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving" ${uploadSession.saving ? "disabled" : ""}>×</button></div></div><div class="upload-modal-body"><div class="upload-prerequisite-copy ${prerequisite.ready ? "ready" : ""}"><span>${prerequisite.ready ? "✓" : "!"}</span><div>${escapeHtml(prerequisite.message)}</div></div><div class="upload-source-choices">${uploadSession.kind === "assignment" ? `<button class="upload-source-choice" type="button" data-upload-google ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">GS</span><span><strong>Import Google Sheet</strong><small>Preview the sheet before saving.</small></span></button>` : ""}${pdfChoice}${uploadSession.kind === "homework_comment" ? `<button class="upload-source-choice" type="button" data-upload-shared ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">TEXT</span><span><strong>Write one comment for everyone</strong><small>Applies only to the class and week you choose.</small></span></button>` : ""}</div>${sheetSourceForm()}${stagedSourceRow()}${uploadStageEditor()}</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button ${saveDisabled ? "disabled" : ""}" type="button" data-upload-save ${saveDisabled ? "disabled" : ""}>${uploadSession.saving ? "Saving…" : "Save"}</button><button class="secondary-button upload-cancel-button" type="button" data-close-modal ${uploadSession.saving ? "disabled" : ""}>Cancel</button><span class="upload-modal-footer-note">Closing without Save discards the staged source. Added week options remain for this browser session.</span></div>`);
+  openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">${copy.eyebrow}</span><h2>${copy.title}</h2><p>${copy.copy}</p></div><div class="upload-modal-controls"><label class="upload-week-control"><span>Week</span><select id="upload-week-select" aria-label="Week" ${uploadSession.saving ? "disabled" : ""}>${weekOptions}</select></label><button class="upload-add-week" type="button" data-upload-add-week ${uploadSession.saving ? "disabled" : ""}>+ Add week</button><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving" ${uploadSession.saving ? "disabled" : ""}>×</button></div></div><div class="upload-modal-body"><div class="upload-prerequisite-copy ${prerequisite.ready ? "ready" : ""}"><span>${prerequisite.ready ? "✓" : "!"}</span><div>${escapeHtml(prerequisite.message)}</div></div><div class="upload-source-choices">${uploadSession.kind === "assignment" ? `<button class="upload-source-choice" type="button" data-upload-google ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">GS</span><span><strong>Import Google Sheet</strong><small>Preview the sheet before saving.</small></span></button>` : ""}${pdfChoice}${uploadSession.kind === "homework_comment" ? `<button class="upload-source-choice" type="button" data-upload-shared ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">TEXT</span><span><strong>Same comment for everyone</strong><small>Type a shared comment or upload a PDF without student names.</small></span></button>` : ""}</div>${sheetSourceForm()}${stagedSourceRow()}${uploadStageEditor()}</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button ${saveDisabled ? "disabled" : ""}" type="button" data-upload-save ${saveDisabled ? "disabled" : ""}>${uploadSession.saving ? "Saving…" : "Save"}</button><button class="secondary-button upload-cancel-button" type="button" data-close-modal ${uploadSession.saving ? "disabled" : ""}>Cancel</button><span class="upload-modal-footer-note">Closing without Save discards the staged source. Added week options remain for this browser session.</span></div>`);
   $("#modal").classList.add("upload-modal");
   if (stage?.mode === "legacy_assignment" && target?.draft) {
     $("#upload-period-start").value = target.start_date || stage.inspection.dates[0]?.iso || "";
@@ -903,7 +903,14 @@ async function stageManualUpload(file) {
     if (!COMMENT_SECTIONS[session.kind] || !isPdf) {
       throw new Error("Choose a searchable comments PDF. CSV uploads are no longer used.");
     }
-    session.stage = { mode: "comments_pdf", name: file.name, file, classId: "", label: file.name.replace(/\.pdf$/i, "") };
+    if (session.pdfAudience === "shared") {
+      const previous = session.stage;
+      const result = await api("/api/comments/shared/pdf/preview", { method: "POST", body: JSON.stringify({ pdf_base64: arrayBufferToBase64(await file.arrayBuffer()) }) });
+      if (uploadSession !== session) return;
+      session.stage = { mode: "comments_shared", name: file.name, classId: previous?.classId || "", comment: result.comment };
+    } else {
+      session.stage = { mode: "comments_pdf", name: file.name, file, classId: "", label: file.name.replace(/\.pdf$/i, "") };
+    }
     session.view = "sources";
     renderUploadModal();
   } catch (error) {
@@ -1357,13 +1364,21 @@ function mappingPercent(value) {
   return Math.round(Number(value || 0) * 10000) / 100;
 }
 
+function pdfContinuationRegions(mapping, pageCount) {
+  if (Array.isArray(mapping.continuation_regions)) return mapping.continuation_regions;
+  const occupied = new Set((mapping.regions || []).map(region => Number(region.page || 1)));
+  return Array.from({ length: Math.max(0, Math.min(pageCount, 3) - 1) }, (_, index) => index + 2)
+    .filter(page => !occupied.has(page))
+    .map(page => ({ key: `continuation_${page}`, content_type: "text", page, box: { x: .08, y: .08, width: .84, height: .78 }, font_size: 10, minimum_font_size: 10, line_spacing: 1.2, align: "left", required: false }));
+}
+
 function pdfRegionEditor(region, pageCount) {
   const box = region.box || {};
   const pageOptions = Array.from({ length: pageCount }, (_, index) => `<option value="${index + 1}" ${Number(region.page || 1) === index + 1 ? "selected" : ""}>Page ${index + 1}</option>`).join("");
   const fontFields = region.content_type === "text"
     ? `<label><span>Font size</span><input data-map-font-size type="number" min="5" max="36" step="0.25" value="${escapeHtml(region.font_size || 8.5)}" /></label><label><span>Minimum</span><input data-map-font-min type="number" min="5" max="36" step="0.25" value="${escapeHtml(region.minimum_font_size || 6.5)}" /></label><label><span>Alignment</span><select data-map-align><option value="left" ${region.align === "left" ? "selected" : ""}>Left</option><option value="center" ${region.align === "center" ? "selected" : ""}>Center</option><option value="right" ${region.align === "right" ? "selected" : ""}>Right</option></select></label>`
     : `<div class="mapping-region-type">Deterministic line graph</div>`;
-  return `<article class="mapping-region-row" data-mapping-region="${escapeHtml(region.key)}"><header><div><strong>${escapeHtml(PDF_REGION_LABELS[region.key] || region.key)}</strong><small>${escapeHtml(region.content_type)}</small></div><label><span>Page</span><select data-map-page>${pageOptions}</select></label></header><div class="mapping-coordinate-grid"><label><span>Left %</span><input data-map-field="x" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.x)}" /></label><label><span>Bottom %</span><input data-map-field="y" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.y)}" /></label><label><span>Width %</span><input data-map-field="width" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.width)}" /></label><label><span>Height %</span><input data-map-field="height" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.height)}" /></label>${fontFields}</div></article>`;
+  return `<article class="mapping-region-row" data-mapping-region="${escapeHtml(region.key)}"><header><div><strong>${escapeHtml(PDF_REGION_LABELS[region.key] || `Overflow text · page ${region.page}`)}</strong><small>${escapeHtml(region.content_type)}</small></div><label><span>Page</span><select data-map-page ${region.key.startsWith("continuation_") ? "disabled" : ""}>${pageOptions}</select></label></header><div class="mapping-coordinate-grid"><label><span>Left %</span><input data-map-field="x" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.x)}" /></label><label><span>Bottom %</span><input data-map-field="y" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.y)}" /></label><label><span>Width %</span><input data-map-field="width" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.width)}" /></label><label><span>Height %</span><input data-map-field="height" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.height)}" /></label>${fontFields}</div></article>`;
 }
 
 function showPdfMapping(classId) {
@@ -1372,10 +1387,12 @@ function showPdfMapping(classId) {
   if (!pdf) return toast("Upload a company PDF template first.", "error");
   const mapping = pdf.mapping || {};
   const regions = (mapping.regions || []).map(region => pdfRegionEditor(region, pdf.page_count || 1)).join("");
-  openModal(`<div class="mapping-modal-header"><div><span class="eyebrow">PDF TEMPLATE MAPPING</span><h2>${escapeHtml(classItem?.name || "Class")} · version ${pdf.version}</h2><p>Confirm where Brightline should place each student field. Coordinates are percentages of the PDF page, measured from the bottom-left.</p></div><a class="secondary-button button-link" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open source PDF</a></div><label><span>Mapping name</span><input id="pdf-mapping-name" value="${escapeHtml(mapping.name || "Company report layout")}" /></label><div class="mapping-region-list">${regions}</div><div class="safety-note">Publish only after checking the source PDF. Brightline will never guess a missing student match or silently clip an overflowing comment.</div><div class="modal-footer"><button class="secondary-button" id="pdf-map-draft" type="button">Save draft</button><button class="primary-button" id="pdf-map-publish" type="button">Publish mapping</button><button class="secondary-button" type="button" data-close-modal>Cancel</button></div>`);
+  const continuationRegions = pdfContinuationRegions(mapping, pdf.page_count || 1);
+  const continuationEditors = continuationRegions.map(region => pdfRegionEditor(region, pdf.page_count || 1)).join("");
+  openModal(`<div class="mapping-modal-header"><div><span class="eyebrow">PDF TEMPLATE MAPPING</span><h2>${escapeHtml(classItem?.name || "Class")} · version ${pdf.version}</h2><p>Confirm where Brightline should place each student field. Coordinates are percentages of the PDF page, measured from the bottom-left.</p></div><a class="secondary-button button-link" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open source PDF</a></div><label><span>Mapping name</span><input id="pdf-mapping-name" value="${escapeHtml(mapping.name || "Company report layout")}" /></label><div class="mapping-region-list">${regions}${continuationEditors ? `<h3>Overflow text areas</h3><p>Long comments continue in these areas on pages 2 and 3. Position them inside blank space on your template, without overlapping other fields. Unused trailing pages are omitted.</p>${continuationEditors}` : ""}</div><div class="safety-note">Publish only after checking the source PDF. Brightline will never guess a missing student match or silently clip an overflowing comment.</div><div class="modal-footer"><button class="secondary-button" id="pdf-map-draft" type="button">Save draft</button><button class="primary-button" id="pdf-map-publish" type="button">Publish mapping</button><button class="secondary-button" type="button" data-close-modal>Cancel</button></div>`);
   $("#modal").classList.add("template-mapping-modal");
   const layoutControls = document.createElement("div");
-  layoutControls.innerHTML = `<label><span>Report layout</span><select id="pdf-layout"><option value="uploaded_pdf">Use uploaded PDF and mapped positions</option><option value="royal_ib_weekly">Royal IB weekly report</option></select></label><div id="royal-layout-options"><p>A clean Royal IB report with student details, daily homework grades, and weekly test results. Comments are arranged by subject; general feedback stays labelled separately. Long comments continue on another page.</p><label><span>Comment size (points)</span><input id="pdf-body-size" type="number" min="9" max="12" step="0.5" value="${escapeHtml(mapping.typography?.font_size || 10)}" /></label><small>Uses a Korean-compatible font. This layout replaces the uploaded page design, including old sample names.</small></div>`;
+  layoutControls.innerHTML = `<label><span>Report layout</span><select id="pdf-layout"><option value="uploaded_pdf">Use uploaded PDF and mapped positions</option><option value="royal_ib_weekly">Royal IB weekly report</option></select></label><div id="royal-layout-options"><p>A clean Royal IB report with student details, daily homework grades, and weekly test results. Comments are arranged by subject; general feedback stays labelled separately. Long comments continue automatically, up to the ${pdf.page_count} page${pdf.page_count === 1 ? "" : "s"} supplied in this template. If a report needs more space, Brightline reports an error instead of cutting off text.</p><label><span>Comment size (points)</span><input id="pdf-body-size" type="number" min="9" max="12" step="0.5" value="${escapeHtml(mapping.typography?.font_size || 10)}" /></label><small>Uses a Korean-compatible font. This layout replaces the uploaded page design, including old sample names.</small></div>`;
   $(".mapping-region-list").before(layoutControls);
   $("#pdf-layout").value = mapping.layout || "uploaded_pdf";
   const updateLayout = () => {
@@ -1396,7 +1413,7 @@ function collectPdfMapping(classId) {
   mapping.layout = $("#pdf-layout").value;
   mapping.typography = { font_name: "auto", font_size: mapping.layout === "royal_ib_weekly" ? Number($("#pdf-body-size").value) : 10 };
   if (mapping.layout === "royal_ib_weekly") return mapping;
-  mapping.regions = (mapping.regions || []).map(region => {
+  const collectRegion = region => {
     const row = document.querySelector(`[data-mapping-region="${region.key}"]`);
     const updated = { ...region, page: Number(row.querySelector("[data-map-page]").value), box: { ...region.box } };
     row.querySelectorAll("[data-map-field]").forEach(input => { updated.box[input.dataset.mapField] = Number(input.value) / 100; });
@@ -1406,7 +1423,9 @@ function collectPdfMapping(classId) {
       updated.align = row.querySelector("[data-map-align]").value;
     }
     return updated;
-  });
+  };
+  mapping.regions = (mapping.regions || []).map(collectRegion);
+  mapping.continuation_regions = pdfContinuationRegions(pdf?.mapping || {}, pdf?.page_count || 1).map(collectRegion);
   return mapping;
 }
 
@@ -1584,9 +1603,18 @@ function bindEvents() {
     if (upload) { event.preventDefault(); openUploadModal(upload.dataset.uploadKind); return; }
     if (event.target.closest("[data-upload-add-week]")) { event.preventDefault(); addUploadWeek(); return; }
     if (event.target.closest("[data-upload-google]")) { event.preventDefault(); beginGoogleUpload(); return; }
+    if (event.target.closest("[data-upload-shared-pdf]")) {
+      event.preventDefault();
+      if (uploadSession?.kind === "homework_comment") {
+        captureUploadFields();
+        uploadSession.pdfAudience = "shared";
+        $("#comments-file-input")?.click();
+      }
+      return;
+    }
     if (event.target.closest("[data-upload-manual]")) {
       event.preventDefault();
-      if (COMMENT_SECTIONS[uploadSession?.kind]) $("#comments-file-input")?.click();
+      if (COMMENT_SECTIONS[uploadSession?.kind]) { uploadSession.pdfAudience = "individual"; $("#comments-file-input")?.click(); }
       return;
     }
     if (event.target.closest("[data-upload-shared]")) {

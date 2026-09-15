@@ -7,6 +7,7 @@ import io
 import json
 import math
 import re
+import tempfile
 import unicodedata
 from collections import Counter
 from datetime import date, datetime
@@ -20,7 +21,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
-from template_mapping import region_lookup
+from template_mapping import TemplateMappingError, region_lookup, validate_mapping
 from comment_sections import report_comment_sections
 
 
@@ -379,6 +380,22 @@ def _narrative_comment_records(
     }]
 
 
+def extract_shared_comment_pdf(pdf_bytes: bytes) -> str:
+    """Extract a class-wide comment for review, without guessing student names."""
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        if reader.is_encrypted:
+            raise ValidationError("Encrypted comments PDFs are not supported.")
+        text = "\n\n".join((page.extract_text() or "").strip() for page in reader.pages).strip()
+    except ValidationError:
+        raise
+    except Exception as exc:
+        raise ValidationError("The comments PDF could not be read.") from exc
+    if not text:
+        raise ValidationError("The comments PDF has no searchable text. Scanned PDFs need OCR.")
+    return text
+
+
 def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[dict[str, Any]]:
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -589,10 +606,17 @@ def inspect_template(path: Path) -> dict[str, Any]:
         raise ValidationError("Encrypted report templates are not supported.")
     if not reader.pages:
         raise ValidationError("The report template has no pages.")
+    if len(reader.pages) > 3:
+        raise ValidationError("Upload one PDF template containing 1 to 3 pages.")
     first = reader.pages[0].mediabox
     width, height = float(first.width), float(first.height)
-    if width >= height:
-        raise ValidationError("The report template must use a portrait page.")
+    for page in reader.pages:
+        box = page.mediabox
+        page_width, page_height = float(box.width), float(box.height)
+        if page_width <= 0 or page_width >= page_height or int(page.get("/Rotate", 0)) % 360:
+            raise ValidationError("The report template must use unrotated portrait pages.")
+        if abs(page_width - width) > 0.1 or abs(page_height - height) > 0.1:
+            raise ValidationError("All report template pages must have the same size.")
     fields = sorted((reader.get_fields() or {}).keys())
     return {"pages": len(reader.pages), "fields": fields, "width": width, "height": height}
 
@@ -1331,65 +1355,121 @@ def _mapped_values(student: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _mapped_text_piece(
+    value: str, region: dict[str, Any], width: float, height: float,
+) -> tuple[tuple[str, float, float, list[str]], str]:
+    """Fit a whole value when possible, otherwise retain every remaining line."""
+    _, _, box_width, box_height = _mapped_box(region, width, height)
+    try:
+        return _fit_mapped_text(value, region, box_width, box_height), ""
+    except ValidationError:
+        font_name = _mapped_font(region)
+        size = float(region.get("font_size") or 8.5)
+        leading = size * float(region.get("line_spacing") or 1.2)
+        lines = _wrap_lines(value, font_name, size, box_width)
+        capacity = max(0, int((box_height + 0.01) / leading))
+        if any(pdfmetrics.stringWidth(line, font_name, size) > box_width + 0.01
+               for line in lines[:capacity]):
+            raise ValidationError("A comment character cannot fit its template region. Widen the region.")
+        return (font_name, size, leading, lines[:capacity]), "\n".join(lines[capacity:])
+
+
+def _draw_mapped_piece(
+    c: canvas.Canvas, piece: tuple[str, float, float, list[str]],
+    region: dict[str, Any], width: float, height: float,
+) -> None:
+    font_name, size, leading, lines = piece
+    x, y, box_width, box_height = _mapped_box(region, width, height)
+    c.setFont(font_name, size)
+    c.setFillColor(INK)
+    for index, line in enumerate(lines):
+        baseline = y + box_height - size - index * leading
+        align = region.get("align", "left")
+        if align == "center":
+            c.drawCentredString(x + box_width / 2, baseline, line)
+        elif align == "right":
+            c.drawRightString(x + box_width, baseline, line)
+        else:
+            c.drawString(x, baseline, line)
+
+
 def _build_mapped_overlay_pages(
-    student: dict[str, Any],
-    width: float,
-    height: float,
-    page_count: int,
+    student: dict[str, Any], width: float, height: float, page_count: int,
     mapping: dict[str, Any],
 ) -> list[bytes]:
     register_fonts()
     regions = region_lookup(mapping)
     values = _mapped_values(student)
-    homework_points = list(student.get("homework") or [])
-    test_points = [
-        {
-            "label": exam.get("label", "Test"),
-            "percent": (
-                float(exam["score"]) / float(exam["max_score"]) * 100
-                if exam.get("score") is not None and exam.get("max_score")
-                else None
-            ),
-        }
-        for exam in student.get("exams", [])
-    ]
+    flow_keys = ("homework_summary", "weekly_test_summary", "teacher_comment")
+    labels = {"homework_summary": "과제이행도 (계속)",
+              "weekly_test_summary": "위클리 테스트 (계속)",
+              "teacher_comment": "종합 코멘트 (계속)"}
+    pieces: dict[str, tuple[str, float, float, list[str]]] = {}
+    pending: list[tuple[int, str]] = []
+    for key in flow_keys:
+        if key not in regions or not values.get(key, "").strip():
+            continue
+        region = regions[key]
+        pieces[key], remainder = _mapped_text_piece(values[key], region, width, height)
+        if remainder.strip():
+            pending.append((int(region.get("page") or 1), labels[key] + "\n" + remainder))
+
+    continuation_pieces: dict[int, tuple[dict[str, Any], tuple[str, float, float, list[str]]]] = {}
+    for region in sorted(mapping.get("continuation_regions") or [], key=lambda item: int(item["page"])):
+        page = int(region["page"])
+        if not pending:
+            break
+        # Continue only after the original field, never ahead of its first part.
+        eligible = [(origin, text) for origin, text in pending if origin < page]
+        waiting = [(origin, text) for origin, text in pending if origin >= page]
+        if not eligible:
+            continue
+        value = "\n\n".join(text for _, text in eligible)
+        piece, remainder = _mapped_text_piece(value, region, width, height)
+        continuation_pieces[page] = (region, piece)
+        pending = ([(page, remainder)] if remainder.strip() else []) + waiting
+    if pending:
+        raise ValidationError(
+            f"Comment text does not fit the {page_count}-page template. "
+            "Add a continuation page (up to 3 pages), enlarge its text area, or shorten the comments. "
+            "No text was discarded."
+        )
+
+    test_points = [{"label": exam.get("label", "Test"), "percent": (
+        float(exam["score"]) / float(exam["max_score"]) * 100
+        if exam.get("score") is not None and exam.get("max_score") else None
+    )} for exam in student.get("exams", [])]
+    used_pages = {1}
+    for key, region in regions.items():
+        if region["content_type"] == "chart" or values.get(key, "").strip():
+            used_pages.add(int(region.get("page") or 1))
+    used_pages.update(page for page, (_, piece) in continuation_pieces.items() if piece[3])
     overlays: list[bytes] = []
-    for page_number in range(1, page_count + 1):
+    for page_number in range(1, max(used_pages) + 1):
         buffer = io.BytesIO()
         c = canvas.Canvas(buffer, pagesize=(width, height), pageCompression=1)
         for key, region in regions.items():
             if int(region.get("page") or 1) != page_number:
                 continue
             if region["content_type"] == "text":
-                _draw_mapped_text(c, values.get(key, ""), region, width=width, height=height)
+                if key in pieces:
+                    _draw_mapped_piece(c, pieces[key], region, width, height)
+                elif values.get(key, "").strip():
+                    _draw_mapped_text(c, values[key], region, width=width, height=height)
                 continue
             x, y, chart_width, chart_height = _mapped_box(region, width, height)
             padding = min(chart_width, chart_height) * 0.04
-            if key == "homework_chart":
+            if key in {"homework_chart", "weekly_test_chart"}:
                 _draw_line_chart(
-                    c,
-                    homework_points,
-                    x=x + padding,
-                    y=y + padding,
+                    c, list(student.get("homework") or []) if key == "homework_chart" else test_points,
+                    x=x + padding, y=y + padding,
                     width=max(1, chart_width - padding * 2),
                     height=max(1, chart_height - padding * 2),
-                    value_key="score",
-                    label_key="label",
+                    value_key="score" if key == "homework_chart" else "percent", label_key="label",
                 )
-            elif key == "weekly_test_chart":
-                _draw_line_chart(
-                    c,
-                    test_points,
-                    x=x + padding,
-                    y=y + padding,
-                    width=max(1, chart_width - padding * 2),
-                    height=max(1, chart_height - padding * 2),
-                    value_key="percent",
-                    label_key="label",
-                )
-        # ReportLab omits a page entirely when it has no drawing operations. A
-        # mapped multi-page template may intentionally place every region on
-        # page one, so explicitly finalize every overlay page.
+        if page_number in continuation_pieces:
+            region, piece = continuation_pieces[page_number]
+            _draw_mapped_piece(c, piece, region, width, height)
         c.showPage()
         c.save()
         overlays.append(buffer.getvalue())
@@ -1404,15 +1484,36 @@ def generate_student_pdf(
 ) -> Path:
     if mapping and mapping.get("layout") == "royal_ib_weekly":
         from weekly_report import generate_weekly_report
-        return generate_weekly_report(
-            student, output_path, font=register_fonts(),
-            font_size=float((mapping.get("typography") or {}).get("font_size", 10)),
-        )
+        # Render off-destination so an over-capacity report cannot replace a valid one.
+        with tempfile.TemporaryDirectory(prefix="brightline-report-") as folder:
+            draft = Path(folder) / "report.pdf"
+            generate_weekly_report(
+                student, draft, font=register_fonts(),
+                font_size=float((mapping.get("typography") or {}).get("font_size", 10)),
+            )
+            page_limit = int(mapping.get("page_count") or 0)
+            if page_limit and len(PdfReader(draft).pages) > min(3, page_limit):
+                raise ValidationError(
+                    f"Comment text does not fit the {min(3, page_limit)}-page template. "
+                    "Upload up to 3 pages or shorten the comments. No text was discarded."
+                )
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(draft.read_bytes())
+        return output_path
+    inspection = inspect_template(template_path)
     template_reader = PdfReader(template_path)
     if template_reader.is_encrypted or not template_reader.pages:
         raise ValidationError("The active report template is unavailable.")
     first_box = template_reader.pages[0].mediabox
     width, height = float(first_box.width), float(first_box.height)
+    if mapping:
+        try:
+            mapping = validate_mapping(
+                mapping, page_width=width, page_height=height,
+                page_count=inspection["pages"],
+            )
+        except TemplateMappingError as exc:
+            raise ValidationError(str(exc)) from exc
     overlays = (
         _build_mapped_overlay_pages(
             student,
@@ -1424,6 +1525,11 @@ def generate_student_pdf(
         if mapping
         else _build_overlay_pages(student, width, height)
     )
+    if len(overlays) > inspection["pages"]:
+        raise ValidationError(
+            f"Comment text does not fit the {inspection['pages']}-page template. "
+            "Upload up to 3 pages or shorten the comments. No text was discarded."
+        )
     writer = PdfWriter()
     for index, overlay_bytes in enumerate(overlays):
         if mapping:
