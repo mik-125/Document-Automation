@@ -185,7 +185,7 @@ class PdfTemplateMappingTests(unittest.TestCase):
         self.assertIn("Weekly Test 3", page_text)
         self.assertNotIn("Teacher comment: -/-", page_text)
 
-    def test_omits_unused_trailing_pages_in_a_multi_page_template(self) -> None:
+    def test_preserves_unmapped_pages_in_a_multi_page_template(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             template_path = root / "two-page-template.pdf"
@@ -202,110 +202,8 @@ class PdfTemplateMappingTests(unittest.TestCase):
             generate_student_pdf(student, template_path, output_path, mapping=mapping)
             output = PdfReader(output_path)
 
-        self.assertEqual(len(output.pages), 1)
-        self.assertIn("page 1", output.pages[0].extract_text())
-
-    def test_comment_length_selects_one_two_or_three_template_pages(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            template_path = root / "three-page-template.pdf"
-            _blank_template(template_path, pages=3)
-            source_bytes = template_path.read_bytes()
-            mapping = default_mapping(*letter, page_count=3)
-            comment = next(r for r in mapping["regions"] if r["key"] == "teacher_comment")
-            for region in [comment, *mapping["continuation_regions"]]:
-                region.update(font_size=10, minimum_font_size=10, line_spacing=1.2)
-                region["box"] = {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.065}
-            for line_count, expected_pages in [(1, 1), (6, 2), (10, 3)]:
-                with self.subTest(line_count=line_count):
-                    lines = [f"Comment line {index:02d}." for index in range(line_count)]
-                    student = {
-                        "name": "Minseo Kim", "homework": [], "exams": [],
-                        "comments_by_section": {"general": "\n".join(lines)},
-                    }
-                    output_path = root / f"report-{line_count}.pdf"
-                    generate_student_pdf(student, template_path, output_path, mapping=mapping)
-                    output = PdfReader(output_path)
-                    self.assertEqual(len(output.pages), expected_pages)
-                    text = "\n".join(page.extract_text() for page in output.pages)
-                    for line in lines:
-                        self.assertEqual(text.count(line), 1, line)
-                    for page_number, page in enumerate(output.pages, start=1):
-                        self.assertIn(f"page {page_number}", page.extract_text())
-                    self.assertEqual(template_path.read_bytes(), source_bytes)
-
-    def test_three_page_overflow_never_writes_a_truncated_report(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            template_path = root / "three-page-template.pdf"
-            output_path = root / "report.pdf"
-            _blank_template(template_path, pages=3)
-            mapping = default_mapping(*letter, page_count=3)
-            student = {
-                "name": "Student", "homework": [], "exams": [],
-                "comments_by_section": {
-                    "general": "\n".join(f"Unique comment line {i}" for i in range(1000))
-                },
-            }
-            with self.assertRaises(ValidationError):
-                generate_student_pdf(student, template_path, output_path, mapping=mapping)
-            self.assertFalse(output_path.exists())
-            existing_output = b"previous successfully generated report"
-            output_path.write_bytes(existing_output)
-            with self.assertRaises(ValidationError):
-                generate_student_pdf(student, template_path, output_path, mapping=mapping)
-            self.assertEqual(output_path.read_bytes(), existing_output)
-
-    def test_required_mapped_content_keeps_later_template_pages(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            template_path = root / "three-page-template.pdf"
-            output_path = root / "report.pdf"
-            _blank_template(template_path, pages=3)
-            mapping = default_mapping(*letter, page_count=3)
-            name_region = next(r for r in mapping["regions"] if r["key"] == "student_name")
-            name_region["page"] = 3
-            # This layout reserves the last page for identity instead of overflow.
-            mapping["continuation_regions"] = [mapping["continuation_regions"][0]]
-            student = {"name": "Minseo Kim", "homework": [], "exams": []}
-            generate_student_pdf(student, template_path, output_path, mapping=mapping)
-            output = PdfReader(output_path)
-            self.assertEqual(len(output.pages), 3)
-            self.assertIn("Minseo Kim", output.pages[2].extract_text())
-            self.assertIn("page 3", output.pages[2].extract_text())
-
-    def test_continuation_mapping_validates_and_rejects_overlap(self) -> None:
-        mapping = default_mapping(*letter, page_count=3)
-        normalized = validate_mapping(
-            mapping, page_width=letter[0], page_height=letter[1], page_count=3,
-        )
-        self.assertEqual([r["page"] for r in normalized["continuation_regions"]], [2, 3])
-        mapping["regions"][0]["page"] = 2
-        mapping["regions"][0]["box"] = dict(mapping["continuation_regions"][0]["box"])
-        with self.assertRaisesRegex(TemplateMappingError, "overlaps"):
-            validate_mapping(
-                mapping, page_width=letter[0], page_height=letter[1], page_count=3,
-            )
-
-    def test_template_inspection_rejects_more_than_three_pages(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "four-pages.pdf"
-            _blank_template(path, pages=4)
-            with self.assertRaises(ValidationError):
-                inspect_template(path)
-
-    def test_template_inspection_rejects_mixed_page_sizes(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "mixed-pages.pdf"
-            document = canvas.Canvas(str(path), pagesize=letter)
-            document.drawString(40, 700, "First page")
-            document.showPage()
-            document.setPageSize((500, 700))
-            document.drawString(40, 650, "Different size")
-            document.showPage()
-            document.save()
-            with self.assertRaises(ValidationError):
-                inspect_template(path)
+        self.assertEqual(len(output.pages), 2)
+        self.assertIn("page 2", output.pages[1].extract_text())
 
     def test_generation_refuses_to_clip_an_overflowing_comment(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

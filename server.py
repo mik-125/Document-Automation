@@ -46,7 +46,6 @@ from report_engine import (
     inspect_template,
     parse_date_label,
     parse_comment_pdf,
-    extract_shared_comment_pdf,
     student_payload,
 )
 from template_mapping import default_mapping, validate_mapping
@@ -1092,11 +1091,6 @@ def _record_label(kind: str, record: dict[str, Any], period: dict[str, Any]) -> 
         or record.get("reporting_week")
         or period["label"]
     ).strip()
-
-
-def personalize_shared_comment(comment: str, student_name: str) -> str:
-    # Only replace a name blank directly before 학생; preserve other underscores.
-    return re.sub(r"[_＿](?:[ \t]*[_＿])+(?=\s*학생)", lambda _: student_name, comment)
 
 
 def _comment_label(value: Any) -> str:
@@ -2245,10 +2239,6 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json({"ok": True, "summary": summary, "state": app_state()})
                 return
-            if path == "/api/comments/shared/pdf/preview":
-                comment = extract_shared_comment_pdf(decode_base64(payload.get("pdf_base64"), "Shared comments PDF"))
-                self._send_json({"ok": True, "comment": comment})
-                return
             if path == "/api/comments/shared":
                 self._import_shared_comment(payload)
                 return
@@ -2433,12 +2423,8 @@ class AppHandler(BaseHTTPRequestHandler):
             raise ValidationError("Import Assignment and Weekly Test data for this class before Comments.")
         _, rosters = period_input_matrix()
         student_ids = sorted(rosters.get((class_id, period_id), set()))
-        personalized = {
-            student_id: personalize_shared_comment(comment, DB.get_student(student_id)["name"])
-            for student_id in student_ids
-        }
         if payload.get("confirm_replace") is not True and any(
-            exam.get("comment_section") == "homework" and str(exam.get("comment") or "").strip() not in {"", personalized[student_id]}
+            exam.get("comment_section") == "homework" and str(exam.get("comment") or "").strip() not in {"", comment}
             for student_id in student_ids for exam in DB.get_exams(student_id, period_id)
         ):
             raise IntegrationError("This would replace existing homework comments. Confirm replacement to continue.", "replacement_confirmation_required")
@@ -2447,7 +2433,7 @@ class AppHandler(BaseHTTPRequestHandler):
             for student_id in student_ids:
                 transaction.execute("UPDATE period_exams SET comment = '' WHERE student_id = ? AND period_id = ? AND comment_section = 'homework'", (student_id, period_id))
                 exam_id = DB.upsert_exam(student_id, class_id, {
-                    "label": _comment_label("homework"), "comment": personalized[student_id],
+                    "label": _comment_label("homework"), "comment": comment,
                     "comment_section": "homework", "source_name": "Shared homework comment",
                 }, period_id, connection=transaction)
                 entities["exam"].add(exam_id)
