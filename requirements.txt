@@ -1,5 +1,6 @@
 pypdf>=6.0,<7
 reportlab>=4.2,<5
+pymupdf>=1.24,<2
 google-api-python-client>=2,<3
 google-auth>=2,<3
 google-auth-oauthlib>=1,<2

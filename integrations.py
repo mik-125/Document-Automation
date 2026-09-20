@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -353,7 +354,7 @@ class GoogleWorkspace:
                 "The Google OAuth client file cannot be read.",
                 "google_credentials_invalid",
             ) from exc
-        client = payload.get("web")
+        client = payload.get("web") if isinstance(payload, dict) else None
         if not isinstance(client, dict) or not client.get("client_id"):
             raise IntegrationError(
                 "Create a Google OAuth client of type Web application and download its JSON file.",
@@ -366,17 +367,47 @@ class GoogleWorkspace:
         self._account_email = ""
 
     @staticmethod
+    def _local_client_path() -> Path:
+        data_dir = Path(
+            os.environ.get("BRIGHTLINE_DATA_DIR", Path(__file__).resolve().parent / "data")
+        ).expanduser().resolve()
+        return data_dir / "google-oauth-client.json"
+
+    @classmethod
+    def save_client_configuration(cls, source: Path) -> Path:
+        """Install a validated, private local copy that survives terminal restarts."""
+        destination = cls._local_client_path()
+        # Validate before replacing an existing working configuration.
+        cls(source, cls._token_path())
+        payload = source.read_bytes()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as temporary:
+                temporary_path = Path(temporary.name)
+                os.chmod(temporary_path, 0o600)
+                temporary.write(payload)
+            temporary_path.replace(destination)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+        return destination
+
+    @staticmethod
     def _client_path() -> Path:
-        configured = os.environ.get("GOOGLE_OAUTH_CLIENT_FILE", "")
-        if not configured:
+        configured = os.environ.get("GOOGLE_OAUTH_CLIENT_FILE", "").strip()
+        path = Path(configured).expanduser().resolve() if configured else GoogleWorkspace._local_client_path()
+        if not configured and not path.is_file():
             raise IntegrationError(
-                "Set GOOGLE_OAUTH_CLIENT_FILE before connecting your Google account.",
+                "Google setup is missing. Save your Web application OAuth JSON as "
+                "google-oauth-client.json in Brightline's local data folder. "
+                "You only need to set this up once.",
                 "google_not_configured",
             )
-        path = Path(configured).expanduser().resolve()
         if not path.is_file():
             raise IntegrationError(
-                "The configured Google OAuth client file does not exist.",
+                "The file selected by GOOGLE_OAUTH_CLIENT_FILE has moved or is missing. "
+                "Update that setting, or remove it to use Brightline's saved local Google setup.",
                 "google_credentials_missing",
             )
         return path

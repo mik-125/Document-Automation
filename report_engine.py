@@ -22,6 +22,8 @@ from reportlab.pdfgen import canvas
 
 from template_mapping import region_lookup
 from comment_sections import report_comment_sections
+from sample_content import heading_section, page_content_guide
+from pdf_content import analyze_content_pdf
 
 
 BASE_WIDTH = 540.0
@@ -269,6 +271,8 @@ def _cover_name(page_text: str) -> str | None:
 def _comment_heading(line: str) -> str | None:
     """Recognize standalone name headings, not names mentioned in sentences."""
     name = normalize_spaces(line)
+    if heading_section(name):
+        return None
     name = re.sub(r"^\(\s*ON\s*\)\s*", "", name, flags=re.IGNORECASE)
     if re.fullmatch(r"[가-힣]{2,5}", name):
         return name
@@ -334,7 +338,7 @@ def _inline_comment_records(
     for offset, (start, name) in enumerate(headings):
         end = headings[offset + 1][0] if offset + 1 < len(headings) else len(lines)
         raw_comment = "\n".join(lines[start + 1:end])
-        comment = normalize_spaces(raw_comment)
+        comment = _preserve_comment_sections(raw_comment)
         if not comment:
             raise ValidationError(f"No teacher comment could be extracted for {name}.")
         _validate_comment_name(name, raw_comment)
@@ -374,9 +378,27 @@ def _narrative_comment_records(
         )
     return [{
         "name": name, "label": label, "score": None, "max_score": None,
-        "sections": [], "comment": normalize_spaces(" ".join(lines[start:])),
+        "sections": [], "comment": _preserve_comment_sections("\n".join(lines[start:])),
         "source_name": source_name,
     }]
+
+
+def _preserve_comment_sections(text: str) -> str:
+    """Retain explicit section boundaries while joining PDF visual line wraps."""
+    blocks: list[str] = []
+    body: list[str] = []
+    for line in text.splitlines():
+        candidate = re.split(r"[:：]", line, maxsplit=1)[0]
+        if heading_section(line) or heading_section(candidate):
+            if body:
+                blocks.append(normalize_spaces(" ".join(body)))
+                body = []
+            blocks.append(normalize_spaces(line))
+        else:
+            body.append(line)
+    if body:
+        blocks.append(normalize_spaces(" ".join(body)))
+    return "\n".join(block for block in blocks if block)
 
 
 def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[dict[str, Any]]:
@@ -420,7 +442,7 @@ def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[di
     records: list[dict[str, Any]] = []
     for cover_index, (page_index, name) in enumerate(covers):
         next_page = covers[cover_index + 1][0] if cover_index + 1 < len(covers) else len(texts)
-        body = normalize_spaces(" ".join(texts[page_index + 1 : next_page]))
+        body = _preserve_comment_sections("\n".join(layout_pages[page_index + 1 : next_page]))
         if not body:
             records.append(
                 {
@@ -746,10 +768,10 @@ def _example_xobject_counts(resources: Any) -> dict[str, int]:
 
 
 def inspect_example_report(path: Path) -> dict[str, Any]:
-    """Return deterministic structural clues from a completed example report.
+    """Analyze section content and visual evidence without retaining sample prose.
 
-    This deliberately does not infer a writable template or identify student values. Text
-    is used only to count content and locate a small, fixed set of likely section labels.
+    The original blank PDF remains the only design source. Sample headings and
+    aggregate body statistics guide content placement, never student facts.
     """
 
     try:
@@ -781,6 +803,9 @@ def inspect_example_report(path: Path) -> dict[str, Any]:
     total_images = 0
     total_forms = 0
     explicit_continuation_pages: list[int] = []
+    content_sections: list[dict[str, Any]] = []
+    content_warnings: list[str] = []
+    content_images: list[dict[str, Any]] = []
 
     for page_number, page in enumerate(reader.pages, start=1):
         media_box = page.mediabox
@@ -804,6 +829,25 @@ def inspect_example_report(path: Path) -> dict[str, Any]:
         seen_sections: set[str] = set()
         text_run_count = 0
         continuation_label_found = False
+        content_runs: list[dict[str, Any]] = []
+        image_regions: list[dict[str, Any]] = []
+
+        def visit_operator(operator: bytes, operands: Any, cm: Any, tm: Any) -> None:
+            if operator != b"Do" or not operands:
+                return
+            resources = _resolved_pdf_object(page.get("/Resources"))
+            objects = _resolved_pdf_object(resources.get("/XObject")) if hasattr(resources, "get") else None
+            obj = _resolved_pdf_object(objects.get(operands[0])) if hasattr(objects, "get") else None
+            if not hasattr(obj, "get") or str(obj.get("/Subtype")) != "/Image":
+                return
+            corners = [(cm[4], cm[5]), (cm[0] + cm[4], cm[1] + cm[5]),
+                       (cm[2] + cm[4], cm[3] + cm[5]), (cm[0] + cm[2] + cm[4], cm[1] + cm[3] + cm[5])]
+            xs, ys = zip(*corners)
+            image_regions.append({"x": round(float(min(xs)) / raw_width, 4),
+                                  "y": round(float(min(ys)) / raw_height, 4),
+                                  "width": round(float(max(xs) - min(xs)) / raw_width, 4),
+                                  "height": round(float(max(ys) - min(ys)) / raw_height, 4),
+                                  "kind": "image; graph type unconfirmed"})
 
         def visit_text(text: Any, cm: Any, tm: Any, font: Any, font_size: Any) -> None:
             nonlocal text_run_count, continuation_label_found
@@ -813,7 +857,9 @@ def inspect_example_report(path: Path) -> dict[str, Any]:
             text_run_count += 1
             name = _example_font_name(font)
             try:
-                size = round(float(font_size), 2)
+                # PDF text matrices often encode the real size while Tf is 1.
+                scale_y = math.hypot(tm[2]*cm[0]+tm[3]*cm[2], tm[2]*cm[1]+tm[3]*cm[3])
+                size = round(float(font_size) * scale_y, 2)
             except (TypeError, ValueError):
                 size = 0.0
             if not math.isfinite(size) or size <= 0:
@@ -825,6 +871,11 @@ def inspect_example_report(path: Path) -> dict[str, Any]:
             if size:
                 all_sizes[size] += 1
             x, y = _example_text_position(cm, tm)
+            for line_index, line in enumerate(str(text or "").splitlines()):
+                if line.strip():
+                    content_runs.append({"text": unicodedata.normalize("NFKC", line).strip(),
+                                         "x": x, "y": y - line_index * size * 1.2 if y is not None else None,
+                                         "font": name, "size": size})
             section_clues.extend(
                 _example_section_clues(
                     clean,
@@ -840,7 +891,7 @@ def inspect_example_report(path: Path) -> dict[str, Any]:
             )
 
         try:
-            extracted_text = page.extract_text(visitor_text=visit_text) or ""
+            extracted_text = page.extract_text(visitor_text=visit_text, visitor_operand_before=visit_operator) or ""
         except Exception as exc:
             extracted_text = ""
             warnings.append(
@@ -851,6 +902,13 @@ def inspect_example_report(path: Path) -> dict[str, Any]:
             [line for line in str(extracted_text).splitlines() if normalize_spaces(line)]
         )
         xobject_counts = _example_xobject_counts(page.get("/Resources"))
+        content_images.extend({**image, "page": page_number} for image in image_regions)
+        if rotation:
+            content_warnings.append(f"Page {page_number}: rotated content needs placement review.")
+        else:
+            content_guide = page_content_guide(content_runs, raw_width, raw_height, page_number, image_regions)
+            content_sections.extend(content_guide["sections"])
+            content_warnings.extend(content_guide["warnings"])
         if not character_count:
             if xobject_counts["images"]:
                 warnings.append(
@@ -952,6 +1010,7 @@ def inspect_example_report(path: Path) -> dict[str, Any]:
             ),
         },
         "warnings": warnings,
+        "content_guide": analyze_content_pdf(Path(path)),
         "limitations": [
             "Section labels are keyword clues, not confirmed field mappings.",
             "Text coordinates are approximate for transformed or rotated PDF content.",
@@ -1337,6 +1396,7 @@ def _build_mapped_overlay_pages(
     height: float,
     page_count: int,
     mapping: dict[str, Any],
+    page_sizes: list[tuple[float, float]] | None = None,
 ) -> list[bytes]:
     register_fonts()
     regions = region_lookup(mapping)
@@ -1355,6 +1415,8 @@ def _build_mapped_overlay_pages(
     ]
     overlays: list[bytes] = []
     for page_number in range(1, page_count + 1):
+        if page_sizes:
+            width, height = page_sizes[page_number - 1]
         buffer = io.BytesIO()
         c = canvas.Canvas(buffer, pagesize=(width, height), pageCompression=1)
         for key, region in regions.items():
@@ -1402,6 +1464,10 @@ def generate_student_pdf(
     output_path: Path,
     mapping: dict[str, Any] | None = None,
 ) -> Path:
+    if mapping and mapping.get("layout", "uploaded_pdf") == "uploaded_pdf":
+        from adaptive_reports import generate_adaptive_pdf
+        if generate_adaptive_pdf(student, template_path, output_path, mapping):
+            return output_path
     if mapping and mapping.get("layout") == "royal_ib_weekly":
         from weekly_report import generate_weekly_report
         return generate_weekly_report(
@@ -1420,6 +1486,7 @@ def generate_student_pdf(
             height,
             len(template_reader.pages),
             mapping,
+            page_sizes=[(float(page.mediabox.width), float(page.mediabox.height)) for page in template_reader.pages],
         )
         if mapping
         else _build_overlay_pages(student, width, height)

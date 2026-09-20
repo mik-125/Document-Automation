@@ -16,6 +16,7 @@ import urllib.parse
 import uuid
 import unicodedata
 import zipfile
+from functools import lru_cache
 from datetime import UTC, date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +25,7 @@ from typing import Any
 
 from database import Database, normalize_student_name, normalize_value
 from comment_sections import COMMENT_SECTIONS, report_comment_sections
+from sample_content import merge_content_guides, organize_comments
 from integrations import (
     GOOGLE_SCOPES,
     GoogleWorkspace,
@@ -231,6 +233,12 @@ def save_class_template(class_id: str, template: dict[str, Any]) -> None:
     set_json_setting(f"class_template_{class_id}", template)
 
 
+@lru_cache(maxsize=64)
+def _existing_sample_analysis(path: str, size: int, modified: int) -> dict[str, Any]:
+    # Upgrade old samples in memory; keep the uploaded file and manifest intact.
+    return inspect_example_report(Path(path))
+
+
 def class_example_manifest(class_id: str) -> list[dict[str, Any]]:
     manifest_path = EXAMPLE_DIR / class_id / "manifest.json"
     try:
@@ -248,7 +256,16 @@ def class_example_manifest(class_id: str) -> list[dict[str, Any]]:
         candidate = (folder / stored_name).resolve()
         if not stored_name or candidate.parent != folder or not candidate.is_file():
             continue
-        examples.append(item)
+        analysis = item.get("analysis") or {}
+        if (analysis.get("content_guide") or {}).get("version", 0) < 2:
+            try:
+                stat = candidate.stat()
+                analysis = _existing_sample_analysis(str(candidate), stat.st_size, stat.st_mtime_ns)
+            except (OSError, ValidationError):
+                analysis = {**analysis, "content_guide": {
+                    "sections": [], "warnings": ["Sample could not be analyzed; re-upload a readable PDF."],
+                }}
+        examples.append({**item, "analysis": analysis})
     return examples
 
 
@@ -300,6 +317,7 @@ def example_analysis_profile(examples: list[dict[str, Any]]) -> dict[str, Any]:
         "possible_graph_regions": image_count,
         "warnings": warnings[:8],
         "advisory_only": True,
+        "content_guide": merge_content_guides(examples),
     }
 
 
@@ -333,13 +351,15 @@ def google_connection_state() -> dict[str, Any]:
         base_status = "configured"
     else:
         base_status = "disconnected"
-    account = stored_account
+    account = "" if disabled else stored_account
     error = DB.get_setting("google_connection_error") or identity.get("error", "")
+    if not identity["configured"]:
+        error = identity.get("error", "") or error
     common: dict[str, Any] = {
         "available": True,
-        "configured": bool(identity["authorized"]),
+        "configured": bool(identity["authorized"]) and not disabled,
         "oauth_client_configured": bool(identity["configured"]),
-        "authorized": bool(identity["authorized"]),
+        "authorized": bool(identity["authorized"]) and not disabled,
         "auth_mode": "oauth",
         "connect_url": "/api/google/oauth/start",
         "account_name": account,
@@ -510,6 +530,7 @@ def app_state() -> dict[str, Any]:
     }
     templates: list[dict[str, Any]] = []
     template_lookup: dict[str, dict[str, Any]] = {}
+    content_guides: dict[str, dict[str, Any]] = {}
     active_google_account = str(google["google_docs"].get("account_name") or "")
     for class_item in state["classes"]:
         template = class_template(class_item["id"])
@@ -517,8 +538,11 @@ def app_state() -> dict[str, Any]:
         active_pdf_template = DB.get_class_template_version(
             class_item["id"], published_only=True
         )
-        pdf_ready = bool(active_pdf_template and active_pdf_template.get("ready"))
+        layout_review = bool(active_pdf_template and
+                             (active_pdf_template.get("mapping") or {}).get("layout") == "royal_ib_weekly")
+        pdf_ready = bool(active_pdf_template and active_pdf_template.get("ready") and not layout_review)
         examples = class_example_manifest(class_item["id"])
+        content_guides[class_item["id"]] = merge_content_guides(examples)
         example_profile = example_analysis_profile(examples)
         missing = list(template.get("missing_required") or [])
         invalid = list(template.get("invalid_placeholders") or [])
@@ -532,7 +556,7 @@ def app_state() -> dict[str, Any]:
             and not invalid
             and account_verified
         )
-        ready = bool(pdf_ready or google_template_ready)
+        ready = bool(pdf_ready or (google_template_ready and not pdf_template))
         item = {
             "class_id": class_item["id"],
             "document_id": str(template.get("document_id") or ""),
@@ -558,7 +582,7 @@ def app_state() -> dict[str, Any]:
             "output_mode": (
                 "pdf_template"
                 if pdf_ready
-                else ("google_docs" if google_template_ready else "")
+                else ("google_docs" if google_template_ready and not pdf_template else "")
             ),
             "pdf_template": (
                 {
@@ -567,6 +591,7 @@ def app_state() -> dict[str, Any]:
                     "version": int(pdf_template.get("version") or 0),
                     "status": str(pdf_template.get("status") or "draft"),
                     "ready": pdf_ready,
+                    "layout_review_required": layout_review,
                     "active_version": int(active_pdf_template.get("version") or 0)
                     if active_pdf_template
                     else 0,
@@ -594,7 +619,8 @@ def app_state() -> dict[str, Any]:
             "example_profile": example_profile,
             "last_tested_at": str(template.get("last_tested_at") or ""),
             "error": str(
-                template.get("error")
+                ("Review and publish the original PDF mapping; the previous layout replaced the uploaded design."
+                 if layout_review else "") or template.get("error")
                 or (
                     "Retest this template with the connected Google account."
                     if template.get("document_id") and not account_verified
@@ -612,6 +638,17 @@ def app_state() -> dict[str, Any]:
         student["report_ready"] = bool(student.get("ready") and student["template_ready"])
         output_mode = str(template_lookup.get(student["class_id"], {}).get("output_mode") or "")
         student["output_mode"] = output_mode
+        guide = content_guides.get(student["class_id"], {})
+        organized = organize_comments(student.get("exams", []), guide)
+        student["missing_test_feedback_assumption"] = bool(
+            output_mode == "pdf_template"
+            and any(s.get("section") == "weekly_test" and s.get("reliable", True)
+                    for s in guide.get("sections", []))
+            and not organized["sections"]["weekly_test"].strip()
+        )
+        if student["missing_test_feedback_assumption"]:
+            student["report_ready"] = bool(student.get("assignment_ready")
+                and organized["sections"]["homework"].strip() and student["template_ready"])
         student["output_ready"] = bool(output_mode == "pdf_template" or google_docs_ready)
         student["google_ready"] = student["output_ready"]
         student["report_ready"] = bool(student["report_ready"] and student["output_ready"])
@@ -1725,12 +1762,23 @@ def get_ready_student(student_id: str, period_id: str | None = None) -> dict[str
     excluded = int(payload.get("homework_excluded") or 0)
     if not attempted and not excluded and payload.get("homework_percent") is None:
         raise ValidationError("This student still needs Assignment data.")
-    if not any(exam.get("score") is not None for exam in exams):
+    guide = merge_content_guides(class_example_manifest(student["class_id"]))
+    organized = organize_comments(exams, guide)
+    payload["comments_by_section"] = organized["sections"]
+    payload["comment_placement"] = organized["decisions"]
+    payload["sample_content_guide"] = guide
+    pdf_template = DB.get_class_template_version(student["class_id"], published_only=True)
+    missing_test_assumption = bool(
+        pdf_template and pdf_template.get("ready")
+        and any(s.get("section") == "weekly_test" and s.get("reliable", True)
+                for s in guide.get("sections", []))
+        and not organized["sections"]["weekly_test"].strip())
+    payload["missing_test_feedback_assumption"] = missing_test_assumption
+    if not any(exam.get("score") is not None for exam in exams) and not missing_test_assumption:
         raise ValidationError("This student still needs a Weekly Test score.")
-    payload["comments_by_section"] = report_comment_sections(exams)
     if not payload["comments_by_section"]["homework"]:
         raise ValidationError("This student still needs a homework comment.")
-    if not (payload["comments_by_section"]["weekly_test"] or payload["comments_by_section"]["general"]):
+    if not missing_test_assumption and not (payload["comments_by_section"]["weekly_test"] or payload["comments_by_section"]["general"]):
         raise ValidationError("This student still needs a weekly test or general comment.")
     return payload
 
@@ -1774,7 +1822,11 @@ def generate_report(
     )
     period_folder = safe_filename(student.get("period_label", "period"), "period")
     output = REPORT_DIR / period_folder / f"{student_id}-{uuid.uuid4().hex[:8]}.pdf"
+    if DB.get_class_template_version(student["class_id"]) and not pdf_template:
+        raise ValidationError("Review and publish the original PDF template mapping before generating reports.")
     if pdf_template and pdf_template.get("ready"):
+        if (pdf_template.get("mapping") or {}).get("layout") == "royal_ib_weekly":
+            raise ValidationError("Review and publish the original PDF mapping. The old replacement layout cannot override your template design.")
         template_path = Path(str(pdf_template.get("source_pdf_path") or "")).resolve()
         template_root = PDF_TEMPLATE_DIR.resolve()
         if template_root not in template_path.parents or not template_path.is_file():
@@ -2698,6 +2750,11 @@ class AppHandler(BaseHTTPRequestHandler):
         self._redirect("/#connections")
 
     def _test_google(self, payload: dict[str, Any]) -> None:
+        if DB.get_setting("google_connection_disabled") == "1":
+            raise IntegrationError(
+                "Click Connect Google account before testing the connection.",
+                "google_oauth_required",
+            )
         service = str(payload.get("service") or "google_sheets")
         if service not in {"google_sheets", "google_docs"}:
             raise ValidationError("Choose a valid Google service.")
@@ -2834,6 +2891,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 page_height=float(template["page_height"]),
                 page_count=int(template["page_count"]),
             )
+            if mapping["layout"] != "uploaded_pdf":
+                raise ValidationError("The original PDF controls report design. Publish mapped positions on that PDF.")
             published = payload.get("publish") is True
             template = DB.update_template_mapping(
                 str(template["id"]), mapping, publish=published
@@ -3017,6 +3076,10 @@ def run(host: str = "127.0.0.1", port: int = 8000) -> None:
             "This MVP is local-only. Put it behind authenticated HTTPS before sharing it."
         )
     server = ThreadingHTTPServer((host, port), AppHandler)
+    # Saved setup is reusable; starting Brightline does not activate Google access.
+    DB.set_setting("google_connection_disabled", "1")
+    DB.set_setting("google_connection_status", "disconnected")
+    DB.set_setting("google_connection_error", "")
     print(f"Brightline Reports: http://{host}:{port}")
     if os.environ.get("BRIGHTLINE_PASSWORD"):
         print("Password protection is enabled.")

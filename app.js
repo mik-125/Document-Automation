@@ -445,13 +445,13 @@ function renderTemplates() {
     const profile = template.example_profile || {};
     const exampleCount = template.example_count || 0;
     const sampleSummary = exampleCount
-      ? `${profile.multi_page_count || 0} multi-page · ${profile.image_xobject_count || 0} image/graph region${profile.image_xobject_count === 1 ? "" : "s"}`
-      : "Upload a completed PDF report for this class.";
+      ? `Content reference · ${profile.content_guide?.sections?.length || 0} section observations${profile.content_guide?.requires_review ? " · Review analysis" : ""}`
+      : "Upload a completed report to guide content placement; teacher wording is preserved.";
     const activeVersionNote = pdf?.status !== "published" && pdf?.active_version
       ? ` · Version ${pdf.active_version} remains active`
       : "";
     const pdfSummary = pdf
-      ? `Version ${pdf.version} · ${pdf.page_count} page${pdf.page_count === 1 ? "" : "s"} · ${pdf.status === "published" ? "Published" : "Mapping confirmation required"}${activeVersionNote}`
+      ? `Original design · Version ${pdf.version} · ${pdf.page_count} page${pdf.page_count === 1 ? "" : "s"} · ${pdf.layout_review_required ? "Review original PDF mapping" : pdf.status === "published" ? "Published" : "Mapping confirmation required"}${activeVersionNote}`
       : "Upload the clean company PDF before generating reports.";
     const pdfActions = `<button class="table-action" type="button" data-template-pdf-upload="${classItem.id}">${pdf ? "Upload new version" : "Upload PDF template"}</button>${pdf ? `<button class="table-action" type="button" data-template-pdf-map="${classItem.id}">${pdf.status === "published" ? "Review mapping" : "Confirm mapping"}</button><a class="table-action" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open PDF</a><button class="table-action danger" type="button" data-template-pdf-disconnect="${classItem.id}">Remove</button>` : ""}`;
     return `<tr><td class="template-class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.teacher || "Teacher not set")}</small></td><td class="template-sample-cell"><div class="template-output-stack"><div class="template-sample-layout"><div class="template-sample-summary"><strong>${escapeHtml(pdf?.name || "No company template")}</strong><small>${escapeHtml(pdfSummary)}</small></div><div class="template-sample-actions">${pdfActions}</div></div><div class="template-sample-layout template-example-layout"><div class="template-sample-summary"><strong>${exampleCount ? `${exampleCount} completed sample${exampleCount === 1 ? "" : "s"}` : "No completed sample"}</strong><small>${escapeHtml(sampleSummary)}</small></div><div class="template-sample-actions"><button class="table-action" type="button" data-template-example="${classItem.id}">Upload sample report</button>${exampleCount ? `<button class="table-action" type="button" data-template-analysis="${classItem.id}">View analysis</button>` : ""}</div></div></div></td></tr>`;
@@ -459,6 +459,7 @@ function renderTemplates() {
 }
 
 function reportReason(student) {
+  if (student.report_ready && student.missing_test_feedback_assumption) return "Ready · no test feedback";
   if (!student.assignment_ready) return "Assignment missing";
   if (!student.weekly_test_ready) return "Weekly Test missing";
   if (!student.homework_comment_ready) return "과제이행도 comment missing";
@@ -1374,17 +1375,9 @@ function showPdfMapping(classId) {
   const regions = (mapping.regions || []).map(region => pdfRegionEditor(region, pdf.page_count || 1)).join("");
   openModal(`<div class="mapping-modal-header"><div><span class="eyebrow">PDF TEMPLATE MAPPING</span><h2>${escapeHtml(classItem?.name || "Class")} · version ${pdf.version}</h2><p>Confirm where Brightline should place each student field. Coordinates are percentages of the PDF page, measured from the bottom-left.</p></div><a class="secondary-button button-link" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open source PDF</a></div><label><span>Mapping name</span><input id="pdf-mapping-name" value="${escapeHtml(mapping.name || "Company report layout")}" /></label><div class="mapping-region-list">${regions}</div><div class="safety-note">Publish only after checking the source PDF. Brightline will never guess a missing student match or silently clip an overflowing comment.</div><div class="modal-footer"><button class="secondary-button" id="pdf-map-draft" type="button">Save draft</button><button class="primary-button" id="pdf-map-publish" type="button">Publish mapping</button><button class="secondary-button" type="button" data-close-modal>Cancel</button></div>`);
   $("#modal").classList.add("template-mapping-modal");
-  const layoutControls = document.createElement("div");
-  layoutControls.innerHTML = `<label><span>Report layout</span><select id="pdf-layout"><option value="uploaded_pdf">Use uploaded PDF and mapped positions</option><option value="royal_ib_weekly">Royal IB weekly report</option></select></label><div id="royal-layout-options"><p>A clean Royal IB report with student details, daily homework grades, and weekly test results. Comments are arranged by subject; general feedback stays labelled separately. Long comments continue on another page.</p><label><span>Comment size (points)</span><input id="pdf-body-size" type="number" min="9" max="12" step="0.5" value="${escapeHtml(mapping.typography?.font_size || 10)}" /></label><small>Uses a Korean-compatible font. This layout replaces the uploaded page design, including old sample names.</small></div>`;
-  $(".mapping-region-list").before(layoutControls);
-  $("#pdf-layout").value = mapping.layout || "uploaded_pdf";
-  const updateLayout = () => {
-    const royal = $("#pdf-layout").value === "royal_ib_weekly";
-    $(".mapping-region-list").classList.toggle("hidden", royal);
-    $("#royal-layout-options").classList.toggle("hidden", !royal);
-  };
-  $("#pdf-layout").onchange = updateLayout;
-  updateLayout();
+  const designNotice = document.createElement("p");
+  designNotice.textContent = "The original PDF controls page design and mapped typography. Completed samples guide content sections only. Check these positions against the original PDF before publishing.";
+  $(".mapping-region-list").before(designNotice);
   $("#pdf-map-draft").onclick = () => savePdfMapping(classId, false);
   $("#pdf-map-publish").onclick = () => savePdfMapping(classId, true);
 }
@@ -1393,9 +1386,7 @@ function collectPdfMapping(classId) {
   const pdf = templateForClass(classId)?.pdf_template;
   const mapping = structuredClone(pdf?.mapping || {});
   mapping.name = $("#pdf-mapping-name").value.trim() || "Company report layout";
-  mapping.layout = $("#pdf-layout").value;
-  mapping.typography = { font_name: "auto", font_size: mapping.layout === "royal_ib_weekly" ? Number($("#pdf-body-size").value) : 10 };
-  if (mapping.layout === "royal_ib_weekly") return mapping;
+  mapping.layout = "uploaded_pdf";
   mapping.regions = (mapping.regions || []).map(region => {
     const row = document.querySelector(`[data-mapping-region="${region.key}"]`);
     const updated = { ...region, page: Number(row.querySelector("[data-map-page]").value), box: { ...region.box } };
@@ -1527,6 +1518,15 @@ function showExampleAnalysis(classId) {
     return `<article class="example-analysis-row"><div><strong>${escapeHtml(example.filename)}</strong><small>${escapeHtml(formatDateTime(example.uploaded_at))}</small></div><div><span>${analysis.page_count || 0} page${analysis.page_count === 1 ? "" : "s"}${analysis.multi_page ? " · continuation layout present" : ""}</span><small>${escapeHtml((summary.font_names || []).slice(0, 4).join(", ") || "Fonts unavailable")} · ${summary.image_xobject_count || 0} image/possible graph region${summary.image_xobject_count === 1 ? "" : "s"}</small></div><button class="table-action" type="button" data-example-delete="${escapeHtml(example.id)}" data-example-class="${classId}">Delete</button></article>`;
   }).join("");
   openModal(`<span class="eyebrow">SAMPLE REPORT ANALYSIS</span><h2>${escapeHtml(classItem?.name || "Class")} sample reports</h2><p>Brightline compares structural clues across the completed PDF reports uploaded for this class.</p><div class="analysis-summary-grid"><div><span>Samples</span><strong>${profile.sample_count || 0}</strong></div><div><span>Multi-page</span><strong>${profile.multi_page_count || 0}</strong></div><div><span>Image / graph regions</span><strong>${profile.image_xobject_count || 0}</strong></div></div><div class="analysis-section"><strong>Common fonts</strong><div class="placeholder-list">${chips(profile.common_fonts)}</div></div><div class="analysis-section"><strong>Likely report sections</strong><div class="placeholder-list">${chips(profile.section_clues)}</div></div><div class="example-analysis-list">${rows || emptyState("No sample reports", "Upload a completed PDF for this class.")}</div><div class="safety-note">Clues are advisory: font names and coordinates can be approximate, image-heavy areas are only possible graph regions, and scanned PDFs need future OCR.</div><div class="modal-footer"><button class="secondary-button" type="button" data-template-example="${classId}">Upload another sample</button><button class="primary-button" data-close-modal>Done</button></div>`);
+  const guide = profile.content_guide || {};
+  const sectionNames = { homework: "Homework / learning feedback", weekly_test: "Weekly test feedback", general: "General teacher feedback" };
+  const observations = (guide.sections || []).map(section => `<article class="analysis-section"><strong>${escapeHtml(sectionNames[section.section] || section.section)}</strong><p>Sample heading: ${escapeHtml(section.label)} · Page ${section.page} → ${escapeHtml(PDF_REGION_LABELS[section.target_region] || section.target_region)}</p><small>${escapeHtml((section.topics || []).join(" · ") || "No reliable content topics extracted")} · ${section.text_characters || 0} characters observed${section.graph_type_labels?.length ? ` · Chart labels: ${escapeHtml(section.graph_type_labels.join(", "))}` : ""}</small></article>`).join("");
+  const contentGuide = document.createElement("div");
+  const typography = (guide.sections || []).filter(section => section.preferred_font_size).map(section => `<p>${escapeHtml(sectionNames[section.section] || section.section)} · Sample page ${section.page}: ${escapeHtml((section.body_fonts || []).join(", "))}, ${Number(section.preferred_font_size).toFixed(1)} pt. Text may shrink below 8 pt to meet the page limits (5 pt safety floor).</p>`).join("");
+  contentGuide.innerHTML = `<h3>Content placement guidance</h3><p>Original template = design. Completed sample = content reference. Brightline uses section headings and class-specific content patterns to separate test overviews from detailed teacher feedback, preserving the source wording. Review the preview for ambiguous passages.</p>${observations || "<p>No reliable section headings were extracted. Review the sample before relying on automatic placement.</p>"}<h3>Typography and pagination</h3>${typography}<p>Weekly Test feedback stays in its original box. Additional teacher-comment pages are kept only when the final comment panel is at least half filled. Missing test feedback uses the academy-requested missed-test message and a single-page report; stored scores remain unchanged.</p>${(guide.warnings || []).map(warning => `<p class="safety-note">${escapeHtml(warning)}</p>`).join("")}`;
+  $(".example-analysis-list").before(contentGuide);
+  $("#modal > p").textContent = "Brightline analyzes each class's sample headings, content topics, fonts and image positions. Sample wording and student facts are never copied into another student's report.";
+  $("#modal > .safety-note").textContent = "The original template always controls design. Unreadable text and uncertain sections need review. Recognized original panels allow automatic fitting and continuation; other layouts need confirmed mapping. Missing sample fonts use a Unicode fallback. Graph images alone do not establish graph type.";
 }
 
 async function deleteExample(classId, exampleId) {
@@ -1547,7 +1547,7 @@ async function deleteExample(classId, exampleId) {
 async function configureGoogle(service) {
   const connection = state.connections[service] || {};
   if (!connection.oauth_client_configured) {
-    toast("Set GOOGLE_OAUTH_CLIENT_FILE and restart Brightline first.", "error");
+    toast(connection.error || "Google setup is missing. Add your OAuth client JSON using the setup instructions below.", "error");
     return;
   }
   if (connection.authorized && service === "google_docs" && connection.status === "needs_setup") {

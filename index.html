@@ -146,7 +146,7 @@
 
           <section class="connection-help section-block">
             <span class="eyebrow">SETUP CHECKLIST</span><h2>What you need from Google Cloud</h2>
-            <ol><li>Configure the Google OAuth consent screen and add your account as a test user.</li><li>Create a Web application OAuth client with redirect URI <code>http://127.0.0.1:8000/api/google/oauth/callback</code>.</li><li>Download its JSON outside this repository and set <code>GOOGLE_OAUTH_CLIENT_FILE</code>.</li><li>Enable Google Sheets API, Google Docs API, and Google Drive API.</li><li>Click Connect Google account. Brightline creates a private <code>Brightline Reports</code> folder in My Drive.</li></ol>
+            <ol><li>Configure the Google OAuth consent screen and add your account as a test user.</li><li>Create a Web application OAuth client with redirect URI <code>http://127.0.0.1:8000/api/google/oauth/callback</code>.</li><li>Save its JSON as <code>data/google-oauth-client.json</code> in your local Brightline folder. This private setup is remembered across restarts and excluded from Git. See the README for the one-time setup command.</li><li>Enable Google Sheets API, Google Docs API, and Google Drive API.</li><li>Click Connect Google account. Brightline creates a private <code>Brightline Reports</code> folder in My Drive.</li></ol>
           </section>
         </section>
       </main>
