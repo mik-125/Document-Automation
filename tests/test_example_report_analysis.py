@@ -11,7 +11,7 @@ from reportlab.lib.pagesizes import landscape, letter
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from report_engine import ValidationError, inspect_example_report
+from backend.report_engine import ValidationError, inspect_example_report
 
 try:
     from PIL import Image

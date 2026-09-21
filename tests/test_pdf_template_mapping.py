@@ -8,9 +8,9 @@ from pypdf import PdfReader
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
-from database import Database
-from report_engine import ValidationError, generate_student_pdf, inspect_template
-from template_mapping import (
+from backend.database import Database
+from backend.report_engine import ValidationError, generate_student_pdf, inspect_template
+from backend.template_mapping import (
     REQUIRED_REGION_KEYS,
     TemplateMappingError,
     default_mapping,

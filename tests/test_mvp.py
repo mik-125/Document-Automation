@@ -14,9 +14,9 @@ from unittest.mock import patch
 _SERVER_DATA = tempfile.TemporaryDirectory()
 atexit.register(_SERVER_DATA.cleanup)
 os.environ["BRIGHTLINE_DATA_DIR"] = _SERVER_DATA.name
-import server as app_server
-from database import Database
-from integrations import (
+from backend import server as app_server
+from backend.database import Database
+from backend.integrations import (
     GoogleWorkspace,
     IntegrationError,
     google_file_id,
@@ -1497,7 +1497,7 @@ class DatabaseReadinessTests(unittest.TestCase):
 
 class FrontendContractTests(unittest.TestCase):
     def test_static_javascript_ids_exist_once_in_html(self) -> None:
-        root = Path(__file__).resolve().parent
+        root = (Path(__file__).resolve().parent.parent / "frontend")
         html = (root / "index.html").read_text(encoding="utf-8")
         javascript = (root / "app.js").read_text(encoding="utf-8")
         html_ids = re.findall(r'\bid="([A-Za-z][A-Za-z0-9_-]*)"', html)
@@ -1509,7 +1509,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertEqual(referenced_ids - set(html_ids) - dynamic_ids, set())
 
     def test_sidebar_exposes_only_the_four_mvp_sections(self) -> None:
-        html = (Path(__file__).resolve().parent / "index.html").read_text(encoding="utf-8")
+        html = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
         navigation = re.findall(r'data-nav="([a-z_]+)"', html)
         self.assertEqual(set(navigation), {"inbox", "templates", "reports", "connections"})
 

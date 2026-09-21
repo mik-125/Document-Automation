@@ -10,9 +10,9 @@ from unittest.mock import Mock, patch
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
 
-from report_engine import generate_student_pdf, inspect_example_report, parse_comment_pdf, ValidationError
-from sample_content import merge_content_guides, organize_comments, page_content_guide
-from template_mapping import default_mapping, validate_mapping
+from backend.report_engine import generate_student_pdf, inspect_example_report, parse_comment_pdf, ValidationError
+from backend.sample_content import merge_content_guides, organize_comments, page_content_guide
+from backend.template_mapping import default_mapping, validate_mapping
 
 
 def make_sample(path):
@@ -120,7 +120,7 @@ class SampleContentTests(unittest.TestCase):
         self.assertEqual(result["sections"]["homework"], comment)
 
     def test_server_prepares_class_specific_sections_for_actual_report_generation(self):
-        import server
+        from backend import server
         from contextlib import nullcontext
         student = {"id": "student", "class_id": "class", "period_id": "week",
                    "period_end": "2026-09-20", "homework_json": "[]", "homework_completed": 1}
@@ -140,7 +140,7 @@ class SampleContentTests(unittest.TestCase):
         self.assertIn("Check units.", payload["comments_by_section"]["weekly_test"])
 
     def test_missing_test_feedback_policy_allows_pdf_without_score_but_requires_homework(self):
-        import server
+        from backend import server
         from contextlib import nullcontext
         database=Mock()
         database.get_student_for_period.return_value={
@@ -212,7 +212,7 @@ class SampleContentTests(unittest.TestCase):
             self.assertEqual(mapping, mapping_before)
 
     def test_server_blocks_legacy_design_override_and_unpublished_pdf_fallback(self):
-        import server
+        from backend import server
         student = {"id": "s", "class_id": "c", "period_label": "Week 1"}
         for template in ({"ready": True, "mapping": {"layout": "royal_ib_weekly"}}, None):
             database = Mock()

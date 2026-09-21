@@ -4,7 +4,7 @@ import re
 import unittest
 from pathlib import Path
 
-from integrations import preview_table
+from backend.integrations import preview_table
 
 
 class GoogleSheetPreviewPayloadTests(unittest.TestCase):
@@ -76,7 +76,7 @@ class GoogleSheetPreviewFrontendContractTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        root = Path(__file__).resolve().parent
+        root = (Path(__file__).resolve().parent.parent / "frontend")
         cls.javascript = (root / "app.js").read_text(encoding="utf-8")
         cls.styles = (root / "styles.css").read_text(encoding="utf-8")
 

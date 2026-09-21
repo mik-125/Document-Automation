@@ -8,11 +8,11 @@ from pathlib import Path
 import pymupdf as fitz
 from reportlab.pdfgen import canvas
 
-from adaptive_reports import layout_comments, _flow_at_size, generate_adaptive_pdf, _wrap_feedback, MISSING_TEST_FEEDBACK
-from pdf_content import analyze_content_pdf
-from sample_content import organize_comments, content_features, _source_units
-from template_mapping import default_mapping
-from report_engine import ValidationError, inspect_example_report
+from backend.adaptive_reports import layout_comments, _flow_at_size, generate_adaptive_pdf, _wrap_feedback, MISSING_TEST_FEEDBACK
+from backend.pdf_content import analyze_content_pdf
+from backend.sample_content import organize_comments, content_features, _source_units
+from backend.template_mapping import default_mapping
+from backend.report_engine import ValidationError, inspect_example_report
 
 
 def guide():

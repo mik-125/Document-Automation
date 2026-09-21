@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 
 from pypdf import PdfReader
-from report_engine import generate_student_pdf
-from template_mapping import default_mapping, validate_mapping, TemplateMappingError
+from backend.report_engine import generate_student_pdf
+from backend.template_mapping import default_mapping, validate_mapping, TemplateMappingError
 
 
 class WeeklyReportTests(unittest.TestCase):
@@ -68,8 +68,8 @@ class WeeklyReportTests(unittest.TestCase):
                 self.assertEqual(text.count(f"피드백{index:03d}"), 1)
 
     def test_explicit_categories_render_in_the_selected_sections(self):
-        from report_engine import _mapped_values
-        from integrations import report_replacements
+        from backend.report_engine import _mapped_values
+        from backend.integrations import report_replacements
         student = self.student("")
         student["comments_by_section"] = {
             "homework": "HOMEWORK_MARKER 시험이라는 단어가 있어도 과제 코멘트입니다.",

@@ -16,9 +16,9 @@ _SERVER_DATA = tempfile.TemporaryDirectory()
 atexit.register(_SERVER_DATA.cleanup)
 os.environ.setdefault("BRIGHTLINE_DATA_DIR", _SERVER_DATA.name)
 
-import server as app_server
-from database import Database
-from report_engine import ValidationError, _inline_comment_records, parse_comment_pdf, register_fonts
+from backend import server as app_server
+from backend.database import Database
+from backend.report_engine import ValidationError, _inline_comment_records, parse_comment_pdf, register_fonts
 
 
 def comments_pdf(pages: list[list[str]]) -> bytes:
@@ -206,7 +206,7 @@ class CommentPdfImportTests(unittest.TestCase):
             student = app_server.DB.find_students_by_name(self.class_id, name)[0]
             app_server.DB.upsert_exam(student["id"], self.class_id, {"label": "Homework", "comment_section": "homework", "comment": "Homework feedback."}, self.period_id)
             payload = app_server.get_ready_student(student["id"], self.period_id)
-            from report_engine import _student_comment
+            from backend.report_engine import _student_comment
             self.assertIn(text, _student_comment(payload))
             exams = app_server.DB.get_exams(student["id"], self.period_id)
             self.assertIn(score, [exam["score"] for exam in exams])

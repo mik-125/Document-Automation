@@ -20,10 +20,10 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
-from template_mapping import region_lookup
-from comment_sections import report_comment_sections
-from sample_content import heading_section, page_content_guide
-from pdf_content import analyze_content_pdf
+from backend.template_mapping import region_lookup
+from backend.comment_sections import report_comment_sections
+from backend.sample_content import heading_section, page_content_guide
+from backend.pdf_content import analyze_content_pdf
 
 
 BASE_WIDTH = 540.0
@@ -1465,11 +1465,11 @@ def generate_student_pdf(
     mapping: dict[str, Any] | None = None,
 ) -> Path:
     if mapping and mapping.get("layout", "uploaded_pdf") == "uploaded_pdf":
-        from adaptive_reports import generate_adaptive_pdf
+        from backend.adaptive_reports import generate_adaptive_pdf
         if generate_adaptive_pdf(student, template_path, output_path, mapping):
             return output_path
     if mapping and mapping.get("layout") == "royal_ib_weekly":
-        from weekly_report import generate_weekly_report
+        from backend.weekly_report import generate_weekly_report
         return generate_weekly_report(
             student, output_path, font=register_fonts(),
             font_size=float((mapping.get("typography") or {}).get("font_size", 10)),

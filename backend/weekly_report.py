@@ -14,8 +14,8 @@ from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Paragraph
 
-from comment_sections import report_comment_sections, split_comment_sections
-from report_charts import draw_homework_chart, draw_test_chart
+from backend.comment_sections import report_comment_sections, split_comment_sections
+from backend.report_charts import draw_homework_chart, draw_test_chart
 
 GREEN = HexColor("#00B451")
 INK = HexColor("#111111")

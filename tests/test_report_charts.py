@@ -4,7 +4,7 @@ import unittest
 from pypdf import PdfReader
 from reportlab.pdfgen import canvas
 
-from report_charts import draw_homework_chart, draw_test_chart, homework_points, test_points
+from backend.report_charts import draw_homework_chart, draw_test_chart, homework_points, test_points
 
 
 class ReportChartTests(unittest.TestCase):

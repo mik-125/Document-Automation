@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from integrations import GoogleWorkspace, IntegrationError
+from backend.integrations import GoogleWorkspace, IntegrationError
 
 
 class PersistentGoogleSetupTests(unittest.TestCase):
@@ -45,12 +45,12 @@ class PersistentGoogleSetupTests(unittest.TestCase):
         self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
         result = subprocess.run([
             sys.executable, "-c",
-            "from integrations import GoogleWorkspace; "
+            "from backend.integrations import GoogleWorkspace; "
             "assert GoogleWorkspace.configured_identity()['configured']; "
             "assert not GoogleWorkspace.configured_identity()['authorized']; "
             "flow = GoogleWorkspace.authorization_flow('http://127.0.0.1:8000/api/google/oauth/callback'); "
             "assert flow.authorization_url()[0].startswith('https://accounts.google.com/')",
-        ], cwd=Path(__file__).resolve().parent, env=os.environ.copy(), capture_output=True)
+        ], cwd=Path(__file__).resolve().parent.parent, env=os.environ.copy(), capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
 
     def test_explicit_override_wins_and_missing_override_is_not_silently_ignored(self):
@@ -91,8 +91,8 @@ class PersistentGoogleSetupTests(unittest.TestCase):
         self.assertIn("google-oauth-client.json", identity["error"])
 
     def test_server_start_requires_connect_even_with_saved_credentials(self):
-        import server
-        from database import Database
+        from backend import server
+        from backend.database import Database
 
         saved = GoogleWorkspace.save_client_configuration(self.client())
         token = GoogleWorkspace._token_path()
@@ -118,9 +118,9 @@ class PersistentGoogleSetupTests(unittest.TestCase):
         self.assertTrue(token.is_file())
 
     def test_connect_starts_sign_in_but_only_successful_callback_activates_access(self):
-        import server
+        from backend import server
         import time
-        from database import Database
+        from backend.database import Database
 
         database = Database(self.root / "state.db")
         database.set_setting("google_connection_disabled", "1")

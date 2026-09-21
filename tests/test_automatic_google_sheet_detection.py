@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-import server as app_server
-from integrations import IntegrationError
+from backend import server as app_server
+from backend.integrations import IntegrationError
 
 
 class AutomaticAssignmentSheetDetectionTests(unittest.TestCase):

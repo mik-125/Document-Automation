@@ -16,7 +16,7 @@ class EmptyStartTests(unittest.TestCase):
         check = """
 from pathlib import Path
 from unittest.mock import patch
-import server
+from backend import server
 
 with patch.object(server.GoogleWorkspace, 'from_env', side_effect=AssertionError('No automatic Google connection')):
     state = server.app_state()
@@ -41,7 +41,7 @@ print('Empty installation verified')
                        GOOGLE_OAUTH_TOKEN_FILE='')
             for _ in range(2):
                 result = subprocess.run([sys.executable, '-c', check],
-                    cwd=Path(__file__).resolve().parent, env=env, capture_output=True,
+                    cwd=Path(__file__).resolve().parent.parent, env=env, capture_output=True,
                     text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('Empty installation verified', result.stdout)

@@ -6,7 +6,7 @@ from pathlib import Path
 import statistics
 import pymupdf as fitz
 
-from sample_content import heading_section, SECTION_REGIONS, TOPICS, content_features
+from backend.sample_content import heading_section, SECTION_REGIONS, TOPICS, content_features
 import re
 
 

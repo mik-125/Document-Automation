@@ -10,7 +10,7 @@ class ModalScrollIsolationContractTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        root = Path(__file__).resolve().parent
+        root = (Path(__file__).resolve().parent.parent / "frontend")
         cls.javascript = (root / "app.js").read_text(encoding="utf-8")
         cls.styles = (root / "styles.css").read_text(encoding="utf-8")
 

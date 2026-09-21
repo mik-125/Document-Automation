@@ -8,7 +8,7 @@ from pathlib import Path
 class TemplateTableFrontendContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        root = Path(__file__).resolve().parent
+        root = (Path(__file__).resolve().parent.parent / "frontend")
         cls.html = (root / "index.html").read_text(encoding="utf-8")
         cls.javascript = (root / "app.js").read_text(encoding="utf-8")
 

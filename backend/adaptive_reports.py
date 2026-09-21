@@ -16,8 +16,8 @@ from pypdf import PdfReader, PdfWriter
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
-from pdf_content import labeled_panels, page_lines
-from sample_content import SECTION_REGIONS
+from backend.pdf_content import labeled_panels, page_lines
+from backend.sample_content import SECTION_REGIONS
 
 COMPACT_MINIMUM = 5.0
 MISSING_TEST_FEEDBACK = (
@@ -27,7 +27,7 @@ MISSING_TEST_FEEDBACK = (
 
 
 def _body_font(observations):
-    from report_engine import register_fonts
+    from backend.report_engine import register_fonts
     fonts = Counter(f for item in observations for f in item.get("body_fonts",[]))
     aliases = {"Arial":"Helvetica", "TimesNewRomanPSMT":"Times-Roman",
                "CourierNewPSMT":"Courier"}
@@ -74,7 +74,7 @@ def _frames(doc, mapping, guide):
 
 def _wrap_feedback(text, font, size, width):
     """Keep Latin words together; CJK may break between glyphs. No rewriting."""
-    from report_engine import ValidationError
+    from backend.report_engine import ValidationError
     lines=[]
     for paragraph in text.splitlines() or [""]:
         current=""
@@ -133,7 +133,7 @@ def _filled_fraction(draw):
 
 def _section_plan(text, group, frames, page_count, clone_offset, size, allow_extra):
     """Pure trial layout. Rejected font/page trials never leak into the output."""
-    from report_engine import ValidationError
+    from backend.report_engine import ValidationError
     fitted, remaining = _flow_at_size(text, group, size)
     clones = []
     while remaining and allow_extra:
@@ -160,7 +160,7 @@ def _section_plan(text, group, frames, page_count, clone_offset, size, allow_ext
 
 def layout_comments(values, frames, page_count, *, single_page=False):
     """Keep test feedback in its box; reject sparsely filled final comment pages."""
-    from report_engine import ValidationError
+    from backend.report_engine import ValidationError
     draws, clones, receipt = [], [], []
     for section,key in SECTION_REGIONS.items():
         group = [f for f in frames if f["section"]==section and (not single_page or f["page"]==0)]
@@ -234,7 +234,7 @@ def _identity_fields(page, student):
 
 def generate_adaptive_pdf(student, template_path, output_path, mapping):
     """Return False for unsupported original geometry, allowing mapped fallback."""
-    from report_engine import (_mapped_values, _draw_lines, _draw_line_chart,
+    from backend.report_engine import (_mapped_values, _draw_lines, _draw_line_chart,
                                _fit_mapped_text, INK, register_fonts)
     guide=student.get("sample_content_guide") or {}
     if not guide.get("sections"):return False

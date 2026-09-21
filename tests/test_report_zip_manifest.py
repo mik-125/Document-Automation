@@ -7,7 +7,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-import server as app_server
+from backend import server as app_server
 
 
 class ReportZipManifestTests(unittest.TestCase):

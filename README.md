@@ -2,6 +2,24 @@
 
 Brightline is a single-academy, local-first report generator. It imports Assignment, Weekly Test, and Comments data, supports per-class original PDF templates and completed samples or Google Docs templates, and exports student PDFs and class ZIP files.
 
+## Repository structure
+
+```text
+frontend/          Website HTML, styles, and JavaScript
+backend/           HTTP API, authentication, data storage, integrations, and reports
+tests/             Python and frontend regression tests
+docs/              Product requirements and design rules
+assets/            Bundled PDF template assets
+server.py          Application launcher
+requirements.txt   Python dependencies
+```
+
+The backend serves only the explicitly allowed files in `frontend/`.
+Authentication and request-origin checks live in `backend/server.py`.
+Local uploads, credentials, the SQLite database, and generated reports remain in
+Git-ignored `data/` at the repository root (or `BRIGHTLINE_DATA_DIR` when set).
+Run the commands below from the repository root.
+
 ## Empty starting state and product requirements
 
 A fresh installation starts with no uploaded classes, students, comments, scores,
@@ -9,7 +27,7 @@ templates, samples, or reports. Users provide their own data. Developer uploads 
 local test material, not default content; they stay in ignored local storage.
 The report-analysis and generation features remain part of the application.
 
-See [PRODUCT_REQUIREMENTS.md](PRODUCT_REQUIREMENTS.md) for the maintained rules
+See [PRODUCT_REQUIREMENTS.md](docs/PRODUCT_REQUIREMENTS.md) for the maintained rules
 on class-specific sample analysis, original-template authority, preserved wording,
 pagination, private data, and release checks. Different report formats require
 independent validation; current examples do not prove universal format support.
@@ -43,7 +61,7 @@ MakeEdu is intentionally unavailable until MakeEdu supplies official API documen
 7. Save a private local copy once, from the Brightline project folder:
 
 ```sh
-.venv/bin/python -c 'from pathlib import Path; from integrations import GoogleWorkspace; import sys; GoogleWorkspace.save_client_configuration(Path(sys.argv[1]))' "/absolute/path/to/downloaded-google-oauth-client.json"
+.venv/bin/python -c 'from pathlib import Path; from backend.integrations import GoogleWorkspace; import sys; GoogleWorkspace.save_client_configuration(Path(sys.argv[1]))' "/absolute/path/to/downloaded-google-oauth-client.json"
 ```
 
 Brightline stores the validated configuration in `data/google-oauth-client.json` with owner-only permissions. It loads this file automatically on every start, so moving the original download or opening a new terminal does not break setup. With a custom `BRIGHTLINE_DATA_DIR`, run setup and the server with the same data directory.
@@ -182,7 +200,7 @@ For Google Sheet imports (and backend mapped CSV imports), a unique Student ID i
 
 ```sh
 .venv/bin/python -m unittest discover -v
-node --check app.js
+node --check frontend/app.js
 ```
 
 Live Google verification requires a personal Google OAuth client, an authorized test user, a source Sheet, and a template Doc.

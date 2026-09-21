@@ -14,8 +14,8 @@ _SERVER_DATA = tempfile.TemporaryDirectory()
 atexit.register(_SERVER_DATA.cleanup)
 os.environ.setdefault("BRIGHTLINE_DATA_DIR", _SERVER_DATA.name)
 
-import server as app_server
-from database import Database
+from backend import server as app_server
+from backend.database import Database
 
 
 class WeekUploadWorkflowTests(unittest.TestCase):
@@ -230,7 +230,7 @@ class UploadModalFrontendContractTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.javascript = (Path(__file__).resolve().parent / "app.js").read_text(
+        cls.javascript = (Path(__file__).resolve().parent.parent / "frontend" / "app.js").read_text(
             encoding="utf-8"
         )
 
@@ -376,7 +376,7 @@ assert.deepEqual(removed, ["brightline.uploadDraftPeriods.v1", "brightline.uploa
 '''
         subprocess.run(
             [node, "-e", script],
-            cwd=Path(__file__).resolve().parent,
+            cwd=(Path(__file__).resolve().parent.parent / "frontend"),
             check=True,
             capture_output=True,
             text=True,
@@ -440,7 +440,7 @@ const context = {
 '''
         subprocess.run(
             [node, "-e", script],
-            cwd=Path(__file__).resolve().parent,
+            cwd=(Path(__file__).resolve().parent.parent / "frontend"),
             check=True,
             capture_output=True,
             text=True,
@@ -485,7 +485,7 @@ html = vm.runInNewContext(editor + "\nuploadStageEditor()", context);
 assert.match(html, /value="chem"[^>]*selected[^>]*>Chemistry<\/option>/);
 assert.doesNotMatch(html, /value="chem"[^>]*disabled/);
 '''
-        subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
+        subprocess.run([node, "-e", script], cwd=(Path(__file__).resolve().parent.parent / "frontend"),
                        check=True, capture_output=True, text=True)
 
     def test_pdf_confirmation_identifies_the_selected_class(self) -> None:
@@ -537,13 +537,13 @@ run();
 assert.equal(html, "");
 assert.equal(notice, "1 matched");
 '''
-        subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
+        subprocess.run([node, "-e", script], cwd=(Path(__file__).resolve().parent.parent / "frontend"),
                        check=True, capture_output=True, text=True)
         self.assertIn("showCommentImportResult(result, session.kind)", self.section("saveUpload", "showCommentImportResult"))
         self.assertIn("showCommentImportResult(result)", self.section("openCommentsPdfModal", "reviewIssue"))
 
     def test_single_combined_upload_replaces_weekly_test_upload(self) -> None:
-        html = (Path(__file__).resolve().parent / "index.html").read_text(encoding="utf-8")
+        html = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
         self.assertIn("Homework + test scores", html)
         self.assertNotIn('data-upload-kind="weekly_test"', html)
         self.assertIn('data-upload-kind="assignment"', html)
@@ -625,7 +625,7 @@ const sections = {homework_comment: "homework", weekly_test_comment: "weekly_tes
   assert.deepEqual(requests, [{url: "/api/comments/shared", payload: {class_id: "class-b", period_id: "week-2", comment: "Keep practising."}}]);
 })().catch(error => {console.error(error); process.exit(1);});
 '''
-        subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
+        subprocess.run([node, "-e", script], cwd=(Path(__file__).resolve().parent.parent / "frontend"),
                        check=True, capture_output=True, text=True)
 
     def test_comment_modal_offers_only_allowed_sources(self) -> None:
@@ -651,7 +651,7 @@ for (const kind of ["homework_comment", "weekly_test_comment", "general_comment"
  assert.equal(html.includes("data-upload-manual"), kind !== "assignment");
 }
 '''
-        subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
+        subprocess.run([node, "-e", script], cwd=(Path(__file__).resolve().parent.parent / "frontend"),
                        check=True, capture_output=True, text=True)
 
     def test_report_reason_requires_homework_and_either_other_comment(self) -> None:
@@ -669,7 +669,7 @@ for (const homework of [false, true]) for (const weekly of [false, true]) for (c
  assert.equal(context.reportReason(student) === "Ready", homework && (weekly || general));
 }
 '''
-        subprocess.run([node, "-e", script], cwd=Path(__file__).resolve().parent,
+        subprocess.run([node, "-e", script], cwd=(Path(__file__).resolve().parent.parent / "frontend"),
                        check=True, capture_output=True, text=True)
 
     def test_new_week_dates_are_created_automatically(self) -> None:

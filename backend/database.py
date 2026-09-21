@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from comment_sections import COMMENT_SECTIONS, report_comment_sections
+from backend.comment_sections import COMMENT_SECTIONS, report_comment_sections
 
 
 def now_iso() -> str:

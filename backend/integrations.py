@@ -369,7 +369,7 @@ class GoogleWorkspace:
     @staticmethod
     def _local_client_path() -> Path:
         data_dir = Path(
-            os.environ.get("BRIGHTLINE_DATA_DIR", Path(__file__).resolve().parent / "data")
+            os.environ.get("BRIGHTLINE_DATA_DIR", Path(__file__).resolve().parent.parent / "data")
         ).expanduser().resolve()
         return data_dir / "google-oauth-client.json"
 
@@ -418,7 +418,7 @@ class GoogleWorkspace:
         if configured:
             return Path(configured).expanduser().resolve()
         data_dir = Path(
-            os.environ.get("BRIGHTLINE_DATA_DIR", Path(__file__).resolve().parent / "data")
+            os.environ.get("BRIGHTLINE_DATA_DIR", Path(__file__).resolve().parent.parent / "data")
         ).expanduser().resolve()
         return data_dir / "google-oauth-token.json"
 

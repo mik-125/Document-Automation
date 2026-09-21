@@ -1,7 +1,7 @@
 import unittest
 from collections import Counter
 
-from comment_sections import split_comment_sections
+from backend.comment_sections import split_comment_sections
 
 
 class CommentSectionTests(unittest.TestCase):

@@ -3,10 +3,10 @@ import base64
 import itertools
 import unittest
 from unittest.mock import patch
-import test_comment_pdf_import as fixtures
-from comment_sections import report_comment_sections
-from integrations import IntegrationError
-from report_engine import ValidationError
+from tests import test_comment_pdf_import as fixtures
+from backend.comment_sections import report_comment_sections
+from backend.integrations import IntegrationError
+from backend.report_engine import ValidationError
 
 app = fixtures.app_server
 
