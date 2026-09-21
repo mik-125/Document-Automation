@@ -16,14 +16,19 @@ independent validation; current examples do not prove universal format support.
 
 ## What is real in this MVP
 
-- Assignment CSV import using the existing Royal IB format
-- Mapped CSV imports for Assignment, Weekly Test, and Comments
-- Google Sheets reads through the official Sheets API
-- Per-class Google Docs templates through the official Docs and Drive APIs
+- Website import of homework and Weekly Test scores from one Google Sheet through the official Sheets API
+- Website upload of searchable PDFs for 과제이행도, Weekly Test, and general comments, plus a shared 과제이행도 comment option
+- Per-class original PDF templates with reviewed, published mappings and completed samples for content guidance
+- Alternative per-class Google Docs templates through the official Docs and Drive APIs
 - Controlled placeholder replacement and PDF export
 - Manual review when a Comments PDF cannot safely identify a student
 - Local SQLite persistence and ignored local report files
 - Optional Basic authentication as an extra layer on localhost
+
+CSV imports remain available in the backend: the existing Royal IB Assignment
+format and mapped Assignment, Weekly Test, and Comments imports are supported by
+API handlers. The website upload screen does not accept CSV files; use Google
+Sheets for homework and scores, and searchable PDFs for individual comments.
 
 MakeEdu is intentionally unavailable until MakeEdu supplies official API documentation and academy API access. The app does not scrape or simulate MakeEdu.
 
@@ -132,6 +137,12 @@ suppressed, and the report must fit on one page. This is an output policy, not
 verified attendance: imported scores and teacher wording are never changed.
 Assignment data and homework comments are still required.
 
+### Google Docs templates (alternative)
+
+Google Docs templates are an alternative to original PDF templates, not a
+requirement for every class. The website's Google Sheets import still requires a
+Google connection when using a PDF report template.
+
 Use these exact placeholders in ordinary Google Docs text or table cells:
 
 - `{{student_name}}` — required
@@ -150,13 +161,22 @@ Text formatting around each placeholder is preserved by Google Docs. Placeholder
 
 ## Import order
 
-1. Import Assignment data. This creates the reporting period, classes, and students.
-2. Import Weekly Test data for the same class and period.
-3. Import Comments data. A manual PDF must represent one class.
-4. Connect and test a Google Docs template for each class.
-5. Preview one student before downloading a class ZIP.
+1. Connect Google and import **Homework + test scores** from one Google Sheet. Include student details, dated homework marks, and a Weekly Test percentage column (0–100). This creates the reporting period, classes, and students. Blank scores preserve existing results.
+2. Add **과제이행도 comments (required)** for the same class and period. Upload a searchable PDF with individual homework comments, or enter a shared comment for everyone in the selected class and week.
+3. Import **Weekly Test comments**, **General comments**, or both as searchable PDFs. Each PDF must represent one class. Normally, each student needs a Weekly Test score and at least one of these two comment types in addition to Assignment data and the required 과제이행도 comment.
+4. Set up a template for each class: upload an **original blank PDF**, review its mapping and publish it, using completed samples as class-specific content references; or connect and test a **Google Docs template** with the placeholders above.
+5. Review any unmatched comments and preview one student before downloading a class ZIP. Students with complete inputs can generate reports even when classmates still need data.
 
-For mapped CSV and Sheet imports, a unique Student ID is strongly recommended. Without it, Brightline accepts only an exact, unambiguous name within the class and uses school or grade to narrow the match when those fields are supplied.
+**Missing Weekly Test feedback:** for a ready, published PDF template whose
+completed-sample analysis reliably identifies a Weekly Test section, missing
+feedback triggers the missed-test notice described above, even if a score exists.
+This exception allows generation without a Weekly Test score or either optional
+comment type; Assignment data and 과제이행도 comments remain required. The output
+omits the test graph and fits on one page without changing stored scores or source
+comments. Do not assume this exception applies to Google Docs or PDF templates
+without the required sample evidence.
+
+For Google Sheet imports (and backend mapped CSV imports), a unique Student ID is strongly recommended. Without it, Brightline accepts only an exact, unambiguous name within the class and uses school or grade to narrow the match when those fields are supplied.
 
 ## Verification
 
