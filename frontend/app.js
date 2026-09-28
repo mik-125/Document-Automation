@@ -459,6 +459,7 @@ function renderTemplates() {
 }
 
 function reportReason(student) {
+  if (student.routing_review_required) return "Comment routing review required";
   if (student.report_ready && student.missing_test_feedback_assumption) return "Ready · no test feedback";
   if (!student.assignment_ready) return "Assignment missing";
   if (!student.weekly_test_ready) return "Weekly Test missing";
@@ -467,6 +468,21 @@ function reportReason(student) {
   if (!student.template_ready) return "Template missing";
   if (!(student.output_ready ?? student.google_ready)) return "Report output missing";
   return "Ready";
+}
+
+function showRoutingReview(studentId) {
+  const student = state.students.find(item => item.id === studentId);
+  if (!student) return;
+  const decisions = student.comment_placement || [];
+  const rows = decisions.length ? decisions.map(decision => {
+    const confidence = `${Math.round(Number(decision.confidence || 0) * 100)}%`;
+    const signals = (decision.signals || []).join(" · ");
+    return `<tr><td>${decision.passage_index}</td><td>${escapeHtml(decision.destination || "review")}</td><td><span class="status-pill ${decision.requires_review ? "warn" : ""}">${confidence}</span></td><td>${escapeHtml(signals)}</td></tr><tr class="routing-passage-row"><td colspan="4"><pre>${escapeHtml(decision.passage || "")}</pre></td></tr>`;
+  }).join("") : `<tr><td colspan="4">No comment passages were found.</td></tr>`;
+  const scoreWarning = student.missing_test_score_warning
+    ? `<div class="safety-note warning"><strong>Review warning:</strong> A Weekly Test score is stored, but the missed-test notice will be used because no passage matched the Weekly Test section.</div>`
+    : "";
+  openModal(`<span class="eyebrow">PASSAGE ROUTING</span><h2>${escapeHtml(student.name)}</h2><p>Every source passage is shown with its destination, confidence, and matching signals. Low-confidence passages keep their original upload section and block generation.</p>${scoreWarning}<div class="table-card routing-table"><table><thead><tr><th>#</th><th>Section</th><th>Confidence</th><th>Why</th></tr></thead><tbody>${rows}</tbody></table></div><div class="modal-footer"><button type="button" class="primary-button" data-close-modal>Close</button></div>`);
 }
 
 function renderReports() {
@@ -506,7 +522,9 @@ function renderReports() {
         const exam = student.latest_exam;
         const attempted = Number(student.homework_completed || 0) + Number(student.homework_incomplete || 0);
         const missed = attempted || Number(student.homework_excluded || 0) ? formatNumber(student.homework_incomplete || 0) : student.homework_percent == null ? "—" : "Unavailable";
-        return `<div class="report-student-row"><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.school || "School missing")} · ${escapeHtml(student.grade || "Grade missing")}</small></span></div><div class="report-data"><span>Assignments missed<b>${missed}</b></span><span>Weekly Test<b>${exam ? `${formatNumber(exam.score)}${exam.max_score === 100 ? "%" : exam.max_score == null ? "" : `/${formatNumber(exam.max_score)}`}` : "—"}</b></span></div><span class="status-pill ${student.report_ready ? "" : "warn"}">${escapeHtml(reportReason(student))}</span><div class="row-actions">${student.report_ready ? `<button class="table-action" data-preview-student="${student.id}" data-period-id="${student.period_id || ""}">Preview</button><button class="table-action" data-download-student="${student.id}" data-period-id="${student.period_id || ""}" data-filename="${escapeHtml(student.name)}-report.pdf">Download PDF</button>` : '<button class="table-action disabled">Needs data</button>'}</div></div>`;
+        const routingButton = `<button class="table-action" data-routing-student="${student.id}">Routing</button>`;
+        const reportActions = student.report_ready ? `<button class="table-action" data-preview-student="${student.id}" data-period-id="${student.period_id || ""}">Preview</button><button class="table-action" data-download-student="${student.id}" data-period-id="${student.period_id || ""}" data-filename="${escapeHtml(student.name)}-report.pdf">Download PDF</button>` : '<button class="table-action disabled">Needs review</button>';
+        return `<div class="report-student-row"><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.school || "School missing")} · ${escapeHtml(student.grade || "Grade missing")}</small></span></div><div class="report-data"><span>Assignments missed<b>${missed}</b></span><span>Weekly Test<b>${exam ? `${formatNumber(exam.score)}${exam.max_score === 100 ? "%" : exam.max_score == null ? "" : `/${formatNumber(exam.max_score)}`}` : "—"}</b></span></div><span class="status-pill ${student.report_ready && !student.missing_test_score_warning ? "" : "warn"}">${escapeHtml(reportReason(student))}</span><div class="row-actions">${routingButton}${reportActions}</div></div>`;
       }).join("");
       return `<section class="report-class-section"><header><div><span class="eyebrow">${escapeHtml(classItem.subject || "CLASS REPORTS")}</span><h2>${escapeHtml(classItem.name)}</h2><p>${ready} of ${students.length} students ready · ${escapeHtml(classItem.selected_period_label || "No period")}</p></div><button class="secondary-button ${ready ? "" : "disabled"}" data-download-class="${classItem.id}" data-filename="${escapeHtml(classItem.name)}-reports.zip" ${ready ? "" : "disabled"}>Download class ZIP</button></header>${rows || emptyState("No students in this class", "Import an Assignment file containing this class.")}</section>`;
     }).join("");
@@ -518,7 +536,6 @@ function renderReports() {
 function renderConnections() {
   const sheets = state.connections.google_sheets || {};
   const docs = state.connections.google_docs || {};
-  const makeedu = state.connections.makeedu || {};
   const anyConnected = sheets.status === "connected" || docs.status === "connected";
   $("#nav-connection-dot").className = `connection-dot ${anyConnected ? "connected" : (sheets.error || docs.error ? "error" : "")}`;
   const status = connection => {
@@ -527,20 +544,15 @@ function renderConnections() {
     if (connection.status === "needs_auth") return ["Sign in needed", "warn"];
     if (connection.status === "needs_setup") return ["Folder needed", "warn"];
     if (connection.status === "error") return ["Connection error", "warn"];
-    if (connection.status === "unavailable") return ["Unavailable", "neutral"];
     return ["Disconnected", "neutral"];
   };
   const card = ({ key, short, title, copy, connection, primary }) => {
     const [label, style] = status(connection);
-    const disabled = connection.available === false;
     const primaryLabel = connection.authorized ? primary : "Connect Google account";
-    const actions = disabled
-      ? `<a class="secondary-button button-link" href="${escapeHtml(connection.support_url || "https://makeedu.co.kr/faq.jsp")}" target="_blank" rel="noopener">Contact MakeEdu</a>`
-      : `<button class="primary-button" data-connection-action="configure" data-service="${key}">${primaryLabel}</button><button class="secondary-button" data-connection-action="test" data-service="${key}" ${connection.authorized ? "" : "disabled"}>Test connection</button>${connection.authorized ? `<button class="secondary-button" data-connection-action="disconnect" data-service="${key}">Disconnect</button>` : ""}`;
+    const actions = `<button class="primary-button" data-connection-action="configure" data-service="${key}">${primaryLabel}</button><button class="secondary-button" data-connection-action="test" data-service="${key}" ${connection.authorized ? "" : "disabled"}>Test connection</button>${connection.authorized ? `<button class="secondary-button" data-connection-action="disconnect" data-service="${key}">Disconnect</button>` : ""}`;
     return `<article class="connection-card"><div class="connection-card-head"><span class="connection-logo">${short}</span><span class="status-pill ${style}">${label}</span></div><h2>${title}</h2><p>${copy}</p><div class="connection-meta"><span>Account<b>${escapeHtml(connection.account_name || "Not connected")}</b></span><span>${key === "google_docs" ? "Output folder" : "Last sync"}<b>${escapeHtml(key === "google_docs" ? (connection.resource_name || "Not configured") : formatDateTime(connection.last_synced_at))}</b></span></div>${connection.error ? `<p class="connection-error">${escapeHtml(connection.error)}</p>` : ""}<div class="connection-actions">${actions}</div></article>`;
   };
   $("#connections-grid").innerHTML = [
-    card({ key: "makeedu", short: "ME", title: "MakeEdu", copy: "Direct synchronization remains blocked until MakeEdu supplies official API documentation and academy access.", connection: makeedu, primary: "Configure" }),
     card({ key: "google_sheets", short: "GS", title: "Google Sheets", copy: "Read Assignment, Weekly Test, and Comments data from Sheets in your connected Google account.", connection: sheets, primary: "Reconnect account" }),
     card({ key: "google_docs", short: "GD", title: "Google Docs + Drive", copy: "Copy class templates, replace controlled fields, and save PDFs in your My Drive.", connection: docs, primary: docs.status === "needs_setup" ? "Create output folder" : "Reconnect account" }),
   ].join("");
@@ -1358,13 +1370,48 @@ function mappingPercent(value) {
   return Math.round(Number(value || 0) * 10000) / 100;
 }
 
+const CONTINUATION_SOURCES = {
+  teacher_comment: "General / Teacher Comment",
+};
+
+function pdfContinuationRegions(mapping, contentGuide = {}) {
+  const existing = Array.isArray(mapping.continuation_regions) ? mapping.continuation_regions : [];
+  const byPage = new Map(existing.map(region => [Number(region.page), { ...region }]));
+  const blankPageCount = Math.max(1, Number(mapping.page_count || 1));
+  const finalPage = Math.max(blankPageCount + 1, 2, ...existing.map(region => Number(region.page || 0)));
+  const sampleContinuation = (contentGuide.sections || [])
+    .some(section => section.section === "general" && Number(section.page || 1) > 1)
+    ? "teacher_comment" : "";
+  return Array.from({ length: finalPage - 1 }, (_, index) => index + 2).map(page => byPage.get(page) || {
+    key: `continuation_${page}`,
+    source_key: sampleContinuation,
+    content_type: "text",
+    page,
+    template_page: Math.min(page, Number(mapping.page_count || 1)),
+    box: { x: .058, y: .08, width: .884, height: .82 },
+    font_name: "auto",
+    font_size: 10,
+    minimum_font_size: 7,
+    line_spacing: 1.2,
+    align: "left",
+    required: false,
+  });
+}
+
 function pdfRegionEditor(region, pageCount) {
   const box = region.box || {};
   const pageOptions = Array.from({ length: pageCount }, (_, index) => `<option value="${index + 1}" ${Number(region.page || 1) === index + 1 ? "selected" : ""}>Page ${index + 1}</option>`).join("");
   const fontFields = region.content_type === "text"
-    ? `<label><span>Font size</span><input data-map-font-size type="number" min="5" max="36" step="0.25" value="${escapeHtml(region.font_size || 8.5)}" /></label><label><span>Minimum</span><input data-map-font-min type="number" min="5" max="36" step="0.25" value="${escapeHtml(region.minimum_font_size || 6.5)}" /></label><label><span>Alignment</span><select data-map-align><option value="left" ${region.align === "left" ? "selected" : ""}>Left</option><option value="center" ${region.align === "center" ? "selected" : ""}>Center</option><option value="right" ${region.align === "right" ? "selected" : ""}>Right</option></select></label>`
+    ? `<label><span>Font size</span><input data-map-font-size type="number" min="7" max="36" step="0.25" value="${escapeHtml(region.font_size || 8.5)}" /></label><label><span>Minimum</span><input data-map-font-min type="number" min="7" max="36" step="0.25" value="${escapeHtml(region.minimum_font_size || 7)}" /></label><label><span>Alignment</span><select data-map-align><option value="left" ${region.align === "left" ? "selected" : ""}>Left</option><option value="center" ${region.align === "center" ? "selected" : ""}>Center</option><option value="right" ${region.align === "right" ? "selected" : ""}>Right</option></select></label>`
     : `<div class="mapping-region-type">Deterministic line graph</div>`;
   return `<article class="mapping-region-row" data-mapping-region="${escapeHtml(region.key)}"><header><div><strong>${escapeHtml(PDF_REGION_LABELS[region.key] || region.key)}</strong><small>${escapeHtml(region.content_type)}</small></div><label><span>Page</span><select data-map-page>${pageOptions}</select></label></header><div class="mapping-coordinate-grid"><label><span>Left %</span><input data-map-field="x" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.x)}" /></label><label><span>Bottom %</span><input data-map-field="y" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.y)}" /></label><label><span>Width %</span><input data-map-field="width" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.width)}" /></label><label><span>Height %</span><input data-map-field="height" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.height)}" /></label>${fontFields}</div></article>`;
+}
+
+function pdfContinuationEditor(region, pageCount) {
+  const box = region.box || {};
+  const sourceOptions = [`<option value="">Unused</option>`, ...Object.entries(CONTINUATION_SOURCES).map(([value, label]) => `<option value="${value}" ${region.source_key === value ? "selected" : ""}>${escapeHtml(label)}</option>`)].join("");
+  const templatePages = Array.from({ length: pageCount }, (_, index) => `<option value="${index + 1}" ${Number(region.template_page || 1) === index + 1 ? "selected" : ""}>Blank page ${index + 1}</option>`).join("");
+  return `<article class="mapping-region-row mapping-continuation-row" data-continuation-region="${escapeHtml(region.key)}" data-map-page="${Number(region.page)}"><header><div><strong>Continuation page ${Number(region.page)}</strong><small>Teacher comment only</small></div><label><span>Content</span><select data-map-source>${sourceOptions}</select></label><label><span>Design source</span><select data-map-template-page>${templatePages}</select></label></header><div class="mapping-coordinate-grid"><label><span>Left %</span><input data-map-field="x" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.x)}" /></label><label><span>Bottom %</span><input data-map-field="y" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.y)}" /></label><label><span>Width %</span><input data-map-field="width" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.width)}" /></label><label><span>Height %</span><input data-map-field="height" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.height)}" /></label><label><span>Font size</span><input data-map-font-size type="number" min="7" max="36" step="0.25" value="${escapeHtml(region.font_size || 10)}" /></label><label><span>Minimum</span><input data-map-font-min type="number" min="7" max="36" step="0.25" value="${escapeHtml(region.minimum_font_size || 7)}" /></label><label><span>Alignment</span><select data-map-align><option value="left" ${region.align === "left" ? "selected" : ""}>Left</option><option value="center" ${region.align === "center" ? "selected" : ""}>Center</option><option value="right" ${region.align === "right" ? "selected" : ""}>Right</option></select></label></div></article>`;
 }
 
 function showPdfMapping(classId) {
@@ -1373,7 +1420,9 @@ function showPdfMapping(classId) {
   if (!pdf) return toast("Upload a company PDF template first.", "error");
   const mapping = pdf.mapping || {};
   const regions = (mapping.regions || []).map(region => pdfRegionEditor(region, pdf.page_count || 1)).join("");
-  openModal(`<div class="mapping-modal-header"><div><span class="eyebrow">PDF TEMPLATE MAPPING</span><h2>${escapeHtml(classItem?.name || "Class")} · version ${pdf.version}</h2><p>Confirm where Brightline should place each student field. Coordinates are percentages of the PDF page, measured from the bottom-left.</p></div><a class="secondary-button button-link" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open source PDF</a></div><label><span>Mapping name</span><input id="pdf-mapping-name" value="${escapeHtml(mapping.name || "Company report layout")}" /></label><div class="mapping-region-list">${regions}</div><div class="safety-note">Publish only after checking the source PDF. Brightline will never guess a missing student match or silently clip an overflowing comment.</div><div class="modal-footer"><button class="secondary-button" id="pdf-map-draft" type="button">Save draft</button><button class="primary-button" id="pdf-map-publish" type="button">Publish mapping</button><button class="secondary-button" type="button" data-close-modal>Cancel</button></div>`);
+  const guide = templateForClass(classId)?.example_profile?.content_guide || {};
+  const continuations = pdfContinuationRegions(mapping, guide).map(region => pdfContinuationEditor(region, pdf.page_count || 1)).join("");
+  openModal(`<div class="mapping-modal-header"><div><span class="eyebrow">PDF TEMPLATE MAPPING</span><h2>${escapeHtml(classItem?.name || "Class")} · version ${pdf.version}</h2><p>Confirm where Brightline should place each student field. Coordinates are percentages of the PDF page, measured from the bottom-left.</p></div><a class="secondary-button button-link" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open source PDF</a></div><label><span>Mapping name</span><input id="pdf-mapping-name" value="${escapeHtml(mapping.name || "Company report layout")}" /></label><div class="mapping-region-list">${regions}</div><section class="mapping-continuation-section"><h3>Teacher-comment continuation</h3><p>Weekly Test feedback never continues. Extra teacher-comment pages clone a selected blank-template page and are used only when the final panel is at least half full.</p><div class="mapping-region-list">${continuations}</div></section><div class="safety-note">Publish only after checking the source PDF. Brightline will never guess a missing student match or silently clip an overflowing comment.</div><div class="modal-footer"><button class="secondary-button" id="pdf-map-draft" type="button">Save draft</button><button class="primary-button" id="pdf-map-publish" type="button">Publish mapping</button><button class="secondary-button" type="button" data-close-modal>Cancel</button></div>`);
   $("#modal").classList.add("template-mapping-modal");
   const designNotice = document.createElement("p");
   designNotice.textContent = "The original PDF controls page design and mapped typography. Completed samples guide content sections only. Check these positions against the original PDF before publishing.";
@@ -1398,6 +1447,26 @@ function collectPdfMapping(classId) {
     }
     return updated;
   });
+  mapping.continuation_regions = $$('[data-continuation-region]').map(row => {
+    const sourceKey = row.querySelector("[data-map-source]").value;
+    if (!sourceKey) return null;
+    const box = {};
+    row.querySelectorAll("[data-map-field]").forEach(input => { box[input.dataset.mapField] = Number(input.value) / 100; });
+    return {
+      key: row.dataset.continuationRegion,
+      source_key: sourceKey,
+      content_type: "text",
+      page: Number(row.dataset.mapPage),
+      template_page: Number(row.querySelector("[data-map-template-page]").value),
+      box,
+      font_name: "auto",
+      font_size: Number(row.querySelector("[data-map-font-size]").value),
+      minimum_font_size: Number(row.querySelector("[data-map-font-min]").value),
+      line_spacing: 1.2,
+      align: row.querySelector("[data-map-align]").value,
+      required: false,
+    };
+  }).filter(Boolean);
   return mapping;
 }
 
@@ -1522,7 +1591,7 @@ function showExampleAnalysis(classId) {
   const sectionNames = { homework: "Homework / learning feedback", weekly_test: "Weekly test feedback", general: "General teacher feedback" };
   const observations = (guide.sections || []).map(section => `<article class="analysis-section"><strong>${escapeHtml(sectionNames[section.section] || section.section)}</strong><p>Sample heading: ${escapeHtml(section.label)} · Page ${section.page} → ${escapeHtml(PDF_REGION_LABELS[section.target_region] || section.target_region)}</p><small>${escapeHtml((section.topics || []).join(" · ") || "No reliable content topics extracted")} · ${section.text_characters || 0} characters observed${section.graph_type_labels?.length ? ` · Chart labels: ${escapeHtml(section.graph_type_labels.join(", "))}` : ""}</small></article>`).join("");
   const contentGuide = document.createElement("div");
-  const typography = (guide.sections || []).filter(section => section.preferred_font_size).map(section => `<p>${escapeHtml(sectionNames[section.section] || section.section)} · Sample page ${section.page}: ${escapeHtml((section.body_fonts || []).join(", "))}, ${Number(section.preferred_font_size).toFixed(1)} pt. Text may shrink below 8 pt to meet the page limits (5 pt safety floor).</p>`).join("");
+  const typography = (guide.sections || []).filter(section => section.preferred_font_size).map(section => `<p>${escapeHtml(sectionNames[section.section] || section.section)} · Sample page ${section.page}: ${escapeHtml((section.body_fonts || []).join(", "))}, ${Number(section.preferred_font_size).toFixed(1)} pt · ${Math.round(Number(section.text_fill_ratio || 0) * 100)}% panel fill. Text never shrinks below 7 pt.</p>`).join("");
   contentGuide.innerHTML = `<h3>Content placement guidance</h3><p>Original template = design. Completed sample = content reference. Brightline uses section headings and class-specific content patterns to separate test overviews from detailed teacher feedback, preserving the source wording. Review the preview for ambiguous passages.</p>${observations || "<p>No reliable section headings were extracted. Review the sample before relying on automatic placement.</p>"}<h3>Typography and pagination</h3>${typography}<p>Weekly Test feedback stays in its original box. Additional teacher-comment pages are kept only when the final comment panel is at least half filled. Missing test feedback uses the academy-requested missed-test message and a single-page report; stored scores remain unchanged.</p>${(guide.warnings || []).map(warning => `<p class="safety-note">${escapeHtml(warning)}</p>`).join("")}`;
   $(".example-analysis-list").before(contentGuide);
   $("#modal > p").textContent = "Brightline analyzes each class's sample headings, content topics, fonts and image positions. Sample wording and student facts are never copied into another student's report.";
@@ -1655,6 +1724,8 @@ function bindEvents() {
     }
     const preview = event.target.closest("[data-preview-student]");
     if (preview) { await previewGenerated(preview.dataset.previewStudent, preview.dataset.periodId); return; }
+    const routing = event.target.closest("[data-routing-student]");
+    if (routing) { showRoutingReview(routing.dataset.routingStudent); return; }
     const studentDownload = event.target.closest("[data-download-student]");
     if (studentDownload) {
       const downloaded = await downloadGenerated(

@@ -22,6 +22,10 @@ REGION_TYPES = {
 }
 
 REQUIRED_REGION_KEYS = tuple(REGION_TYPES)
+CONTINUATION_SOURCE_KEYS = (
+    "teacher_comment",
+)
+MAX_GENERATED_CONTINUATION_PAGES = 50
 
 
 def _region(
@@ -32,7 +36,7 @@ def _region(
     height: float,
     *,
     font_size: float = 8.5,
-    minimum_font_size: float = 6.5,
+    minimum_font_size: float = 7.0,
     align: str = "left",
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
@@ -66,11 +70,12 @@ def default_mapping(page_width: float, page_height: float, page_count: int = 1) 
     """
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "name": "Suggested report layout",
         "page_width": round(float(page_width), 2),
         "page_height": round(float(page_height), 2),
         "page_count": max(1, int(page_count)),
+        "continuation_regions": [],
         "regions": [
             _region("class_name", 0.63, 0.90, 0.30, 0.035),
             _region("student_name", 0.63, 0.855, 0.30, 0.04, font_size=10),
@@ -116,6 +121,9 @@ def validate_mapping(
     raw_regions = payload.get("regions")
     if not isinstance(raw_regions, list):
         raise TemplateMappingError("Template mapping needs a regions list.")
+    raw_continuations = payload.get("continuation_regions") or []
+    if not isinstance(raw_continuations, list):
+        raise TemplateMappingError("Continuation areas must be a list.")
 
     normalized_regions: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -161,12 +169,12 @@ def validate_mapping(
         if content_type == "text":
             font_size = _finite_number(raw.get("font_size", 8.5), f"{key} font size")
             minimum = _finite_number(
-                raw.get("minimum_font_size", min(font_size, 6.5)),
+                raw.get("minimum_font_size", min(font_size, 7.0)),
                 f"{key} minimum font size",
             )
-            if not 5 <= minimum <= font_size <= 36:
+            if not 7 <= minimum <= font_size <= 36:
                 raise TemplateMappingError(
-                    f"Template region {key} needs font sizes between 5 and 36 points."
+                    f"Template region {key} needs font sizes between 7 and 36 points."
                 )
             line_spacing = _finite_number(
                 raw.get("line_spacing", 1.2), f"{key} line spacing"
@@ -199,8 +207,117 @@ def validate_mapping(
             "Template mapping is missing required regions: " + ", ".join(missing) + "."
         )
     normalized_regions.sort(key=lambda item: REQUIRED_REGION_KEYS.index(item["key"]))
+    continuation_regions: list[dict[str, Any]] = []
+    continuation_ids: set[str] = set()
+    for index, raw in enumerate(raw_continuations, start=1):
+        if not isinstance(raw, dict):
+            raise TemplateMappingError("Every continuation area must be an object.")
+        source_key = str(raw.get("source_key") or "teacher_comment").strip()
+        if source_key not in CONTINUATION_SOURCE_KEYS:
+            raise TemplateMappingError("Choose which text field uses each continuation area.")
+        try:
+            page = int(raw.get("page") or 0)
+        except (TypeError, ValueError) as exc:
+            raise TemplateMappingError("Continuation area has an invalid page.") from exc
+        maximum_page = max(1, page_count) + MAX_GENERATED_CONTINUATION_PAGES
+        if page < 2 or page > maximum_page:
+            raise TemplateMappingError(
+                f"Continuation areas must use report pages 2 through {maximum_page}."
+            )
+        try:
+            template_page = int(raw.get("template_page") or min(page, max(1, page_count)))
+        except (TypeError, ValueError) as exc:
+            raise TemplateMappingError("Continuation area has an invalid template source page.") from exc
+        if template_page < 1 or template_page > max(1, page_count):
+            raise TemplateMappingError(
+                "Continuation areas must clone an existing blank-template page."
+            )
+        continuation_id = str(raw.get("key") or f"{source_key}_continuation_{page}_{index}").strip()
+        if not continuation_id or continuation_id in continuation_ids or continuation_id in seen:
+            raise TemplateMappingError("Every continuation area needs a unique key.")
+        continuation_ids.add(continuation_id)
+        raw_box = raw.get("box")
+        if not isinstance(raw_box, dict):
+            raise TemplateMappingError(f"Continuation area {continuation_id} needs a box.")
+        box = {
+            field: _finite_number(raw_box.get(field), f"{continuation_id} {field}")
+            for field in ("x", "y", "width", "height")
+        }
+        if box["width"] <= 0 or box["height"] <= 0:
+            raise TemplateMappingError(
+                f"Continuation area {continuation_id} must have positive dimensions."
+            )
+        if box["x"] < 0 or box["y"] < 0 or box["x"] + box["width"] > 1:
+            raise TemplateMappingError(
+                f"Continuation area {continuation_id} extends beyond the page width."
+            )
+        if box["y"] + box["height"] > 1:
+            raise TemplateMappingError(
+                f"Continuation area {continuation_id} extends beyond the page height."
+            )
+        font_size = _finite_number(
+            raw.get("font_size", 10), f"{continuation_id} font size"
+        )
+        minimum = _finite_number(
+            raw.get("minimum_font_size", min(font_size, 7)),
+            f"{continuation_id} minimum font size",
+        )
+        if not 7 <= minimum <= font_size <= 36:
+            raise TemplateMappingError(
+                f"Continuation area {continuation_id} needs font sizes between 7 and 36 points."
+            )
+        line_spacing = _finite_number(
+            raw.get("line_spacing", 1.2), f"{continuation_id} line spacing"
+        )
+        if not 0.8 <= line_spacing <= 2:
+            raise TemplateMappingError(
+                f"Continuation area {continuation_id} has invalid line spacing."
+            )
+        align = str(raw.get("align") or "left")
+        if align not in {"left", "center", "right"}:
+            raise TemplateMappingError(
+                f"Continuation area {continuation_id} has invalid alignment."
+            )
+        continuation_regions.append(
+            {
+                "key": continuation_id[:120],
+                "source_key": source_key,
+                "content_type": "text",
+                "page": page,
+                "template_page": template_page,
+                "box": {field: round(value, 5) for field, value in box.items()},
+                "required": False,
+                "font_name": str(raw.get("font_name") or "auto")[:120],
+                "font_size": round(font_size, 2),
+                "minimum_font_size": round(minimum, 2),
+                "line_spacing": round(line_spacing, 2),
+                "align": align,
+                "overflow_policy": "require_review",
+            }
+        )
+
+    all_text_regions = [
+        region for region in normalized_regions if region["content_type"] == "text"
+    ] + continuation_regions
+    for index, region in enumerate(all_text_regions):
+        box = region["box"]
+        for other in all_text_regions[index + 1 :]:
+            if region["page"] != other["page"]:
+                continue
+            other_box = other["box"]
+            if (
+                box["x"] < other_box["x"] + other_box["width"]
+                and other_box["x"] < box["x"] + box["width"]
+                and box["y"] < other_box["y"] + other_box["height"]
+                and other_box["y"] < box["y"] + box["height"]
+            ):
+                raise TemplateMappingError(
+                    f"Text areas {region['key']} and {other['key']} overlap on page {region['page']}."
+                )
+
+    continuation_regions.sort(key=lambda item: (item["page"], item["source_key"], item["key"]))
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "layout": layout,
         "typography": {"font_name": "auto", "font_size": body_font_size},
         "name": str(payload.get("name") or "Company report layout").strip()[:120],
@@ -208,6 +325,7 @@ def validate_mapping(
         "page_height": round(float(page_height), 2),
         "page_count": max(1, int(page_count)),
         "regions": normalized_regions,
+        "continuation_regions": continuation_regions,
     }
 
 

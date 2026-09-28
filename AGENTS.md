@@ -69,7 +69,7 @@ Student matching should use a stable Student ID. Without one, accept only an exa
 
 - Never clip, truncate, silently discard, or duplicate source text. If the rules cannot be satisfied, return an actionable review error.
 - Preserve Korean and English words, identifiers, decimals, numbered question blocks, paragraph order, and section ownership across line and page boundaries.
-- Fit recognized original-PDF panels at the largest suitable readable size. Test and teacher text may shrink below 8 points, but 5 points is the hard safety floor.
+- Fit recognized original-PDF panels from each class sample's observed body size and fill. Test and teacher text may shrink below 8 points, but 7 points is the hard safety floor.
 - Weekly Test feedback stays inside its first original text panel. Shrink it as needed; do not create a Weekly Test continuation page. Changing this rule requires explicit product approval and synchronized updates to all contract documents and tests.
 - Additional teacher-comment pages are allowed only when the final comment panel is at least half occupied. Compact sparse remainders into earlier panels.
 - Teacher overflow pages must derive from an appropriate original full-width feedback page, relabeled for the overflowing section. If unavailable, repeat the original section panel. Never derive layout or artwork from a completed sample.
@@ -115,7 +115,7 @@ For a ready, published PDF template whose completed-sample analysis reliably ide
 - Optional Basic authentication is an extra localhost layer, not a replacement for HTTPS or authorization.
 - Never log or return OAuth codes, client secrets, refresh tokens, authorization headers, credential responses, student comments, or report contents.
 - Store OAuth configuration and tokens only in ignored local files with restrictive permissions. Reject service-account JSON as an OAuth web client.
-- Preserve the existing least-privilege Google scopes. Saved client setup may persist, but Google access must require an explicit connection after every server start.
+- Preserve the existing least-privilege Google scopes. Reuse a valid saved refresh token across restarts until the user disconnects or Google revokes access; an invalid token must produce the documented reconnect message without exposing credential details.
 - Disconnecting Google deletes the local token but must not delete generated Drive files.
 - Never weaken authentication, authorization, input validation, or permission boundaries to satisfy a test.
 

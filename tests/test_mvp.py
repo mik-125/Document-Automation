@@ -1496,6 +1496,33 @@ class DatabaseReadinessTests(unittest.TestCase):
 
 
 class FrontendContractTests(unittest.TestCase):
+    def test_connections_expose_only_supported_google_services(self) -> None:
+        self.assertEqual(
+            set(app_server.app_state()["connections"]),
+            {"google_sheets", "google_docs"},
+        )
+        root = Path(__file__).resolve().parent.parent
+        for path in (root / "frontend" / "app.js", root / "backend" / "server.py"):
+            self.assertNotIn("makeedu", path.read_text(encoding="utf-8").lower())
+
+    def test_pdf_mapping_exposes_teacher_comment_continuation_pages(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        source = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("pdfContinuationRegions", source)
+        self.assertIn("data-continuation-region", source)
+        self.assertIn('source_key: sourceKey', source)
+        self.assertIn("teacher_comment", source)
+        self.assertNotIn('"weekly_test_summary", "Weekly test"', source)
+
+    def test_report_review_shows_routing_confidence_and_score_warning(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        source = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("showRoutingReview", source)
+        self.assertIn("decision.confidence", source)
+        self.assertIn("decision.signals", source)
+        self.assertIn("missing_test_score_warning", source)
+        self.assertIn("A Weekly Test score is stored", source)
+
     def test_static_javascript_ids_exist_once_in_html(self) -> None:
         root = (Path(__file__).resolve().parent.parent / "frontend")
         html = (root / "index.html").read_text(encoding="utf-8")

@@ -73,6 +73,16 @@ def analyze_content_pdf(path: Path):
                 warnings.append(f"Page {number}: rotated sample needs content-placement review.")
                 continue
             lines = page_lines(page)
+            image_regions = []
+            for image in page.get_images(full=True):
+                for image_box in page.get_image_rects(image[0]):
+                    image_regions.append({
+                        "x": image_box.x0 / page.rect.width,
+                        "y": image_box.y0 / page.rect.height,
+                        "width": image_box.width / page.rect.width,
+                        "height": image_box.height / page.rect.height,
+                        "kind": "image; graph type unconfirmed",
+                    })
             headings = [r for r in lines if heading_section(r["text"])]
             panels = labeled_panels(page, lines)
             counts = Counter(heading_section(h["text"]) for h in headings)
@@ -96,6 +106,17 @@ def analyze_content_pdf(path: Path):
                 text = "\n".join(r["text"] for r in body)
                 sizes = Counter(round(r["size"],2) for r in body for _ in range(max(1,len(r["text"]))))
                 fonts = Counter(r["font"] for r in body)
+                body_box = None
+                for run in body:
+                    body_box = fitz.Rect(run["box"]) if body_box is None else body_box | fitz.Rect(run["box"])
+                fill_ratio = min(1.0, body_box.height / max(1, box.height)) if body_box else 0.0
+                section_images = [
+                    image for image in image_regions
+                    if box.contains(fitz.Point(
+                        (image["x"] + image["width"] / 2) * page.rect.width,
+                        (image["y"] + image["height"] / 2) * page.rect.height,
+                    ))
+                ]
                 reliable = counts[section] == 1 and bool(body)
                 if not reliable:
                     warnings.append(f"Page {number}: {heading['text']} needs review (empty or repeated section).")
@@ -104,11 +125,14 @@ def analyze_content_pdf(path: Path):
                     "evidence":"PDF text geometry, section panel and content features",
                     "heading_position":{"x":h.x0/page.rect.width,"y":1-h.y1/page.rect.height},
                     "text_characters":len(text),"text_runs":len(body),
+                    "text_fill_ratio":round(fill_ratio,4),
                     "body_fonts":[f for f,_ in fonts.most_common(5)],"body_sizes":sorted(sizes),
                     "preferred_font_size":sizes.most_common(1)[0][0] if sizes else None,
                     "features":content_features(text),
                     "topics":[name for name,pattern in TOPICS.items() if re.search(pattern,text,re.I)],
-                    "graph_type_labels":[],"image_regions":[],
+                    "graph_type_labels":["unconfirmed"] if section_images else [],
+                    "image_regions":section_images,
+                    "graph_tied_to":section if section_images else None,
                     "body_lane":"right" if body and min(r["box"][0] for r in body)>box.x0+box.width*.45 else "full",
                 })
     return {"version":2,"sections":sections,"warnings":warnings,"requires_review":bool(warnings),

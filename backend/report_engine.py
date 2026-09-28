@@ -1029,13 +1029,23 @@ def _wrap_lines(text: str, font_name: str, font_size: float, max_width: float) -
             lines.append("")
             continue
         current = ""
-        for character in paragraph:
-            candidate = current + character
-            if current and pdfmetrics.stringWidth(candidate, font_name, font_size) > max_width:
-                lines.append(current.rstrip())
-                current = character.lstrip()
-            else:
-                current = candidate
+        tokens = re.findall(
+            r"[A-Za-z0-9]+(?:[._'’/-][A-Za-z0-9]+)*|[ \t]+|.", paragraph
+        )
+        for token in tokens:
+            token = " " if token.isspace() else token
+            parts = (
+                list(token)
+                if pdfmetrics.stringWidth(token, font_name, font_size) > max_width
+                else [token]
+            )
+            for part in parts:
+                candidate = current + part
+                if current and pdfmetrics.stringWidth(candidate, font_name, font_size) > max_width:
+                    lines.append(current.rstrip())
+                    current = part.lstrip()
+                else:
+                    current = candidate
         lines.append(current.rstrip())
     return lines
 
@@ -1292,7 +1302,7 @@ def _fit_mapped_text(
 ) -> tuple[str, float, float, list[str]]:
     font_name = _mapped_font(region)
     preferred = float(region.get("font_size") or 8.5)
-    minimum = float(region.get("minimum_font_size") or min(6.5, preferred))
+    minimum = max(7.0, float(region.get("minimum_font_size") or min(7.0, preferred)))
     spacing = float(region.get("line_spacing") or 1.2)
     size = preferred
     while size + 0.001 >= minimum:
@@ -1390,6 +1400,55 @@ def _mapped_values(student: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _mapped_text_piece(
+    value: str, region: dict[str, Any], width: float, height: float,
+) -> tuple[tuple[str, float, float, list[str]], str]:
+    """Fit what is safe in one region and return the exact remaining source."""
+    _, _, box_width, box_height = _mapped_box(region, width, height)
+    try:
+        return _fit_mapped_text(value, region, box_width, box_height), ""
+    except ValidationError:
+        font_name = _mapped_font(region)
+        size = max(7.0, float(region.get("minimum_font_size") or 7.0))
+        leading = size * float(region.get("line_spacing") or 1.2)
+        lines = _wrap_lines(value, font_name, size, max(1, box_width))
+        capacity = max(0, int((box_height + 0.01) / leading))
+        used = lines[:capacity]
+        if not used:
+            return (font_name, size, leading, []), value
+        count = sum(len(re.sub(r"\s", "", line)) for line in used)
+        end = 0
+        for end, character in enumerate(value, 1):
+            if not character.isspace():
+                count -= 1
+            if count <= 0:
+                break
+        remaining = value[end:].lstrip() if count <= 0 else value
+        return (font_name, size, leading, used), remaining
+
+
+def _draw_mapped_piece(
+    c: canvas.Canvas,
+    piece: tuple[str, float, float, list[str]],
+    region: dict[str, Any],
+    width: float,
+    height: float,
+) -> None:
+    font_name, size, leading, lines = piece
+    x, y, box_width, box_height = _mapped_box(region, width, height)
+    c.setFont(font_name, size)
+    c.setFillColor(INK)
+    for index, line in enumerate(lines):
+        baseline = y + box_height - size - index * leading
+        align = str(region.get("align") or "left")
+        if align == "center":
+            c.drawCentredString(x + box_width / 2, baseline, line)
+        elif align == "right":
+            c.drawRightString(x + box_width, baseline, line)
+        else:
+            c.drawString(x, baseline, line)
+
+
 def _build_mapped_overlay_pages(
     student: dict[str, Any],
     width: float,
@@ -1401,6 +1460,63 @@ def _build_mapped_overlay_pages(
     register_fonts()
     regions = region_lookup(mapping)
     values = _mapped_values(student)
+    flow_keys = ("teacher_comment",)
+    pieces: dict[str, tuple[str, float, float, list[str]]] = {}
+    continuation_pieces: dict[str, tuple[str, float, float, list[str]]] = {}
+    continuation_body_regions: dict[str, dict[str, Any]] = {}
+    continuation_regions = list(mapping.get("continuation_regions") or [])
+    used_pages = {1}
+    for key in flow_keys:
+        region = regions.get(key)
+        value = str(values.get(key) or "")
+        if not region or not value.strip():
+            continue
+        pieces[key], remaining = _mapped_text_piece(value, region, width, height)
+        used_pages.add(int(region.get("page") or 1))
+        for continuation in sorted(
+            (item for item in continuation_regions if item.get("source_key") == key),
+            key=lambda item: (int(item.get("page") or 0), str(item.get("key") or "")),
+        ):
+            if not remaining.strip():
+                break
+            page = int(continuation.get("page") or 0)
+            template_page = int(continuation.get("template_page") or 1)
+            page_width, page_height = (
+                page_sizes[template_page - 1] if page_sizes else (width, height)
+            )
+            body_region = copy.deepcopy(continuation)
+            body_box = body_region["box"]
+            heading_height = min(float(body_box["height"]) * .12, 28 / page_height)
+            body_box["height"] = float(body_box["height"]) - heading_height
+            piece, remaining = _mapped_text_piece(
+                remaining, body_region, page_width, page_height
+            )
+            continuation_key = str(continuation["key"])
+            continuation_pieces[continuation_key] = piece
+            continuation_body_regions[continuation_key] = body_region
+            used_pages.add(page)
+        if continuation_pieces:
+            last_key = next(reversed(continuation_pieces))
+            last_piece = continuation_pieces[last_key]
+            last_region = next(
+                item for item in continuation_regions if str(item.get("key")) == last_key
+            )
+            source_page = int(last_region.get("template_page") or 1)
+            source_width, source_height = page_sizes[source_page - 1] if page_sizes else (width, height)
+            last_body_region = continuation_body_regions.get(last_key, last_region)
+            _, _, _, box_height = _mapped_box(last_body_region, source_width, source_height)
+            used_height = len(last_piece[3]) * last_piece[2]
+            if used_height / max(1, box_height) < .5:
+                raise ValidationError(
+                    "The remaining teacher comment would fill less than half of its continuation panel. "
+                    "It cannot fit the earlier page at 7 pt, so this report needs review."
+                )
+        if remaining.strip():
+            raise ValidationError(
+                f"{key.replace('_', ' ').title()} does not fit its configured continuation pages. "
+                "Add another continuation area, enlarge the mapped area, or shorten the source text. "
+                "No text was discarded."
+            )
     homework_points = list(student.get("homework") or [])
     test_points = [
         {
@@ -1413,19 +1529,40 @@ def _build_mapped_overlay_pages(
         }
         for exam in student.get("exams", [])
     ]
+    for key, region in regions.items():
+        if region["content_type"] == "chart" or str(values.get(key) or "").strip():
+            used_pages.add(int(region.get("page") or 1))
     overlays: list[bytes] = []
-    for page_number in range(1, page_count + 1):
-        if page_sizes:
-            width, height = page_sizes[page_number - 1]
+    for page_number in range(1, max(used_pages) + 1):
+        page_width, page_height = (
+            page_sizes[page_number - 1]
+            if page_sizes and page_number <= len(page_sizes)
+            else next(
+                (
+                    page_sizes[int(region.get("template_page") or 1) - 1]
+                    for region in continuation_regions
+                    if int(region.get("page") or 0) == page_number and page_sizes
+                ),
+                (width, height),
+            )
+        )
         buffer = io.BytesIO()
-        c = canvas.Canvas(buffer, pagesize=(width, height), pageCompression=1)
+        c = canvas.Canvas(buffer, pagesize=(page_width, page_height), pageCompression=1)
         for key, region in regions.items():
             if int(region.get("page") or 1) != page_number:
                 continue
             if region["content_type"] == "text":
-                _draw_mapped_text(c, values.get(key, ""), region, width=width, height=height)
+                if key in pieces:
+                    _draw_mapped_piece(c, pieces[key], region, page_width, page_height)
+                else:
+                    _draw_mapped_text(
+                        c, values.get(key, ""), region,
+                        width=page_width, height=page_height,
+                    )
                 continue
-            x, y, chart_width, chart_height = _mapped_box(region, width, height)
+            x, y, chart_width, chart_height = _mapped_box(
+                region, page_width, page_height
+            )
             padding = min(chart_width, chart_height) * 0.04
             if key == "homework_chart":
                 _draw_line_chart(
@@ -1449,6 +1586,22 @@ def _build_mapped_overlay_pages(
                     value_key="percent",
                     label_key="label",
                 )
+        for continuation in continuation_regions:
+            if int(continuation.get("page") or 0) != page_number:
+                continue
+            piece = continuation_pieces.get(str(continuation.get("key") or ""))
+            if piece:
+                continuation_key = str(continuation.get("key") or "")
+                body_region = continuation_body_regions.get(continuation_key, continuation)
+                _draw_mapped_piece(
+                    c, piece, body_region, page_width, page_height
+                )
+                x, y, box_width, box_height = _mapped_box(
+                    body_region, page_width, page_height
+                )
+                c.setFillColor(INK)
+                c.setFont(register_fonts(), 9)
+                c.drawString(x, y + box_height + 8, "Teacher comment (continued)")
         # ReportLab omits a page entirely when it has no drawing operations. A
         # mapped multi-page template may intentionally place every region on
         # page one, so explicitly finalize every overlay page.
@@ -1493,8 +1646,27 @@ def generate_student_pdf(
     )
     writer = PdfWriter()
     for index, overlay_bytes in enumerate(overlays):
-        if mapping:
+        if mapping and index < len(template_reader.pages):
             background = copy.deepcopy(template_reader.pages[index])
+        elif mapping:
+            continuation = next(
+                (
+                    region
+                    for region in mapping.get("continuation_regions") or []
+                    if int(region.get("page") or 0) == index + 1
+                ),
+                None,
+            )
+            if not continuation:
+                raise ValidationError(
+                    f"Report page {index + 1} has no configured continuation area."
+                )
+            source_page = int(continuation.get("template_page") or 1) - 1
+            if source_page < 0 or source_page >= len(template_reader.pages):
+                raise ValidationError(
+                    "The configured continuation source page is not in the blank template."
+                )
+            background = copy.deepcopy(template_reader.pages[source_page])
         elif index == 0:
             background = copy.deepcopy(template_reader.pages[0])
         elif len(template_reader.pages) > 1:

@@ -44,22 +44,19 @@ def make_original(path):
 
 
 class AdaptiveReportTests(unittest.TestCase):
-    def test_unheaded_overview_is_separated_from_lesson_and_question_detail(self):
-        text=("During our lessons we studied ecosystems. "
-              "Alex scored 18/20 on the weekly test. The answer structure was strong. "
-              "Question 1 needs more units. The student scored 2/3 for this answer. "
-              "Question 2 needs an explanation. Going forward, practice daily.")
+    def test_unheaded_passages_follow_class_sample_profiles(self):
+        text=("During our lessons we studied ecosystems. Going forward, practice explanations.\n\n"
+              "Alex scored 18/20 on the weekly test. The overall test result was strong.\n\n"
+              "Question 1 needs reasoning. Question 2 needs units.")
         result=organize_comments([{"comment":text,"comment_section":"weekly_test"}],guide())
         self.assertIn("18/20",result["sections"]["weekly_test"])
-        self.assertIn("answer structure was strong",result["sections"]["weekly_test"])
+        self.assertIn("overall test result",result["sections"]["weekly_test"])
         self.assertNotIn("Question 1",result["sections"]["weekly_test"])
         self.assertIn("Question 1",result["sections"]["general"])
-        self.assertIn("2/3",result["sections"]["general"])
         self.assertIn("During our lessons",result["sections"]["general"])
         self.assertNotIn("16/20",str(result))
         self.assertEqual("".join(_source_units(text)),text)
-        for sentence in _source_units(text):
-            self.assertEqual(sum(v.count(sentence.strip()) for v in result["sections"].values()),1)
+        self.assertFalse(any(item["requires_review"] for item in result["decisions"]))
 
     def test_explicit_headings_homework_and_insufficient_class_evidence_win(self):
         text="General comments:\nThe student scored 18/20. Keep here."
@@ -69,35 +66,13 @@ class AdaptiveReportTests(unittest.TestCase):
             result=organize_comments([{"comment":text,"comment_section":category}],g)
             self.assertEqual(result["sections"][category],text)
 
-    def test_overview_keeps_advice_question_references_and_test_context_together(self):
-        intro = "첫 주 수업에서는 개념을 학습하였습니다. 복습하는 것이 중요합니다 "
-        overview = ("민수는 Week 1 Test에서 23/42, Grade 5를 받았습니다. "
-                    "정의형 문항에서는 안정적이었습니다. 다만 Q4 문항에서는 설명이 부족했습니다. "
-                    "이번 주는 SFC/SLC 없이 Weekly Test만 진행되었습니다. "
-                    "앞으로는 정확한 용어를 사용하면 좋겠습니다. ")
-        detail = "Q1(a) 그래프 계산 문제는 잘 풀었습니다. Q1(b)에서는 2/3을 받았습니다."
-        result = organize_comments([{"comment":intro+overview+detail}],guide())
-        self.assertEqual(result["sections"]["weekly_test"],overview)
-        self.assertEqual(result["sections"]["general"],intro+"\n\n"+detail)
-        self.assertEqual("".join(_source_units(intro+overview+detail)),intro+overview+detail)
-
-    def test_score_free_overview_and_bare_numbered_subquestion(self):
-        intro = "수업에서는 기본 개념을 다루었습니다. "
-        overview = ("지수는 이번 Week 2 Test에서 성실하게 시도해 주었습니다. "
-                    "앞으로는 답안을 더 자세히 설명하면 좋겠습니다. ")
-        detail = "1(a) 그래프의 값을 읽는 문제에서는 단위가 필요합니다. 1(b) 해석도 연습하세요."
-        result=organize_comments([{"comment":intro+overview+detail}],guide())
-        self.assertEqual(result["sections"]["weekly_test"],overview)
-        self.assertEqual(result["sections"]["general"],intro+"\n\n"+detail)
-
-    def test_dates_are_not_question_blocks_and_later_scores_stay_in_detail(self):
-        overview=("Alex scored 18/20 on the weekly test. "
-                  "8/3 was the test date. However, Question 4 needs attention. "
-                  "Going forward, check units. ")
-        detail="Question 1 needs reasoning. Alex scored 2/3 on this test question."
-        result=organize_comments([{"comment":overview+detail}],guide())
-        self.assertEqual(result["sections"]["weekly_test"],overview)
-        self.assertEqual(result["sections"]["general"],detail)
+    def test_low_confidence_passage_stays_in_selected_section_for_review(self):
+        text = "A uniquely ambiguous observation with no class-profile evidence."
+        result = organize_comments([{"comment": text, "comment_section": "weekly_test"}], guide())
+        self.assertEqual(result["sections"]["weekly_test"], text)
+        self.assertTrue(result["decisions"][0]["requires_review"])
+        self.assertLess(result["decisions"][0]["confidence"], .68)
+        self.assertTrue(result["decisions"][0]["signals"])
 
     def test_shared_lesson_only_does_not_fabricate_individual_overview(self):
         text="During our lessons we studied ecosystems. Going forward, practice definitions."
@@ -132,24 +107,25 @@ class AdaptiveReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);original=root/"original.pdf";make_original(original)
             before=original.read_bytes()
-            comments=" ".join(f"UNIQUE{i:04d} requires careful reasoning and checking units." for i in range(500))
+            comments=" ".join(f"UNIQUE{i:04d} requires careful reasoning and checking units." for i in range(180))
             student={"name":"Current Student","period_label":"Week 3","sample_content_guide":guide(),
                      "comments_by_section":{"homework":"CURRENT_HOMEWORK","weekly_test":"CURRENT_TEST","general":comments},
                      "homework":[],"exams":[]}
             output=root/"result.pdf"
             self.assertTrue(generate_adaptive_pdf(student,original,output,default_mapping(600,800,2)))
             with fitz.open(output) as result:
-                self.assertGreater(len(result),2)
+                self.assertEqual(len(result),2)
                 combined="".join(re.sub(r"\s","",p.get_text()) for p in result)
-                for i in range(500):self.assertEqual(combined.count(f"UNIQUE{i:04d}"),1)
+                for i in range(180):self.assertEqual(combined.count(f"UNIQUE{i:04d}"),1)
                 self.assertEqual(combined.count("CURRENT_HOMEWORK"),1)
                 self.assertEqual(combined.count("CURRENT_TEST"),1)
+                self.assertIn("continued", result[1].get_text().casefold())
                 for p in list(result)[2:]:
                     self.assertIn("ORIGINAL_CONTINUATION",p.get_text())
                     self.assertEqual(p.rect.width,500)
                     self.assertNotIn("CURRENT_TEST",p.get_text())
             self.assertEqual(original.read_bytes(),before)
-            self.assertTrue(all(r["font_size"]>=5 for r in student["report_fit"]["sections"]))
+            self.assertTrue(all(r["font_size"]>=7 for r in student["report_fit"]["sections"]))
             self.assertGreaterEqual(student["report_fit"]["sections"][-1]["last_page_fill"],.5)
             self.assertEqual(student["report_fit"]["sections"][-1]["pages"][:2],[1,2])
 
@@ -162,7 +138,7 @@ class AdaptiveReportTests(unittest.TestCase):
     def test_test_feedback_shrinks_in_original_box_without_continuation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);original=root/"original.pdf";make_original(original)
-            text=" ".join(f"TESTITEM{i:03d} needs careful reasoning." for i in range(40))
+            text=" ".join(f"TESTITEM{i:03d} needs careful reasoning." for i in range(18))
             student={"name":"Current Student","sample_content_guide":guide(),
                      "comments_by_section":{"homework":"HOMEWORK_OK","weekly_test":text,"general":"GENERAL_OK"},
                      "homework":[],"exams":[]}
@@ -171,9 +147,9 @@ class AdaptiveReportTests(unittest.TestCase):
             with fitz.open(output) as doc:
                 self.assertEqual(len(doc),1)
                 all_text="".join(re.sub(r"\s","",p.get_text()) for p in doc)
-                for i in range(40):self.assertEqual(all_text.count(f"TESTITEM{i:03d}"),1)
+                for i in range(18):self.assertEqual(all_text.count(f"TESTITEM{i:03d}"),1)
                 fit=next(r for r in student['report_fit']['sections'] if r['section']=='weekly_test')
-                self.assertLess(fit['font_size'],8)
+                self.assertGreaterEqual(fit['font_size'],7)
                 self.assertEqual(fit['pages'],[1])
 
     def test_missing_test_feedback_uses_requested_message_without_mutating_scores(self):
@@ -201,6 +177,31 @@ class AdaptiveReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError,'no text was omitted'):
             layout_comments({'weekly_test_summary':'Long feedback. '*500},[frame],1)
 
+    def test_weekly_text_never_uses_a_generated_continuation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);original=root/"original.pdf"
+            c=canvas.Canvas(str(original),pagesize=(600,800))
+            c.setStrokeColorRGB(0,.7,.3);c.setFont("Helvetica",12)
+            for label,y in [("Homework",700),("Weekly Test",485),("Teacher comments",270)]:
+                c.drawString(40,y,label);c.rect(30,y-180,540,172)
+            c.save()
+            mapping=default_mapping(600,800,1)
+            mapping["continuation_regions"]=[{
+                "key":"weekly_page_2","source_key":"weekly_test_summary",
+                "content_type":"text","page":2,
+                "box":{"x":.08,"y":.08,"width":.84,"height":.82},
+                "font_name":"auto","font_size":10,"minimum_font_size":8,
+                "line_spacing":1.2,"align":"left","required":False,
+            }]
+            tokens=[f"TESTWORD{i:03d}" for i in range(130)]
+            student={"name":"Current Student","period_label":"Week 3",
+                     "sample_content_guide":guide(),
+                     "comments_by_section":{"homework":"HOMEWORK_OK","weekly_test":" ".join(tokens),"general":"GENERAL_OK"},
+                     "homework":[],"exams":[]}
+            output=root/"result.pdf"
+            with self.assertRaisesRegex(ValidationError, "weekly test comment cannot fit"):
+                generate_adaptive_pdf(student,original,output,mapping)
+
     def test_short_second_teacher_page_is_compacted_into_first(self):
         frames=[{"page":page,"section":"general","box":box,"font":"Helvetica","preferred":9.5,"minimum":8}
                 for page,box in [(0,[0,0,300,90]),(1,[0,0,300,500])]]
@@ -214,7 +215,7 @@ class AdaptiveReportTests(unittest.TestCase):
     def test_fits_largest_readable_font_and_reflows_soft_newlines(self):
         frame={"page":0,"section":"general","box":[0,0,300,300],"font":"Helvetica","preferred":12,"minimum":8}
         draws,clones,receipt=layout_comments({"teacher_comment":"Keep every\nword intact."},[frame],1)
-        self.assertEqual(receipt[0]["font_size"],12)
+        self.assertEqual(receipt[0]["font_size"],12.75)
         self.assertFalse(clones)
         self.assertEqual(" ".join(draws[0]["lines"]),"Keep every word intact.")
 

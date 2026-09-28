@@ -42,7 +42,7 @@ Then open **Connections → Connect Google account** in the app. Brightline crea
 
 Things to know:
 
-- **Connect again after every server restart.** Your setup is saved, but Google access stays off until you click Connect. Refreshing the page during a session keeps you connected.
+- **A valid connection survives server restarts.** Brightline reloads the ignored, owner-only refresh token until you disconnect or Google revokes it. If that happens, the app shows `Google connection expired. Reconnect.`
 - **Testing mode expires every 7 days.** Google revokes test-user access after a week, so reconnect when the app prompts you. Releasing to the public requires Google's OAuth verification.
 - **Disconnecting** deletes the local token. Reports already created in Drive are not deleted.
 - `GOOGLE_OAUTH_CLIENT_FILE` overrides the saved client. If you set it in the past, run `unset GOOGLE_OAUTH_CLIENT_FILE`. A missing or invalid override causes an error; Brightline does not fall back to a different client.
@@ -91,6 +91,7 @@ Formatting around each placeholder carries through to the finished report.
 - **No clipped text.** If content can't fit under the layout rules, the report stops for review and is not cut off.
 - **No guessing.** Ambiguous students, unreadable layouts, and unclear sections go to review.
 - **Each class is handled on its own.** A layout that works for one class does not prove it works for another format.
+- **Routing is inspectable.** Preview shows where each passage was assigned, its confidence, and the class-sample signals used. Low-confidence routing blocks generation for review.
 
 The detailed fitting, pagination, and section-routing rules (font size limits, continuation pages, and how comments get split into sections) are in [`docs/PRODUCT_REQUIREMENTS.md`](docs/PRODUCT_REQUIREMENTS.md). That file is the single source of truth for product behavior.
 
@@ -147,3 +148,5 @@ node --check frontend/app.js
 Tests use synthetic data and a temporary `BRIGHTLINE_DATA_DIR`. They never touch the network or real credentials. Never run tests against your real data directory.
 
 A live Google check needs your own OAuth client, an authorized test account, a source Sheet, and a template Doc. After any change to PDF output, open the generated reports and check them yourself. Passing unit tests doesn't prove the pages look right.
+
+For private diagnostics, run `.venv/bin/python scripts/check_reports.py`. It writes ignored PDFs, per-page PNGs, passage routing, font/fill measurements, and review flags under `data/report-checks/` by default.

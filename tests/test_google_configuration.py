@@ -90,7 +90,7 @@ class PersistentGoogleSetupTests(unittest.TestCase):
         self.assertFalse(identity["configured"])
         self.assertIn("google-oauth-client.json", identity["error"])
 
-    def test_server_start_requires_connect_even_with_saved_credentials(self):
+    def test_server_start_restores_valid_saved_credentials(self):
         from backend import server
         from backend.database import Database
 
@@ -103,19 +103,35 @@ class PersistentGoogleSetupTests(unittest.TestCase):
         database.set_setting("google_connection_account", "example@example.test")
         database.set_setting("google_sheets_verified", "1")
         http_server = Mock()
-        with patch.object(server, "DB", database), patch.object(server, "ThreadingHTTPServer", return_value=http_server), patch("builtins.print"):
+        workspace = Mock()
+        workspace.validate_saved_credentials.return_value = None
+        with patch.object(server, "DB", database), patch.object(server, "ThreadingHTTPServer", return_value=http_server), patch.object(GoogleWorkspace, "from_env", return_value=workspace), patch("builtins.print"):
             server.run()
-            for connection in server.google_connection_state().values():
-                self.assertEqual(connection["status"], "disconnected")
-                self.assertFalse(connection["authorized"])
+            connections = server.google_connection_state()
+            self.assertEqual(connections["google_sheets"]["status"], "connected")
+            self.assertEqual(connections["google_docs"]["status"], "needs_setup")
+            for connection in connections.values():
+                self.assertTrue(connection["authorized"])
                 self.assertTrue(connection["oauth_client_configured"])
-            handler = server.AppHandler.__new__(server.AppHandler)
-            with patch.object(GoogleWorkspace, "from_env") as workspace:
-                with self.assertRaisesRegex(IntegrationError, "Click Connect"):
-                    handler._test_google({"service": "google_sheets"})
-                workspace.assert_not_called()
+        workspace.validate_saved_credentials.assert_called_once_with()
         self.assertTrue(saved.is_file())
         self.assertTrue(token.is_file())
+
+    def test_server_start_marks_expired_credentials_without_leaking_details(self):
+        from backend import server
+        from backend.database import Database
+
+        GoogleWorkspace.save_client_configuration(self.client())
+        GoogleWorkspace._token_path().write_text('{"refresh_token":"synthetic-token"}')
+        database = Database(self.root / "state.db")
+        database.set_setting("google_connection_status", "connected")
+        workspace = Mock()
+        workspace.validate_saved_credentials.side_effect = IntegrationError("secret token response")
+        with patch.object(server, "DB", database), patch.object(GoogleWorkspace, "from_env", return_value=workspace), patch("builtins.print") as output:
+            server.restore_google_connection()
+        self.assertEqual(database.get_setting("google_connection_status"), "error")
+        self.assertEqual(database.get_setting("google_connection_error"), "Google connection expired. Reconnect.")
+        self.assertNotIn("secret token response", str(output.call_args_list))
 
     def test_connect_starts_sign_in_but_only_successful_callback_activates_access(self):
         from backend import server
@@ -150,6 +166,21 @@ class PersistentGoogleSetupTests(unittest.TestCase):
             handler.path = "/api/google/oauth/callback?state=cancelled&error=access_denied"
             handler._google_oauth_callback()
             self.assertEqual(database.get_setting("google_connection_disabled"), "1")
+
+    def test_oauth_callback_log_redacts_code_and_state(self):
+        from backend import server
+
+        handler = server.AppHandler.__new__(server.AppHandler)
+        handler.address_string = Mock(return_value="127.0.0.1")
+        with patch("builtins.print") as output:
+            handler.log_message(
+                '"GET %s HTTP/1.1" 302 -',
+                "/api/google/oauth/callback?state=secret-state&code=secret-code",
+            )
+        logged = str(output.call_args)
+        self.assertIn("[redacted]", logged)
+        self.assertNotIn("secret-state", logged)
+        self.assertNotIn("secret-code", logged)
 
 
 if __name__ == "__main__":

@@ -70,87 +70,98 @@ def content_features(text):
 
 
 def _source_units(text):
-    # Keep original slices, including punctuation and whitespace, so routing
-    # never asks a text generator to reconstruct or shorten teacher comments.
+    """Return exact source slices while keeping numbered question blocks whole."""
+    question_starts = [
+        match.start()
+        for match in re.finditer(
+            r"(?m)^(?=\s*(?:Q\s*\d+(?:\s*\([a-z0-9ivx]+\))?\b|"
+            r"Question\s+\d+\b|\d+\s*\([a-zivx]+\)|\d+\s*번\s*(?:문항|문제)))",
+            text,
+            re.I,
+        )
+    ]
     boundaries = [0]
-    for m in re.finditer(r"(?<=[.!?])\s+(?=[A-Z0-9가-힣“\"'])|(?<=합니다)\s+(?=[가-힣]{2,8}(?:는|은)\s+(?:이번\s+)?Week)|\n\s*\n",text):
-        boundaries.append(m.end())
+    first_question = question_starts[0] if question_starts else len(text)
+    for match in re.finditer(
+        r"(?<=[.!?。！？])\s+(?=[A-Z0-9가-힣“\"'])|\n\s*\n",
+        text[:first_question],
+    ):
+        boundaries.append(match.end())
+    boundaries.extend(question_starts)
     boundaries.append(len(text))
-    return [text[a:b] for a,b in zip(boundaries,boundaries[1:]) if b>a]
+    ordered = sorted(set(boundaries))
+    units = []
+    for start, end in zip(ordered, ordered[1:]):
+        if end <= start:
+            continue
+        piece = text[start:end]
+        if units and not piece.strip():
+            units[-1] += piece
+        else:
+            units.append(piece)
+    return units
 
 
-def _question_block_start(unit):
-    """A numbered feedback block, not a question mentioned inside an overview.
-
-    Source PDFs may have lost paragraph breaks during import. Sentence starts
-    still distinguish 'Q1(a) ...' from 'However, Q4 ...' in an overview.
-    Bare subquestion labels are allowed; plain numbers/dates are not.
-    """
-    return bool(re.match(
-        r"\s*(?:Q\s*\d+(?:\s*\([a-z0-9ivx]+\))?\b|"
-        r"Question\s+\d+\b|\d+\s*\([a-zivx]+\)|\d+\s*번\s*(?:문항|문제))",
-        unit, re.I))
+def _cosine(first, second):
+    first = Counter(first or {})
+    second = Counter(second or {})
+    if not first or not second:
+        return 0.0
+    numerator = sum(value * second.get(key, 0) for key, value in first.items())
+    first_norm = sum(value * value for value in first.values()) ** .5
+    second_norm = sum(value * value for value in second.values()) ** .5
+    return numerator / max(1e-9, first_norm * second_norm)
 
 
-def _test_overview_start(unit):
-    if _question_block_start(unit):
-        return False
-    # A student-specific test introduction need not contain a numerical score.
-    # Do not mistake a shared lesson description mentioning exams for one.
-    named_event = re.match(
-        r"\s*[가-힣]{2,8}(?:는|은)\s+(?:이번\s+)?"
-        r"(?:Week\s*\d+\s*(?:Test|Exam)|(?:주간|위클리)\s*테스트|시험)",
-        unit, re.I)
-    if named_event:
-        return True
-    roles = content_features(unit)["roles"]
-    return bool(roles["test_result"] and not roles["teaching_context"]
-                and re.search(r"\b(?:test|exam|score|scored|earned|achieved)\b|시험|받았", unit, re.I))
-
-
-def _sample_routed_chunks(text, selected, guide):
-    """Exemplar-informed discourse routing, with explicit headings taking priority.
-
-    Only a class with reliable test AND general sample bodies can split an
-    unheaded mixed narrative. Homework imports remain explicitly homework.
-    """
+def _section_profiles(guide):
     profiles = {}
-    for section in guide.get("sections",[]):
-        if section.get("reliable",True) and section.get("features"):
-            profiles.setdefault(section["section"],[]).append(section["features"])
-    if selected == "homework" or not {"weekly_test","general"} <= profiles.keys():
-        return None
-    if any(heading_section(line) or heading_section(re.split(r"[:：]",line,maxsplit=1)[0])
-           for line in text.splitlines()):
-        return None
-    roles = {section:Counter() for section in profiles}
-    for section, items in profiles.items():
-        for item in items:
-            roles[section].update(item["roles"])
-    # A test-overview/long-form-feedback distinction must be observed, not
-    # assumed for every subject. Otherwise retain the chosen import category.
-    if not roles["weekly_test"]["test_result"] or not (
-        roles["general"]["question_detail"] or roles["general"]["teaching_context"]):
-        return None
-    detail_ratios = {k: roles[k]["question_detail"] / max(1, roles[k]["test_result"])
-                     for k in ("general", "weekly_test")}
-    if detail_ratios["general"] <= detail_ratios["weekly_test"]:
-        # Not every subject uses a short test overview / long teacher-feedback
-        # convention. Do not impose this layout when its sample does not agree.
-        return None
-    units = _source_units(text)
-    detail = next((i for i, unit in enumerate(units) if _question_block_start(unit)), len(units))
-    start = next((i for i, unit in enumerate(units[:detail]) if _test_overview_start(unit)), None)
-    if start is None:
-        if content_features(text)["roles"]["teaching_context"] or detail < len(units):
-            return [["general", text]]
-        return None
-    # Keep the complete, contiguous overview. Advice, passing question mentions,
-    # and lexical overlap are not boundaries. Once detailed feedback starts,
-    # later scores must not pull individual sentences back into the overview.
-    return [[section, "".join(chunk)] for section, chunk in (
-        ("general", units[:start]), ("weekly_test", units[start:detail]),
-        ("general", units[detail:])) if chunk]
+    for observation in guide.get("sections", []):
+        if not observation.get("reliable", True) or not observation.get("features"):
+            continue
+        profile = profiles.setdefault(observation["section"], {
+            "lexical": Counter(), "roles": Counter(), "topics": set(),
+        })
+        profile["lexical"].update(observation["features"].get("lexical") or {})
+        profile["roles"].update(observation["features"].get("roles") or {})
+        profile["topics"].update(observation.get("topics") or [])
+    return profiles
+
+
+def _route_passage(passage, selected, profiles):
+    features = content_features(passage)
+    passage_topics = {
+        name for name, pattern in TOPICS.items() if re.search(pattern, passage, re.I)
+    }
+    scored = []
+    for section, profile in profiles.items():
+        lexical = _cosine(features["lexical"], profile["lexical"])
+        roles = _cosine(features["roles"], profile["roles"])
+        topics = len(passage_topics & profile["topics"]) / max(1, len(passage_topics | profile["topics"]))
+        selected_bias = .06 if section == selected else 0
+        score = lexical * .55 + roles * .30 + topics * .15 + selected_bias
+        signals = []
+        if lexical:
+            signals.append(f"sample vocabulary {lexical:.2f}")
+        if roles:
+            signals.append(f"content-role match {roles:.2f}")
+        if topics:
+            signals.append(f"topic overlap {topics:.2f}")
+        if selected_bias:
+            signals.append("matches selected upload section")
+        scored.append((score, section, signals))
+    scored.sort(reverse=True)
+    if not scored or scored[0][0] <= .06:
+        return selected, .35, ["no reliable sample-profile match"], True
+    top_score, destination, signals = scored[0]
+    runner_up = scored[1][0] if len(scored) > 1 else 0
+    margin = max(0.0, top_score - runner_up)
+    confidence = min(.98, .42 + top_score * .55 + margin * .55)
+    requires_review = confidence < .68 or margin < .08
+    signals.append(f"margin over next section {margin:.2f}")
+    if requires_review:
+        destination = selected
+        signals.append("low confidence; kept in original upload section for review")
+    return destination, round(confidence, 3), signals, requires_review
 
 
 def heading_key(value: str) -> str:
@@ -278,6 +289,8 @@ def organize_comments(exams: list[dict[str, Any]], guide: dict[str, Any]) -> dic
     parts = {section: [] for section in SECTION_LABELS}
     decisions = []
     observed = {s["section"] for s in guide.get("sections", []) if s.get("reliable", True)}
+    profiles = _section_profiles(guide)
+    passage_index = 0
     for exam in exams:
         text = str(exam.get("comment") or "")
         if not text.strip():
@@ -285,25 +298,42 @@ def organize_comments(exams: list[dict[str, Any]], guide: dict[str, Any]) -> dic
         selected = exam.get("comment_section") or "weekly_test"
         if selected not in parts:
             raise ValueError("Choose a report section for the imported comment.")
+        heading_chunks = []
         active = selected
-        inferred = _sample_routed_chunks(text, selected, guide)
-        chunks = inferred or []
-        for line in ([] if inferred else text.splitlines(keepends=True)):
-            # A heading must match the entire line or the prefix before a colon.
-            # Narrative keywords alone do not establish a section boundary.
+        explicit = False
+        for line in text.splitlines(keepends=True):
             section = heading_section(line) or heading_section(re.split(r"[:：]", line, maxsplit=1)[0])
             if section in observed:
                 active = section
-            if chunks and chunks[-1][0] == active:
-                chunks[-1][1] += line
+                explicit = True
+            if heading_chunks and heading_chunks[-1][0] == active:
+                heading_chunks[-1][1] += line
             else:
-                chunks.append([active, line])
-        for destination, content in chunks:
+                heading_chunks.append([active, line])
+        if explicit:
+            routed = [
+                (destination, content, .99, ["explicit heading matched the completed-sample profile"], False)
+                for destination, content in heading_chunks
+            ]
+        elif selected == "homework" or not profiles:
+            routed = [(selected, text, .95, ["explicitly selected upload section"], False)]
+        else:
+            routed = []
+            for passage in _source_units(text):
+                destination, confidence, signals, review = _route_passage(
+                    passage, selected, profiles
+                )
+                routed.append((destination, passage, confidence, signals, review))
+        for destination, content, confidence, signals, review in routed:
             parts[destination].append(content)
-        decisions.append({
-            "source_section": selected,
-            "destinations": list(dict.fromkeys(destination for destination, _ in chunks)),
-            "basis": "class sample roles and contiguous source blocks" if inferred else
-                     "sample section headings" if any(d != selected for d, _ in chunks) else "selected import section",
-        })
-    return {"sections": {key: "\n\n".join(value) for key, value in parts.items()}, "decisions": decisions}
+            passage_index += 1
+            decisions.append({
+                "passage_index": passage_index,
+                "source_section": selected,
+                "destination": destination,
+                "confidence": confidence,
+                "signals": signals,
+                "requires_review": review,
+                "passage": content,
+            })
+    return {"sections": {key: "".join(value) for key, value in parts.items()}, "decisions": decisions}

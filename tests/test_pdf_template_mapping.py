@@ -72,6 +72,68 @@ class PdfTemplateMappingTests(unittest.TestCase):
                 page_count=1,
             )
 
+    def test_mapping_accepts_teacher_comment_continuation_from_blank_template(self) -> None:
+        mapping = default_mapping(letter[0], letter[1])
+        mapping["continuation_regions"] = [
+            {
+                "key": "teacher_page_2",
+                "source_key": "teacher_comment",
+                "content_type": "text",
+                "page": 2,
+                "template_page": 1,
+                "box": {"x": 0.08, "y": 0.08, "width": 0.84, "height": 0.82},
+                "font_size": 10,
+                "minimum_font_size": 8,
+                "line_spacing": 1.2,
+                "align": "left",
+            }
+        ]
+        normalized = validate_mapping(
+            mapping,
+            page_width=letter[0],
+            page_height=letter[1],
+            page_count=1,
+        )
+        self.assertEqual(normalized["schema_version"], 2)
+        self.assertEqual(
+            normalized["continuation_regions"][0]["source_key"],
+            "teacher_comment",
+        )
+        self.assertEqual(normalized["continuation_regions"][0]["page"], 2)
+
+    def test_continuation_regions_reject_overlap_and_unknown_sources(self) -> None:
+        mapping = default_mapping(letter[0], letter[1])
+        base = {
+            "content_type": "text",
+            "page": 2,
+            "box": {"x": 0.08, "y": 0.08, "width": 0.84, "height": 0.82},
+            "font_size": 10,
+            "minimum_font_size": 8,
+            "line_spacing": 1.2,
+            "align": "left",
+        }
+        mapping["continuation_regions"] = [
+            {**base, "key": "teacher_one", "source_key": "teacher_comment"},
+            {**base, "key": "teacher_two", "source_key": "teacher_comment"},
+        ]
+        with self.assertRaisesRegex(TemplateMappingError, "overlap"):
+            validate_mapping(
+                mapping,
+                page_width=letter[0],
+                page_height=letter[1],
+                page_count=1,
+            )
+        mapping["continuation_regions"] = [
+            {**base, "key": "unknown", "source_key": "student_name"}
+        ]
+        with self.assertRaisesRegex(TemplateMappingError, "Choose which text field"):
+            validate_mapping(
+                mapping,
+                page_width=letter[0],
+                page_height=letter[1],
+                page_count=1,
+            )
+
     def test_template_versions_keep_one_published_version_active(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -185,7 +247,7 @@ class PdfTemplateMappingTests(unittest.TestCase):
         self.assertIn("Weekly Test 3", page_text)
         self.assertNotIn("Teacher comment: -/-", page_text)
 
-    def test_preserves_unmapped_pages_in_a_multi_page_template(self) -> None:
+    def test_removes_unused_trailing_pages_from_a_multi_page_template(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             template_path = root / "two-page-template.pdf"
@@ -202,8 +264,43 @@ class PdfTemplateMappingTests(unittest.TestCase):
             generate_student_pdf(student, template_path, output_path, mapping=mapping)
             output = PdfReader(output_path)
 
-        self.assertEqual(len(output.pages), 2)
-        self.assertIn("page 2", output.pages[1].extract_text())
+        self.assertEqual(len(output.pages), 1)
+
+    def test_long_weekly_feedback_is_rejected_instead_of_continued(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            template_path = root / "one-page-template.pdf"
+            output_path = root / "student-report.pdf"
+            _blank_template(template_path)
+            mapping = default_mapping(letter[0], letter[1])
+            mapping["continuation_regions"] = [
+                {
+                    "key": "teacher_page_2",
+                    "source_key": "teacher_comment",
+                    "content_type": "text",
+                    "page": 2,
+                    "box": {"x": 0.08, "y": 0.08, "width": 0.84, "height": 0.82},
+                    "font_size": 10,
+                    "minimum_font_size": 8,
+                    "line_spacing": 1.2,
+                    "align": "left",
+                }
+            ]
+            tokens = [f"WEEKLY{i:03d}" for i in range(120)]
+            student = {
+                "name": "Minseo Kim",
+                "class_name": "DP1 Chemistry HL",
+                "homework": [],
+                "exams": [],
+                "comments_by_section": {
+                    "homework": "",
+                    "weekly_test": " ".join(tokens),
+                    "general": "",
+                },
+                "sample_content_guide": {},
+            }
+            with self.assertRaisesRegex(ValidationError, "Weekly Test Summary does not fit"):
+                generate_student_pdf(student, template_path, output_path, mapping=mapping)
 
     def test_generation_refuses_to_clip_an_overflowing_comment(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

@@ -34,16 +34,27 @@ files. They must be considered when changing the application or reviewing a PR.
   Current local, evidence-based rules are not general semantic understanding or
   OCR. Unclear mappings and unsupported layouts need review, not silent guessing.
   Validate new formats separately before claiming equivalent quality.
+- Build class-specific section profiles from completed samples: recognized heading,
+  corresponding blank-template region, content features, typical text length and
+  fill, rendered body font and size, and graph evidence. These profiles are local
+  statistical evidence, not reusable sample prose.
+- Split incoming feedback at paragraph and numbered-question boundaries. Record one
+  destination, confidence score, and matching signals for every passage. Show those
+  decisions in review. Low-confidence routing blocks report generation.
 
 ## Fitting and page rules
 
 - Weekly Test feedback stays inside its original text area; shrink the body font
   as necessary instead of creating a continuation page for it.
 - Additional teacher-comment pages are allowed only when the last page's comment
-  area is at least half occupied. Compact sparse remainders into earlier pages.
-- Smaller-than-8-point text is approved. The implementation uses a 5-point safety
-  floor; if the page rules still cannot be met, request review rather than clip or
+  area is at least half occupied. Build them from an appropriate full-width feedback
+  page in the blank template, relabel the continuing section, and compact sparse
+  remainders into earlier pages. Never use a completed sample as page artwork.
+- Start from the completed sample's observed body size and adjust toward its typical
+  fill. Smaller-than-8-point text is approved. The implementation uses a 7-point
+  safety floor; if the page rules still cannot be met, request review rather than clip or
   silently discard text. Preserve readable fonts and inspect rendered output.
+- Remove unused trailing blank-template pages from generated reports.
 - Missing appropriate Weekly Test feedback uses this academy-requested assumption:
   the student missed the test, even if an imported score exists. Use the notice
   below, omit the conflicting test graph, and fit the report on one page:
@@ -56,9 +67,10 @@ files. They must be considered when changing the application or reviewing a PR.
 
 ## Connection and release checks
 
-- Remember private local Google OAuth configuration across restarts, but do not
-  automatically activate Google access when the server starts. The user connects
-  explicitly. Configuration and tokens remain outside version control.
+- Remember private local Google OAuth configuration and a valid saved refresh token
+  across restarts. Reuse the token automatically until the user disconnects or Google
+  revokes it. If refresh fails, show exactly `Google connection expired. Reconnect.`
+  and require a new connection. Configuration and tokens remain outside version control.
 - Before publishing changes, run the regression suite and the isolated empty-start
   test. Review the staged file list for uploads, secrets, and local configuration.
 - Test layout changes using synthetic documents as well as authorized local

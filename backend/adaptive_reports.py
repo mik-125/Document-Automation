@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import io
 import re
+import statistics
 from collections import Counter
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from reportlab.pdfgen import canvas
 from backend.pdf_content import labeled_panels, page_lines
 from backend.sample_content import SECTION_REGIONS
 
-COMPACT_MINIMUM = 5.0
+MINIMUM_READABLE_SIZE = 7.0
 MISSING_TEST_FEEDBACK = (
     "학생은 이번 위클리 테스트를 응시하지 않았기에 정확한 이해도 판단이 어렵습니다. "
     "위클리 테스트를 나중에 한 번 풀어보시는 것을 추천드립니다."
@@ -33,6 +34,11 @@ def _body_font(observations):
                "CourierNewPSMT":"Courier"}
     for font,_ in fonts.most_common():
         candidate = aliases.get(font,font)
+        if candidate in {
+            "Helvetica", "Helvetica-Bold", "Times-Roman", "Times-Bold",
+            "Courier", "Courier-Bold",
+        }:
+            continue
         if candidate in pdfmetrics.getRegisteredFontNames():
             return candidate
     # Subset fonts cannot safely supply letters absent from the example.
@@ -49,8 +55,6 @@ def _frames(doc, mapping, guide):
         for panel in panels:
             section = panel["section"]
             observations = [s for s in guide.get("sections",[]) if s["section"]==section and s.get("reliable",True)]
-            if not observations:
-                continue
             rect = fitz.Rect(panel["box"])
             rect = fitz.Rect(rect.x0+8,rect.y0+7,rect.x1-8,rect.y1-7)
             chart = None
@@ -59,16 +63,19 @@ def _frames(doc, mapping, guide):
                 rect.x0 += rect.width*.53
             key = SECTION_REGIONS[section]
             mapped = regions.get(key,{})
-            sizes = [s["preferred_font_size"] for s in observations if s.get("preferred_font_size")]
-            # Small reference typography describes style but does not authorize
-            # unreadable output. Grow short comments toward useful occupancy.
-            preferred = min(12,max(9.5,max(sizes or [mapped.get("font_size",9.5)])))
+            sizes = [float(s["preferred_font_size"]) for s in observations if s.get("preferred_font_size")]
+            preferred = statistics.median(sizes) if sizes else float(mapped.get("font_size", 9.5))
+            target_fills = [float(s["text_fill_ratio"]) for s in observations if s.get("text_fill_ratio") is not None]
             frames.append({"section":section,"page":number,"box":list(rect),
                            "chart":list(chart) if chart else None,
                            "font":_body_font(observations),"preferred":preferred,
-                           "minimum":max(8,min(12,float(mapped.get("minimum_font_size",8)))),
+                           "minimum":MINIMUM_READABLE_SIZE,
+                           "target_fill":statistics.median(target_fills) if target_fills else .85,
+                           "page_width":page.rect.width,
                            "heading":panel["heading"],
-                           "heading_box":panel["heading"]["box"]})
+                           "heading_box":panel["heading"]["box"],
+                           "generated":False})
+    frames.sort(key=lambda frame:(frame["section"],frame["page"]))
     return frames
 
 
@@ -135,12 +142,29 @@ def _section_plan(text, group, frames, page_count, clone_offset, size, allow_ext
     """Pure trial layout. Rejected font/page trials never leak into the output."""
     from backend.report_engine import ValidationError
     fitted, remaining = _flow_at_size(text, group, size)
+    if group and group[0]["section"] == "general":
+        label = group[0].get("heading", {}).get("text", group[0]["section"])
+        continued = label + (" (계속)" if re.search(r"[가-힣]", label) else " (continued)")
+        for draw in fitted:
+            if draw["page"] > group[0]["page"] and draw.get("heading"):
+                draw["continuation_heading"] = continued
     clones = []
     while remaining and allow_extra:
         if clone_offset+len(clones)>=50:
             raise ValidationError("This report exceeds 50 continuation pages. Review the source comments.")
-        candidates = [f for f in frames if f.get("heading") and not f.get("chart")]
-        source = max(candidates or group,key=lambda f:fitz.Rect(f["box"]).get_area())
+        candidates = [
+            frame for frame in frames
+            if frame["section"] == "general"
+            and frame.get("heading")
+            and not frame.get("chart")
+            and fitz.Rect(frame["box"]).width >= float(frame.get("page_width") or 1) * .70
+        ]
+        if not candidates:
+            raise ValidationError(
+                "The blank template has no full-width teacher-comment page to use for continuation. "
+                "Review the template layout; no text was omitted."
+            )
+        source = max(candidates,key=lambda f:fitz.Rect(f["box"]).get_area())
         continuation = copy.deepcopy(source)
         if continuation.get("heading"):
             label = group[0].get("heading",{}).get("text",group[0]["section"])
@@ -174,19 +198,17 @@ def layout_comments(values, frames, page_count, *, single_page=False):
             continue
         if not group:
             raise ValidationError(f"The original PDF needs a confirmed {section} text region before automatic fitting.")
-        standard_minimum = max(f["minimum"] for f in group)
-        preferred = max(standard_minimum,min(f["preferred"] for f in group))
-        compact = section in {"weekly_test", "general"} or single_page
-        minimum = min(standard_minimum, COMPACT_MINIMUM) if compact else standard_minimum
-        allow_extra = not single_page and section != "weekly_test"
-        size = preferred
+        minimum = MINIMUM_READABLE_SIZE
+        preferred = max(minimum,min(f["preferred"] for f in group))
+        allow_extra = not single_page and section == "general"
+        size = min(36.0, round(preferred + .75, 2))
         # First try to use the original pages at normal body sizes. Only use a
         # continuation after this pass; smaller fonts can then eliminate a short
         # final page. All trials start from the complete original wording.
-        while size > standard_minimum:
+        while size > minimum:
             _,remaining = _flow_at_size(text,group,size)
             if not remaining:break
-            size = max(standard_minimum,round(size-.25,2))
+            size = max(minimum,round(size-.25,2))
         while True:
             fitted, trial_clones, remaining = _section_plan(
                 text,group,frames,page_count,len(clones),size,allow_extra)
@@ -197,13 +219,14 @@ def layout_comments(values, frames, page_count, *, single_page=False):
             if not remaining and not sparse:break
             if size <= minimum:
                 raise ValidationError(
-                    "The comment cannot meet the requested page limit at 5 pt. "
+                    f"The {section.replace('_', ' ')} comment cannot fit under the page rules at 7 pt. "
                     "Review the source text or enlarge the original comment region; no text was omitted.")
             size = max(minimum,round(size-.25,2))
         draws.extend(fitted)
         clones.extend(trial_clones)
         pages = [f["page"]+1 for f in fitted]
         receipt.append({"section":section,"font_size":size,"pages":pages,
+                        "page_fills":[round(_filled_fraction(item),4) for item in fitted],
                         "last_page_fill":round(_filled_fraction(fitted[-1]),4) if fitted else 0,
                         "source_characters":len(text),"wording":"preserved"})
     return draws,clones,receipt
@@ -259,15 +282,14 @@ def generate_adaptive_pdf(student, template_path, output_path, mapping):
         comment=(student.get("comments_by_section") or {}).get(section)
         if comment:values[key]=comment
     draws,clones,receipt=layout_comments(values,frames,len(doc),single_page=missing_test_feedback)
-    # Omit unused trailing template pages. Remap generated continuation indexes
-    # after trimming so overlays, receipts and page numbers stay aligned.
+    # Omit unused trailing pages and remap generated continuation indexes.
     original_count=len(doc)
     used_original_count=max([d["page"]+1 for d in draws if d["page"]<original_count] or [1])
     sources=list(range(used_original_count))+clones
     def output_page(index):
         return index if index<original_count else index-original_count+used_original_count
     for draw in draws:draw["page"]=output_page(draw["page"])
-    for item in receipt:item["pages"]=[output_page(p-1)+1 for p in item["pages"]]
+    for item in receipt:item["pages"]=[output_page(page-1)+1 for page in item["pages"]]
     replacements={}
     for i,page in enumerate(doc):
         replacements[i]=_identity_fields(page,student)
@@ -281,8 +303,8 @@ def generate_adaptive_pdf(student, template_path, output_path, mapping):
     # shared PDF streams/resources even when a PageObject is deep-copied.
     readers=[]
     for output_index,source_index in enumerate(sources):
-        page_bytes=background_bytes
         continuation_draws=[d for d in draws if d["page"]==output_index and d.get("continuation_heading")]
+        page_bytes=background_bytes
         if continuation_draws:
             with fitz.open(stream=background_bytes,filetype="pdf") as copy_doc:
                 page=copy_doc[source_index]
@@ -295,7 +317,7 @@ def generate_adaptive_pdf(student, template_path, output_path, mapping):
         width,height=float(background.mediabox.width),float(background.mediabox.height)
         stream=io.BytesIO(); c=canvas.Canvas(stream,pagesize=(width,height))
         c.setFillColor(INK)
-        for target,value in replacements[source_index]:
+        for target,value in replacements.get(source_index, []):
             box=fitz.Rect(target["box"])
             max_width=min(width-38-box.x0,max(box.width,150))
             region={"key":"identity","font_size":min(16,max(9,target["size"])),
@@ -339,6 +361,10 @@ def generate_adaptive_pdf(student, template_path, output_path, mapping):
     output_path=Path(output_path);output_path.parent.mkdir(parents=True,exist_ok=True)
     with output_path.open("wb") as stream:writer.write(stream)
     # Non-sensitive diagnostics; teacher text is never written to logs.
-    student["report_fit"]={"sections":receipt,"continuation_pages":len(clones),
+    continuation_pages = sum(
+        max(0, len(set(item["pages"])) - 1)
+        for item in receipt if item["section"] == "general"
+    )
+    student["report_fit"]={"sections":receipt,"continuation_pages":continuation_pages,
                            "missing_test_feedback_assumption":missing_test_feedback}
     return True

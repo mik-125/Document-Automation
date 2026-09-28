@@ -115,6 +115,26 @@ def google_oauth_error(exc: Exception) -> str:
     return f"Google sign-in failed ({type(exc).__name__}). Check the OAuth client settings."
 
 
+def restore_google_connection() -> None:
+    """Reuse a saved refresh token unless the user explicitly disconnected."""
+    if DB.get_setting("google_connection_disabled") == "1":
+        return
+    identity = GoogleWorkspace.configured_identity()
+    if not identity.get("authorized"):
+        return
+    try:
+        workspace = GoogleWorkspace.from_env()
+        workspace.validate_saved_credentials()
+    except IntegrationError:
+        DB.set_setting("google_connection_status", "error")
+        DB.set_setting("google_connection_error", "Google connection expired. Reconnect.")
+        print("Google OAuth restore failed: google_oauth_required")
+        return
+    if DB.get_setting("google_connection_identity") == identity.get("fingerprint"):
+        DB.set_setting("google_connection_status", "connected")
+        DB.set_setting("google_connection_error", "")
+
+
 def safe_filename(value: str, fallback: str = "report") -> str:
     value = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", "-", str(value or "")).strip(" .-")
     return value[:100] or fallback
@@ -517,18 +537,7 @@ def app_state() -> dict[str, Any]:
     ]
     google = google_connection_state()
     google_docs_ready = google["google_docs"]["status"] == "connected"
-    state["connections"] = {
-        "makeedu": {
-            "available": False,
-            "configured": False,
-            "status": "unavailable",
-            "account_name": "",
-            "last_synced_at": "",
-            "error": "Official MakeEdu API documentation and academy access are required.",
-            "support_url": "https://makeedu.co.kr/faq.jsp",
-        },
-        **google,
-    }
+    state["connections"] = google
     templates: list[dict[str, Any]] = []
     template_lookup: dict[str, dict[str, Any]] = {}
     content_guides: dict[str, dict[str, Any]] = {}
@@ -641,6 +650,10 @@ def app_state() -> dict[str, Any]:
         student["output_mode"] = output_mode
         guide = content_guides.get(student["class_id"], {})
         organized = organize_comments(student.get("exams", []), guide)
+        student["comment_placement"] = organized["decisions"]
+        student["routing_review_required"] = any(
+            decision.get("requires_review") for decision in organized["decisions"]
+        )
         student["missing_test_feedback_assumption"] = bool(
             output_mode == "pdf_template"
             and any(s.get("section") == "weekly_test" and s.get("reliable", True)
@@ -650,6 +663,12 @@ def app_state() -> dict[str, Any]:
         if student["missing_test_feedback_assumption"]:
             student["report_ready"] = bool(student.get("assignment_ready")
                 and organized["sections"]["homework"].strip() and student["template_ready"])
+        student["missing_test_score_warning"] = bool(
+            student["missing_test_feedback_assumption"]
+            and any(exam.get("score") is not None for exam in student.get("exams", []))
+        )
+        if student["routing_review_required"]:
+            student["report_ready"] = False
         student["output_ready"] = bool(output_mode == "pdf_template" or google_docs_ready)
         student["google_ready"] = student["output_ready"]
         student["report_ready"] = bool(student["report_ready"] and student["output_ready"])
@@ -1767,6 +1786,11 @@ def get_ready_student(student_id: str, period_id: str | None = None) -> dict[str
     organized = organize_comments(exams, guide)
     payload["comments_by_section"] = organized["sections"]
     payload["comment_placement"] = organized["decisions"]
+    if any(decision.get("requires_review") for decision in organized["decisions"]):
+        raise ValidationError(
+            "Comment routing needs review because at least one passage has low confidence. "
+            "Add explicit section headings or upload the comments in separate sections."
+        )
     payload["sample_content_guide"] = guide
     pdf_template = DB.get_class_template_version(student["class_id"], published_only=True)
     missing_test_assumption = bool(
@@ -2296,10 +2320,6 @@ class AppHandler(BaseHTTPRequestHandler):
                 DB.set_setting("google_output_folder_verified", "0")
                 self._send_json({"ok": True, "state": app_state()})
                 return
-            if path == "/api/connections/makeedu/test":
-                raise ValidationError(
-                    "Official MakeEdu API documentation and academy credentials have not been supplied."
-                )
             if path == "/api/periods/select":
                 DB.select_period(str(payload.get("period_id") or ""))
                 self._send_json({"ok": True, "state": app_state()})
@@ -2712,13 +2732,22 @@ class AppHandler(BaseHTTPRequestHandler):
         state = str(query.get("state", [""])[0])
         pending = GOOGLE_OAUTH_FLOWS.pop(state, None)
         if not state or not pending or pending[0] < time.monotonic() - 600:
+            print("Google OAuth callback failed: state_check_failed")
             raise IntegrationError(
                 "The Google sign-in session expired. Start the connection again.",
                 "google_oauth_required",
             )
         if query.get("error"):
+            error_type = re.sub(r"[^a-z0-9_.-]", "", str(query["error"][0]).casefold())[:80]
+            error_type = error_type or "oauth_error"
             DB.set_setting("google_connection_status", "error")
-            DB.set_setting("google_connection_error", "Google sign-in was cancelled.")
+            message = (
+                "Google sign-in was cancelled."
+                if error_type == "access_denied"
+                else f"Google sign-in failed: {error_type}."
+            )
+            DB.set_setting("google_connection_error", message)
+            print(f"Google OAuth callback failed: {error_type}")
             self._redirect("/#connections")
             return
         _, flow = pending
@@ -2733,9 +2762,13 @@ class AppHandler(BaseHTTPRequestHandler):
             prepare_google_identity(workspace)
         except Exception as exc:
             error = google_oauth_error(exc)
+            error_type = re.sub(
+                r"[^a-z0-9_.-]", "", str(getattr(exc, "error", "") or getattr(exc, "code", "") or type(exc).__name__).casefold()
+            )[:80] or "oauth_error"
             DB.set_setting("google_connection_status", "error")
             DB.set_setting("google_connection_error", error)
             DB.set_setting("google_connection_last_tested", now_iso())
+            print(f"Google OAuth callback failed: {error_type}")
             self._redirect("/#connections")
             return
         DB.set_setting("google_connection_disabled", "0")
@@ -3068,7 +3101,14 @@ class AppHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": True, "state": app_state()})
 
     def log_message(self, format: str, *args: Any) -> None:
-        print(f"{self.address_string()} - {format % args}")
+        safe_args = list(args)
+        if safe_args and isinstance(safe_args[0], str):
+            safe_args[0] = re.sub(
+                r"(/api/google/oauth/callback)\?[^ ]+",
+                r"\1?[redacted]",
+                safe_args[0],
+            )
+        print(f"{self.address_string()} - {format % tuple(safe_args)}")
 
 
 def run(host: str = "127.0.0.1", port: int = 8000) -> None:
@@ -3077,10 +3117,7 @@ def run(host: str = "127.0.0.1", port: int = 8000) -> None:
             "This MVP is local-only. Put it behind authenticated HTTPS before sharing it."
         )
     server = ThreadingHTTPServer((host, port), AppHandler)
-    # Saved setup is reusable; starting Brightline does not activate Google access.
-    DB.set_setting("google_connection_disabled", "1")
-    DB.set_setting("google_connection_status", "disconnected")
-    DB.set_setting("google_connection_error", "")
+    restore_google_connection()
     print(f"Brightline Reports: http://{host}:{port}")
     if os.environ.get("BRIGHTLINE_PASSWORD"):
         print("Password protection is enabled.")

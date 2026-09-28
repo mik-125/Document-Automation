@@ -513,10 +513,14 @@ class GoogleWorkspace:
             self._credentials = credentials
         except Exception as exc:
             raise IntegrationError(
-                "Your Google authorization expired. Reconnect your account.",
+                "Google connection expired. Reconnect.",
                 "google_oauth_required",
             ) from exc
         return self._credentials
+
+    def validate_saved_credentials(self) -> None:
+        """Load and refresh the saved token without exposing credential data."""
+        self._load_credentials()
 
     def account_email(self) -> str:
         if self._account_email:
@@ -600,7 +604,7 @@ class GoogleWorkspace:
         elif status == 400:
             message, code = "Google rejected the request. Check the file URL and sheet contents.", "invalid_google_request"
         elif status == 401:
-            message, code = "Your Google authorization expired. Reconnect your account.", "google_oauth_required"
+            message, code = "Google connection expired. Reconnect.", "google_oauth_required"
         elif status == 403:
             message, code = (
                 "Google denied access. Confirm that the connected account can open this file.",

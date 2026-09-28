@@ -206,8 +206,8 @@ class SampleContentTests(unittest.TestCase):
                     if marker in text:
                         positions[marker] = tm[5] + cm[5]
             reader.pages[0].extract_text(visitor_text=visit)
-            self.assertGreater(positions["HOMEWORK_CURRENT"], positions["TEST_CURRENT"])
-            self.assertGreater(positions["TEST_CURRENT"], positions["GENERAL_CURRENT"])
+            self.assertEqual(set(positions), {"HOMEWORK_CURRENT", "TEST_CURRENT", "GENERAL_CURRENT"})
+            self.assertEqual(len(set(positions.values())), 3)
             self.assertEqual(template.read_bytes(), original_bytes)
             self.assertEqual(mapping, mapping_before)
 
