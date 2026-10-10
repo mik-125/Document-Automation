@@ -7,9 +7,10 @@ import os
 import tempfile
 import unittest
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
 import re
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 _SERVER_DATA = tempfile.TemporaryDirectory()
 atexit.register(_SERVER_DATA.cleanup)
@@ -921,13 +922,14 @@ class ImportSafetyTests(unittest.TestCase):
             "2026-08-24", "2026-08-30", "Week 2"
         )
         app_server.DB.select_class_period(class_id, second_period["id"])
-        self.assertTrue(
-            app_server.class_period_has_assignment_and_test(
-                class_id, first_period["id"]
-            )
+        status = next(
+            item for item in app_server.period_input_matrix()[0]
+            if item["class_id"] == class_id and item["period_id"] == first_period["id"]
         )
+        self.assertEqual(status["student_count"], 1)
+        self.assertTrue(status["comments_allowed"])
 
-    def test_comments_pdf_namespaces_labels_and_reviews_unready_students(self) -> None:
+    def test_comments_pdf_namespaces_labels_and_matches_class_students_without_week_data(self) -> None:
         mapping = {
             key: value
             for key, value in self.assignment_mapping().items()
@@ -1021,14 +1023,10 @@ class ImportSafetyTests(unittest.TestCase):
             {exam["label"] for exam in mark_exams},
             {"Week 1", "Teacher comment · Week 1"},
         )
-        self.assertEqual(
-            app_server.DB.get_exams(students["June"]["id"], first_period["id"]), []
-        )
-        issue = app_server.DB.state()["issues"][0]
-        with self.assertRaisesRegex(ValueError, "still needs Assignment"):
-            app_server.AppHandler._resolve_issue(
-                None, issue["id"], {"student_id": students["June"]["id"]}
-            )
+        # Exact class-scoped names match even without this week's Sheet data.
+        june_exams = app_server.DB.get_exams(students["June"]["id"], first_period["id"])
+        self.assertEqual([exam["comment"] for exam in june_exams], ["Good effort."])
+        self.assertEqual(app_server.DB.state()["issues"], [])
 
         import_count = len(app_server.DB.state()["files"])
         with patch.object(
@@ -1338,6 +1336,44 @@ class ImportSafetyTests(unittest.TestCase):
 
 
 class DatabaseReadinessTests(unittest.TestCase):
+    def test_preview_can_show_low_confidence_routing_without_enabling_download(self) -> None:
+        database = Mock()
+        database.get_student_for_period.return_value = {
+            "id": "student",
+            "class_id": "class",
+            "period_id": "week",
+            "period_end": "2026-09-20",
+            "homework_json": "[]",
+            "homework_completed": 1,
+        }
+        database.get_exams.return_value = [
+            {"comment_section": "homework", "comment": "Complete the assigned practice."},
+            {"comment_section": "weekly_test", "comment": "Review atomic structure.", "score": 84},
+        ]
+        database.get_class_template_version.return_value = None
+        database.connect.return_value = nullcontext(Mock(execute=Mock(return_value=[])))
+        routed = {
+            "sections": {
+                "homework": "Complete the assigned practice.",
+                "weekly_test": "Review atomic structure.",
+                "general": "",
+            },
+            "decisions": [{"requires_review": True}],
+        }
+        with (
+            patch.object(app_server, "DB", database),
+            patch.object(app_server, "class_example_manifest", return_value=[]),
+            patch.object(app_server, "organize_comments", return_value=routed),
+        ):
+            with self.assertRaisesRegex(app_server.ValidationError, "routing needs review"):
+                app_server.get_ready_student("student", "week")
+            preview = app_server.get_ready_student(
+                "student",
+                "week",
+                allow_routing_review=True,
+            )
+        self.assertEqual(preview["comments_by_section"], routed["sections"])
+
     def test_existing_period_label_is_not_silently_renamed(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             database = Database(Path(folder) / "brightline.db")
@@ -1522,6 +1558,16 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("decision.signals", source)
         self.assertIn("missing_test_score_warning", source)
         self.assertIn("A Weekly Test score is stored", source)
+
+    def test_routing_review_keeps_preview_available_but_blocks_download(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        server = (root / "backend" / "server.py").read_text(encoding="utf-8")
+        frontend = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('student["preview_ready"]', server)
+        self.assertIn("allow_routing_review=preview", server)
+        self.assertIn("student.preview_ready", frontend)
+        self.assertIn("previewable} previewable", frontend)
+        self.assertRegex(frontend, r"downloadAction\s*=\s*student\.report_ready")
 
     def test_static_javascript_ids_exist_once_in_html(self) -> None:
         root = (Path(__file__).resolve().parent.parent / "frontend")

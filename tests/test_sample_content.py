@@ -91,7 +91,8 @@ class SampleContentTests(unittest.TestCase):
             self.assertEqual(sum(bool(v) for v in result["sections"].values()), 1)
 
     def test_classes_do_not_share_sample_headings_or_reuse_sample_words(self):
-        exam = {"comment": "General comments:\nKeep this source text.", "comment_section": "weekly_test"}
+        # Legacy rows without an explicit section are the only ones routed by headings.
+        exam = {"comment": "General comments:\nKeep this source text."}
         class_a = {"sections": [{"section": "general"}]}
         class_b = {"sections": [{"section": "homework"}]}
         self.assertEqual(organize_comments([exam], class_a)["sections"]["general"], exam["comment"])
@@ -119,7 +120,7 @@ class SampleContentTests(unittest.TestCase):
         result = organize_comments([{"comment": comment, "comment_section": "homework"}], guide)
         self.assertEqual(result["sections"]["homework"], comment)
 
-    def test_server_prepares_class_specific_sections_for_actual_report_generation(self):
+    def test_server_keeps_explicit_sections_whole_for_actual_report_generation(self):
         from backend import server
         from contextlib import nullcontext
         student = {"id": "student", "class_id": "class", "period_id": "week",
@@ -136,10 +137,13 @@ class SampleContentTests(unittest.TestCase):
         with patch.object(server, "DB", database), patch.object(server, "class_example_manifest", return_value=[example]) as manifest:
             payload = server.get_ready_student("student", "week")
         manifest.assert_called_once_with("class")
-        self.assertIn("Do the assigned practice.", payload["comments_by_section"]["homework"])
-        self.assertIn("Check units.", payload["comments_by_section"]["weekly_test"])
+        # An explicitly imported Weekly Test comment is never re-routed or split.
+        self.assertEqual(payload["comments_by_section"]["homework"], "")
+        self.assertEqual(payload["comments_by_section"]["weekly_test"],
+                         "Homework\nDo the assigned practice.\nWeekly Test\nCheck units.")
+        self.assertFalse(any(item["requires_review"] for item in payload["comment_placement"]))
 
-    def test_missing_test_feedback_policy_allows_pdf_without_score_but_requires_homework(self):
+    def test_missing_test_feedback_policy_and_missing_data_never_block(self):
         from backend import server
         from contextlib import nullcontext
         database=Mock()
@@ -155,12 +159,16 @@ class SampleContentTests(unittest.TestCase):
             self.assertTrue(payload['missing_test_feedback_assumption'])
             self.assertEqual(payload['comments_by_section']['weekly_test'],'')
             database.get_exams.return_value=[]
-            with self.assertRaisesRegex(ValidationError,'homework comment'):
+            self.assertTrue(server.get_ready_student('student','week')['missing_test_feedback_assumption'])
+            database.get_student_for_period.return_value={
+                'id':'student','class_id':'class','period_id':'week','period_end':'2026-09-20',
+                'homework_json':'[]','homework_completed':0}
+            with self.assertRaisesRegex(ValidationError,'no data'):
                 server.get_ready_student('student','week')
             database.get_exams.return_value=[{'comment_section':'homework','comment':'Practice was assigned.'}]
             database.get_class_template_version.return_value=None
-            with self.assertRaisesRegex(ValidationError,'Weekly Test score'):
-                server.get_ready_student('student','week')
+            payload=server.get_ready_student('student','week')
+            self.assertFalse(payload['missing_test_feedback_assumption'])
 
     def test_different_sample_design_cannot_change_original_pdf_or_mapped_positions(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -46,12 +46,16 @@ The browser upload workflow does not accept CSV. Mapped CSV and the legacy Royal
 ## Required user workflow and readiness
 
 1. Connect Google and import homework plus Weekly Test scores from one Google Sheet. This creates reporting periods, classes, and students. Blank reimported scores preserve existing scores; zero is a valid score.
-2. Add the required 과제이행도 comment for the same class and period through a searchable individual PDF or a shared class comment.
-3. Import searchable Weekly Test comments, general comments, or both. Each PDF represents exactly one class. Unknown or ambiguous students must go to manual review.
+2. Add the 과제이행도 comment for the same class and period through a searchable individual PDF or a shared class comment. In a shared comment, a `___` placeholder is printed as the student's display name.
+3. Import searchable Weekly Test comments, general comments, or both. Each PDF represents exactly one class. A Weekly Test or general PDF may go into a week that has no Sheet data yet (for example a new week from "+ Add week"). Unknown or ambiguous students must go to manual review.
 4. Configure each class with either an original blank PDF whose mapping is reviewed and published, or a Google Docs template containing all required placeholders.
 5. Resolve unmatched comments, preview at least one report, then download individual reports or a class ZIP. Ready students may generate while classmates remain incomplete.
 
-Normal readiness requires assignment data, the required 과제이행도 comment, a Weekly Test score, and at least one Weekly Test or general comment. The only exception is the documented missing-test-feedback policy below.
+A week's roster is every student with Sheet data or any imported score/comment in that week. Missing data never blocks an otherwise valid report: a rostered student is ready when the class template is ready and the student has at least one of homework entries, a 과제이행도 comment, a Weekly Test comment, a general comment, or a Weekly Test score. Missing pieces are omitted or left blank, never invented or replaced by generated text.
+
+Weekly Test score precedence: a Sheet score wins; otherwise a score PDF's own `총점: X / Y` line is used (percent = X / Y × 100). Q scores are never summed.
+
+Multi-student comment PDFs identify each student by a standalone name line, or by a score block (총점/Q-score lines, optional `Overall Feedback`) whose comment opens with `OOO 학생은`. Score blocks with no name, several names, or a non-opening name go to manual review.
 
 Student matching should use a stable Student ID. Without one, accept only an exact, unambiguous name within the class, optionally narrowed by school or grade. Never guess identity.
 
@@ -59,7 +63,8 @@ Student matching should use a stable Student ID. Without one, accept only an exa
 
 - The original blank PDF is the design authority for pages, artwork, structure, section positions, and confirmed mappings.
 - A completed sample is class-specific content evidence only. It must never become a background or a source of another student's identity, scores, comments, or wording.
-- Preserve each teacher's exact wording and source-section boundaries. Routing may organize intact passages but must not paraphrase, invent, lose, or duplicate content.
+- Preserve each teacher's exact wording, characters (superscripts/subscripts such as O²⁻ and CaCO₃), paragraph breaks, date lines, and source-section boundaries. A comment imported into an explicit section stays in that section. Routing may organize intact passages but must not paraphrase, invent, lose, or duplicate content.
+- Approved display-only transforms (stored data is never changed): the 성명 field drops a leading `(ON)`; the class line drops bracketed tags such as `[25FA]`; `___` in the 과제이행도 comment becomes the display name; a character the font cannot draw is drawn as its plain look-alike (`−` → `–`, `ₓ` → `x`).
 - Evaluate every class and report format independently. Do not generalize headings, fonts, charts, routing, or layouts from one subject.
 - This is searchable-PDF parsing and local evidence-based routing, not OCR or general semantic AI. Ambiguous or unsupported content requires review instead of guessing.
 - Only a published PDF mapping drives report generation. Saving a draft does not activate it. Publishing is a local configuration action, not public transmission.
@@ -69,8 +74,10 @@ Student matching should use a stable Student ID. Without one, accept only an exa
 
 - Never clip, truncate, silently discard, or duplicate source text. If the rules cannot be satisfied, return an actionable review error.
 - Preserve Korean and English words, identifiers, decimals, numbered question blocks, paragraph order, and section ownership across line and page boundaries.
-- Fit recognized original-PDF panels from each class sample's observed body size and fill. Test and teacher text may shrink below 8 points, but 7 points is the hard safety floor.
-- Weekly Test feedback stays inside its first original text panel. Shrink it as needed; do not create a Weekly Test continuation page. Changing this rule requires explicit product approval and synchronized updates to all contract documents and tests.
+- Comment text starts at 10.5 points. 과제이행도 text may shrink to fit its panel (7-point floor).
+- Weekly Test feedback (approved by the product owner) never shrinks below 10 points. It fills the space beside the Weekly Test graph, then the full width below it, then continues on generated pages built from the original template page: page background kept, content area cleared, the template's own 위클리 테스트 heading bar, and a full-width bordered box.
+- When a student has no general (선생님 코멘트) comment, that panel is hidden and the Weekly Test panel extends into its space.
+- Graphs come from data, not sample detection: 과제이행도 shows daily A/B/F status (X/blank = gap) for the week, titled `(ON)Name (과제 - class)` with `기간`; 위클리 테스트 shows 학생점수, 평균, 최고점, 최저점 percentages per week (class figures computed from all scored students), titled `(ON)Name (WT - class)` with `기간`. No data means no graph.
 - Additional teacher-comment pages are allowed only when the final comment panel is at least half occupied. Compact sparse remainders into earlier panels.
 - Teacher overflow pages must derive from an appropriate original full-width feedback page, relabeled for the overflowing section. If unavailable, repeat the original section panel. Never derive layout or artwork from a completed sample.
 - Omit unused trailing original pages. Preserve the original backgrounds and stored mapping.
@@ -84,7 +91,6 @@ For a ready, published PDF template whose completed-sample analysis reliably ide
 - Replace the Weekly Test narrative with: `학생은 이번 위클리 테스트를 응시하지 않았기에 정확한 이해도 판단이 어렵습니다. 위클리 테스트를 나중에 한 번 풀어보시는 것을 추천드립니다.`
 - Suppress the Weekly Test graph and fit the report on one page.
 - Do not alter the stored score, source comments, or claim verified attendance.
-- Assignment data and 과제이행도 comments remain required.
 - This exception does not apply to Google Docs or PDF templates without the required sample evidence.
 
 ## Architecture map

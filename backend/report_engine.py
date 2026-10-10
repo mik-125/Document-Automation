@@ -292,7 +292,7 @@ def _narrative_name(text: str) -> str | None:
 def _is_comment_score_line(line: str) -> bool:
     score = r"\d+(?:\.\d+)?\s*/\s*\d+(?:\.\d+)?"
     return bool(re.fullmatch(
-        rf"(?:총점\s*[:：]\s*{score}|Q\s*\d+\s*\([^()]+\)\s*[:：]\s*{score}"
+        rf"(?:총점\s*[:：]\s*{score}(?:\s*\([^()]*\))?|Q\s*\d+\s*\([^()]+\)\s*[:：]\s*{score}"
         rf"(?:\s*\(\s*전체\s*평균\s*[:：]\s*{score}\s*\))?)",
         normalize_spaces(line), re.IGNORECASE,
     ))
@@ -349,6 +349,80 @@ def _inline_comment_records(
     return records
 
 
+def _scored_narrative_records(
+    pages: list[str], label: str, source_name: str
+) -> list[dict[str, Any]] | None:
+    """Split a multi-student narrative PDF into blocks that each start with score lines.
+
+    A block is score lines (usually led by 총점), an optional "Overall Feedback"
+    heading, then the comment. Only a comment that opens with exactly one
+    "OOO 학생은" name is assigned; every other block is marked for manual review.
+    """
+    # Collapse whitespace only: NFKC would turn O²⁻ / CaCO₃ into O2− / CaCO3.
+    lines: list[str] = []
+    for page in pages:
+        page_lines = [_collapse_spaces(line) for line in page.splitlines()]
+        # Blank lines at page edges are margins, not paragraph breaks.
+        while page_lines and not page_lines[0]:
+            page_lines.pop(0)
+        while page_lines and not page_lines[-1]:
+            page_lines.pop()
+        lines.extend(page_lines)
+    totals = [index for index, line in enumerate(lines)
+              if line.startswith("총점") and _is_comment_score_line(line)]
+    first = next((index for index, line in enumerate(lines) if line), None)
+    if len(totals) < 2 or totals[0] != first:
+        return None
+    # A score run after comment text starts a new block even if its 총점 line is
+    # missing, so two students' comments are never merged into one record.
+    starts, previous = [], ""
+    for index, line in enumerate(lines):
+        if not line:
+            continue
+        if _is_comment_score_line(line) and not (previous and _is_comment_score_line(previous)):
+            starts.append(index)
+        previous = line
+    gap = _line_gap(pages)
+    records = []
+    for number, start in enumerate(starts, 1):
+        end = starts[number] if number < len(starts) else len(lines)
+        body = lines[start + 1:end]
+        index = 0
+        while index < len(body) and (not body[index] or _is_comment_score_line(body[index])):
+            index += 1
+        if index < len(body) and body[index].casefold() == "overall feedback":
+            index += 1
+        content = body[index:]
+        while content and not content[0]:
+            content.pop(0)
+        while content and not content[-1]:
+            content.pop()
+        if not content:
+            raise ValidationError(f"No teacher comment could be extracted for block {number} ({lines[start]}).")
+        names = list(dict.fromkeys(name for line in content if (name := _narrative_name(line))))
+        # Only the block's own 총점 line supplies a score; Q scores are never summed.
+        total = next((match for line in [lines[start], *body[:index]]
+                      if (match := re.match(r"총점\s*[:：]\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", line))),
+                     None)
+        record = {
+            "name": names[0] if names else "", "label": label,
+            "score": float(total.group(1)) if total else None,
+            "max_score": float(total.group(2)) if total else None,
+            "sections": [], "comment": _preserve_comment_sections("\n".join(content), gap),
+            "source_name": source_name,
+        }
+        if len(names) > 1:
+            record["review_reason"] = "This comment names more than one student"
+        elif not names:
+            record["review_reason"] = "No student name was found in this comment"
+        elif _narrative_name(content[0]) != names[0]:
+            record["review_reason"] = "This comment does not start with the student's name"
+        if "review_reason" in record:
+            record["name"] = f"{' / '.join(names) or 'Unnamed comment'} · block {number} ({lines[start]})"
+        records.append(record)
+    return records
+
+
 def _narrative_comment_records(
     pages: list[str], label: str, source_name: str
 ) -> list[dict[str, Any]] | None:
@@ -383,22 +457,64 @@ def _narrative_comment_records(
     }]
 
 
-def _preserve_comment_sections(text: str) -> str:
-    """Retain explicit section boundaries while joining PDF visual line wraps."""
+def _collapse_spaces(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def _line_gap(pages: list[str]) -> int:
+    """Smallest run of blank lines between text lines on a page: the line spacing.
+
+    Measured within pages only; a page join has no blank lines and is not spacing.
+    """
+    runs = []
+    for page in pages:
+        blanks, seen = 0, False
+        for line in page.splitlines():
+            if line.strip():
+                if seen:
+                    runs.append(blanks)
+                seen, blanks = True, 0
+            else:
+                blanks += 1
+    return min(runs, default=0)
+
+
+def _preserve_comment_sections(text: str, line_gap: int | None = None) -> str:
+    """Join PDF visual line wraps, keeping headings, paragraphs and date/bullet lines.
+
+    A gap wider than the document's normal line spacing becomes a paragraph break
+    (a blank line); a line starting with a date such as 7/20 or a bullet stays on
+    its own line.
+    """
+    lines = text.splitlines()
+    gap = _line_gap([text]) if line_gap is None else line_gap
     blocks: list[str] = []
     body: list[str] = []
-    for line in text.splitlines():
+    blanks = 0
+
+    def flush() -> None:
+        if body:
+            blocks.append(_collapse_spaces(" ".join(body)))
+            body.clear()
+
+    for line in lines:
+        if not line.strip():
+            blanks += 1
+            continue
+        if blanks > gap and (body or blocks):
+            flush()
+            blocks.append("")
+        blanks = 0
         candidate = re.split(r"[:：]", line, maxsplit=1)[0]
         if heading_section(line) or heading_section(candidate):
-            if body:
-                blocks.append(normalize_spaces(" ".join(body)))
-                body = []
-            blocks.append(normalize_spaces(line))
-        else:
-            body.append(line)
-    if body:
-        blocks.append(normalize_spaces(" ".join(body)))
-    return "\n".join(block for block in blocks if block)
+            flush()
+            blocks.append(_collapse_spaces(line))
+            continue
+        if re.match(r"\s*(?:\d{1,2}[/.-]\d{1,2}|[-•▪])", line):
+            flush()
+        body.append(line)
+    flush()
+    return "\n".join(blocks).strip()
 
 
 def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[dict[str, Any]]:
@@ -413,6 +529,9 @@ def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[di
         raise ValidationError("The comments PDF has no searchable text. Scanned PDFs need OCR.")
 
     layout_pages = [page.extract_text(extraction_mode="layout") or "" for page in reader.pages]
+    scored_records = _scored_narrative_records(layout_pages, label, source_name)
+    if scored_records:
+        return scored_records
     # An opening student introduction is stronger evidence than an isolated
     # body subheading such as "Atomic Structure", which can resemble a name.
     narrative_records = _narrative_comment_records(layout_pages, label, source_name)
@@ -481,7 +600,7 @@ def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[di
             comment_start = section_matches[-1].end()
         elif score_match:
             comment_start = score_match.end()
-        comment = body[comment_start:].strip(" -")
+        comment = body[comment_start:].strip(" -\n")
         _validate_comment_name(name, comment)
         records.append(
             {
@@ -495,6 +614,30 @@ def parse_comment_pdf(pdf_bytes: bytes, label: str, source_name: str) -> list[di
             }
         )
     return records
+
+
+def parse_shared_comment_pdf(pdf_bytes: bytes) -> str:
+    """Extract one class-wide homework comment from a searchable PDF."""
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+    except Exception as exc:
+        raise ValidationError("The comments PDF could not be read.") from exc
+    if reader.is_encrypted:
+        raise ValidationError("Encrypted comments PDFs are not supported.")
+
+    pages = [page.extract_text(extraction_mode="layout") or "" for page in reader.pages]
+    if not any(page.strip() for page in pages):
+        raise ValidationError("The comments PDF has no searchable text. Scanned PDFs need OCR.")
+
+    gap = _line_gap(pages)
+    comment = "\n\n".join(
+        page_comment
+        for page in pages
+        if (page_comment := _preserve_comment_sections(page, gap))
+    ).strip()
+    if not comment:
+        raise ValidationError("No homework comment could be extracted from this PDF.")
+    return comment
 
 
 def _draw_template_header(c: canvas.Canvas, *, continuation: bool = False) -> None:

@@ -90,9 +90,7 @@ class WeekUploadWorkflowTests(unittest.TestCase):
             daily = json.loads(saved["homework_json"])
             self.assertEqual([entry["date"] for entry in daily], ["2026-07-13", "2026-07-14"])
             self.assertEqual([entry["value"] for entry in daily], ["A", "F"] if student["name"] == "Student One" else ["B", ""])
-        self.assertTrue(app_server.class_period_has_assignment_and_test(
-            state["classes"][0]["id"], state["periods"][0]["id"]
-        ))
+        self.assertTrue(app_server.period_input_matrix()[0][0]["weekly_test_ready"])
 
     def test_combined_sheet_blank_scores_preserve_existing_tests(self) -> None:
         self.combined_import()
@@ -138,7 +136,7 @@ class WeekUploadWorkflowTests(unittest.TestCase):
         self.assertEqual(state["periods"], [])
         self.assertEqual(state["files"], [])
 
-    def test_comments_are_locked_until_every_roster_student_has_a_test(self) -> None:
+    def test_comments_are_allowed_before_every_roster_student_has_a_test(self) -> None:
         period_id = self.import_assignment()
         period = app_server.DB.get_period(period_id)
         app_server.import_mapped_table(
@@ -158,9 +156,9 @@ class WeekUploadWorkflowTests(unittest.TestCase):
             source_provider="manual",
         )
         class_id = app_server.DB.state()["classes"][0]["id"]
-        self.assertFalse(app_server.class_period_has_assignment_and_test(class_id, period_id))
         status = app_server.period_input_matrix()[0][0]
-        self.assertFalse(status["comments_allowed"])
+        self.assertFalse(status["weekly_test_ready"])
+        self.assertTrue(status["comments_allowed"])
 
         app_server.import_mapped_table(
             values=[
@@ -178,7 +176,7 @@ class WeekUploadWorkflowTests(unittest.TestCase):
             source_name="Tests-2.csv",
             source_provider="manual",
         )
-        self.assertTrue(app_server.class_period_has_assignment_and_test(class_id, period_id))
+        self.assertTrue(app_server.period_input_matrix()[0][0]["weekly_test_ready"])
         self.assertTrue(app_server.period_input_matrix()[0][0]["comments_allowed"])
 
     def test_all_excluded_assignment_still_defines_week_roster(self) -> None:
@@ -450,6 +448,8 @@ const context = {
         render = self.section("renderUploadModal", "openUploadModal")
         self.assertNotIn("Upload CSV", render)
         self.assertIn("Upload comments PDF", render)
+        self.assertIn("Upload one comment PDF for everyone", render)
+        self.assertIn("Applies the PDF’s searchable text to every student", render)
 
     def test_pdf_class_choices_explain_unavailable_classes_without_auto_selecting(self) -> None:
         node = shutil.which("node")
@@ -461,27 +461,37 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const source = fs.readFileSync("app.js", "utf8");
 const editor = source.slice(source.indexOf("function uploadStageEditor("), source.indexOf("function stagedSourceRow("));
+const accepts = source.slice(source.indexOf("function classAcceptsComments("), source.indexOf("function periodOptions("));
 const stage = {mode: "comments_pdf", classId: "", label: "Week 1"};
 const statuses = {
-  ess: {comments_allowed: true, assignment_ready: true},
-  chem: {comments_allowed: false, assignment_ready: true},
-  other: {comments_allowed: false, assignment_ready: false},
+  ess: {comments_allowed: true},
+  chem: {},
+  other: {},
 };
 const context = {
+  uploadSession: {kind: "weekly_test_comment"},
   currentUploadStage: () => stage,
   uploadTargetPeriod: () => ({id: "week1"}),
-  state: {classes: [{id: "ess", name: "ESS"}, {id: "chem", name: "Chemistry"}, {id: "other", name: "Other"}]},
+  state: {classes: [{id: "ess", name: "ESS", student_count: 2}, {id: "chem", name: "Chemistry", student_count: 3}, {id: "other", name: "Other", student_count: 0}]},
   statusForClassPeriod: id => statuses[id],
   escapeHtml: text => text,
 };
-let html = vm.runInNewContext(editor + "\nuploadStageEditor()", context);
-assert.match(html, /value="chem"[^>]*disabled[^>]*>Chemistry — Weekly Test scores missing/);
-assert.match(html, /value="other"[^>]*disabled[^>]*>Other — Homework missing for this week/);
+const run = () => vm.runInNewContext(accepts + editor + "\nuploadStageEditor()", context);
+// A class with students accepts Weekly Test comments even without this week's Sheet data.
+let html = run();
+assert.match(html, /value="chem"[^>]*>Chemistry<\/option>/);
+assert.doesNotMatch(html, /value="chem"[^>]*disabled/);
+assert.match(html, /value="other"[^>]*disabled[^>]*>Other — No students yet/);
 assert.doesNotMatch(html, /<option[^>]*selected/);
 assert.equal(stage.classId, "");
+// A shared 과제이행도 comment needs the week's roster.
+context.uploadSession.kind = "homework_comment";
+html = run();
+assert.match(html, /value="chem"[^>]*disabled[^>]*>Chemistry — No students in this week yet/);
+assert.doesNotMatch(html, /value="ess"[^>]*disabled/);
 statuses.chem.comments_allowed = true;
 stage.classId = "chem";
-html = vm.runInNewContext(editor + "\nuploadStageEditor()", context);
+html = run();
 assert.match(html, /value="chem"[^>]*selected[^>]*>Chemistry<\/option>/);
 assert.doesNotMatch(html, /value="chem"[^>]*disabled/);
 '''
@@ -597,6 +607,7 @@ const sections = {homework_comment: "homework", weekly_test_comment: "weekly_tes
       captureUploadFields() {}, currentUploadStage: () => session.stage,
       uploadTargetPeriod: () => ({id: "week-2", label: "Week 2"}), uploadPrerequisite: () => ({ready: true}),
       statusForClassPeriod: (classId, periodId) => ({comments_allowed: classId === "class-b" && periodId === "week-2"}),
+      classById: id => ({id}), classAcceptsComments: (item, periodId) => item.id === "class-b" && periodId === "week-2",
       renderUploadModal() {}, api: async (url, options) => {requests.push({url, payload: JSON.parse(options.body)}); return {state: {}};},
       arrayBufferToBase64: () => "pdf-data", normalizeState: value => value,
       reconcileUploadDraftPeriods() {}, closeModal() {}, render() {}, showCommentImportResult() {}, toast: message => {throw Error(message);},
@@ -614,6 +625,7 @@ const sections = {homework_comment: "homework", weekly_test_comment: "weekly_tes
     captureUploadFields() {}, currentUploadStage: () => session.stage,
     uploadTargetPeriod: () => ({id: "week-2", label: "Week 2"}), uploadPrerequisite: () => ({ready: true}),
     statusForClassPeriod: () => ({comments_allowed: true}), renderUploadModal() {},
+    classById: id => ({id}), classAcceptsComments: () => true,
     api: async (url, options) => {requests.push({url, payload: JSON.parse(options.body)}); return {state: {}};},
     normalizeState: value => value, reconcileUploadDraftPeriods() {}, closeModal() {}, render() {}, toast: message => errors.push(message),
   };
@@ -654,7 +666,7 @@ for (const kind of ["homework_comment", "weekly_test_comment", "general_comment"
         subprocess.run([node, "-e", script], cwd=(Path(__file__).resolve().parent.parent / "frontend"),
                        check=True, capture_output=True, text=True)
 
-    def test_report_reason_requires_homework_and_either_other_comment(self) -> None:
+    def test_report_reason_never_blocks_for_missing_pieces(self) -> None:
         node = shutil.which("node")
         if not node:
             self.skipTest("Node.js is required for readiness behavior checks.")
@@ -664,10 +676,15 @@ const source = fs.readFileSync("app.js", "utf8");
 const reason = source.slice(source.indexOf("function reportReason("), source.indexOf("function renderReports("));
 const context = {}; vm.createContext(context); vm.runInContext(reason, context);
 for (const homework of [false, true]) for (const weekly of [false, true]) for (const general of [false, true]) {
- const student = {assignment_ready: true, weekly_test_ready: true, template_ready: true, output_ready: true,
+ const student = {ready: true, assignment_ready: true, weekly_test_ready: true, template_ready: true, output_ready: true,
  homework_comment_ready: homework, weekly_test_comment_ready: weekly, general_comment_ready: general};
- assert.equal(context.reportReason(student) === "Ready", homework && (weekly || general));
+ const reason = context.reportReason(student);
+ assert.ok(reason.startsWith("Ready"), reason);
+ assert.equal(reason === "Ready", homework && weekly && general);
+ if (!homework) assert.match(reason, /missing .*과제이행도 comment/);
 }
+assert.equal(context.reportReason({ready: false, template_ready: true, output_ready: true}), "No data for this week");
+assert.equal(context.reportReason({ready: true, template_ready: false}), "Template missing");
 '''
         subprocess.run([node, "-e", script], cwd=(Path(__file__).resolve().parent.parent / "frontend"),
                        check=True, capture_output=True, text=True)

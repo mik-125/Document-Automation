@@ -18,7 +18,13 @@ os.environ.setdefault("BRIGHTLINE_DATA_DIR", _SERVER_DATA.name)
 
 from backend import server as app_server
 from backend.database import Database
-from backend.report_engine import ValidationError, _inline_comment_records, parse_comment_pdf, register_fonts
+from backend.report_engine import (
+    ValidationError,
+    _inline_comment_records,
+    parse_comment_pdf,
+    parse_shared_comment_pdf,
+    register_fonts,
+)
 
 
 def comments_pdf(pages: list[list[str]]) -> bytes:
@@ -34,6 +40,15 @@ def comments_pdf(pages: list[list[str]]) -> bytes:
 
 
 class CommentPdfParsingTests(unittest.TestCase):
+    def test_shared_comment_pdf_extracts_one_class_wide_comment(self):
+        pdf = comments_pdf([["This week's shared homework feedback.", "Review ionic bonding."],
+                            ["Next, practise Lewis structures."]])
+        self.assertEqual(
+            parse_shared_comment_pdf(pdf),
+            "This week's shared homework feedback. Review ionic bonding.\n\n"
+            "Next, practise Lewis structures.",
+        )
+
     def test_names_and_comments_on_same_page(self):
         records = parse_comment_pdf(comments_pdf([
             ["(ON) Mark", "", "First student's comment.", "", "June", "", "Second student's comment."]
@@ -98,7 +113,7 @@ class CommentPdfParsingTests(unittest.TestCase):
         ]), "Week 1", "comments.pdf")
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["comment"],
-                         "엄현우 학생은 계산을 잘했습니다. 다음 단계에서는 단위도 확인해 주세요. "
+                         "엄현우 학생은 계산을 잘했습니다. 다음 단계에서는 단위도 확인해 주세요.\n\n"
                          "엄현우 학생이 계속 성장하기를 바랍니다.")
 
     def test_narrative_subheading_is_retained_instead_of_treated_as_a_student(self):
@@ -127,6 +142,64 @@ class CommentPdfParsingTests(unittest.TestCase):
         ]:
             with self.subTest(pages=pages), self.assertRaisesRegex(ValidationError, "more than one student"):
                 parse_comment_pdf(comments_pdf(pages), "Week 1", "comments.pdf")
+
+    def test_scored_blocks_split_one_student_per_total_score_line(self):
+        records = parse_comment_pdf(comments_pdf([
+            ["총점: 18 / 21 (전체 평균: 15.1 / 21)", "", "Q1 (Moles): 3 / 4 (전체 평균: 3.2 / 4)",
+             "", "Overall Feedback", "", "엄현우 학생은 계산을 잘했습니다.", "엄현우 학생은 성실합니다."],
+            ["다음 주에도 복습해 주세요.", "", "총점: 12 / 21", "", "Overall Feedback", "",
+             "엄하진 학생은 개념 복습이 필요합니다."],
+        ]), "Week 1", "comments.pdf")
+        self.assertEqual([(record["name"], record["comment"]) for record in records], [
+            ("엄현우", "엄현우 학생은 계산을 잘했습니다. 엄현우 학생은 성실합니다. 다음 주에도 복습해 주세요."),
+            ("엄하진", "엄하진 학생은 개념 복습이 필요합니다."),
+        ])
+        self.assertFalse(any("review_reason" in record for record in records))
+        # Each block keeps only its own 총점 as a fallback score; Q scores are not summed.
+        self.assertEqual([(record["score"], record["max_score"]) for record in records],
+                         [(18, 21), (12, 21)])
+
+    def test_paragraphs_dates_and_superscripts_are_preserved(self):
+        records = parse_comment_pdf(comments_pdf([
+            ["총점: 8 / 10", "", "", "엄현우 학생은 Na⁺와 O²⁻를 비교했습니다.", "CaCO₃ 계산도 했습니다.",
+             "", "", "Q1에서는 잘했습니다.", "", "", "총점: 7 / 10", "", "", "엄하진 학생은 성실합니다."],
+        ]), "Week 1", "comments.pdf")
+        self.assertEqual(records[0]["comment"],
+                         "엄현우 학생은 Na⁺와 O²⁻를 비교했습니다. CaCO₃ 계산도 했습니다.\n\nQ1에서는 잘했습니다.")
+        shared = parse_shared_comment_pdf(comments_pdf([
+            ["___ 학생은 과제를 완성했습니다.", "7/20: Electron configuration", "7/21: Ideal gas law"]]))
+        self.assertEqual(shared, "___ 학생은 과제를 완성했습니다.\n7/20: Electron configuration\n7/21: Ideal gas law")
+
+    def test_question_scores_start_a_new_block_when_total_line_is_missing(self):
+        records = parse_comment_pdf(comments_pdf([
+            ["총점: 15 / 21", "", "엄현우 학생은 잘했습니다.", "", "총점: 9 / 21", "",
+             "엄하진 학생은 성실합니다.", "", "Q1 (Moles): 1 / 4", "", "Overall Feedback", "",
+             "엄운비 학생은 복습이 필요합니다."],
+        ]), "Week 1", "comments.pdf")
+        self.assertEqual([(record["name"], record["comment"]) for record in records], [
+            ("엄현우", "엄현우 학생은 잘했습니다."),
+            ("엄하진", "엄하진 학생은 성실합니다."),
+            ("엄운비", "엄운비 학생은 복습이 필요합니다."),
+        ])
+
+    def test_scored_blocks_without_one_clear_student_are_marked_for_review(self):
+        records = parse_comment_pdf(comments_pdf([
+            ["총점: 15 / 21", "", "엄현우 학생은 잘했습니다.", "엄하진 학생은 성실합니다."],
+            ["총점: 0 / 21 (미응시)", "", "Overall Feedback", "", "이번 시험에 응시하지 않았습니다."],
+            ["총점: 9 / 21", "", "이번 시험을 돌아보면", "엄운비 학생은 복습이 필요합니다."],
+        ]), "Week 1", "comments.pdf")
+        self.assertEqual([(record["name"], record["review_reason"]) for record in records], [
+            ("엄현우 / 엄하진 · block 1 (총점: 15 / 21)", "This comment names more than one student"),
+            ("Unnamed comment · block 2 (총점: 0 / 21 (미응시))", "No student name was found in this comment"),
+            ("엄운비 · block 3 (총점: 9 / 21)", "This comment does not start with the student's name"),
+        ])
+        self.assertEqual(records[1]["comment"], "이번 시험에 응시하지 않았습니다.")
+
+    def test_scored_block_without_comment_is_rejected(self):
+        with self.assertRaisesRegex(ValidationError, "block 2"):
+            parse_comment_pdf(comments_pdf([
+                ["총점: 8 / 10", "", "엄현우 학생은 잘했습니다.", "", "총점: 7 / 10", "", "Overall Feedback"],
+            ]), "Week 1", "comments.pdf")
 
     def test_legacy_korean_cover_and_narrative_keep_existing_score_parsing(self):
         records = parse_comment_pdf(comments_pdf([
@@ -257,6 +330,25 @@ class CommentPdfImportTests(unittest.TestCase):
                                  app_server.DB.get_exams(student["id"], self.period_id)))
         self.assertEqual(len(app_server.DB.state()["students"]), 5)
 
+    def test_scored_blocks_match_clear_students_and_queue_uncertain_blocks(self):
+        result = self.upload([
+            "총점: 18 / 21", "", "엄현우 학생은 계산을 잘했습니다.", "",
+            "총점: 0 / 21 (미응시)", "", "이번 시험에 응시하지 않았습니다.", "",
+            "총점: 15 / 21", "", "June 학생은", "엄현우 학생은 성실합니다.",
+        ])
+        self.assertEqual(result["summary"], "1 comments matched · 2 need review · 4 students missing comments")
+        self.assertEqual([item["reason"] for item in result["matching"]["unmatched_comments"]], [
+            "No student name was found in this comment",
+            "This comment does not start with the student's name",
+        ])
+        hyunwoo = app_server.DB.find_students_by_name(self.class_id, "엄현우")[0]
+        comments = [exam["comment"] for exam in app_server.DB.get_exams(hyunwoo["id"], self.period_id)
+                    if exam.get("comment")]
+        self.assertEqual(comments, ["엄현우 학생은 계산을 잘했습니다."])
+        issues = app_server.DB.state()["issues"]
+        self.assertEqual({issue["kind"] for issue in issues}, {"unmatched_comment"})
+        self.assertTrue(all(issue["candidates"] == [] for issue in issues))
+
     def test_missing_comments_are_scoped_to_the_selected_class_and_week(self):
         roster = app_server.DB.state()["students"]
         for name, class_name, period in [
@@ -312,20 +404,21 @@ class CommentPdfImportTests(unittest.TestCase):
         self.assertEqual(complete["matching"]["missing_comments"], [])
         self.assertEqual(complete["matching"]["unmatched_comments"], [])
 
-    def test_missing_comments_block_direct_generation_before_any_renderer(self):
+    def test_student_without_week_data_cannot_generate_before_any_renderer(self):
         self.upload(["Unknown", "", "Do not generate a report for this name."])
+        empty_week = app_server.DB.ensure_period("2026-07-20", "2026-07-24", "Week 2")
         with patch.object(app_server, "generate_student_pdf") as render_pdf, \
                 patch.object(app_server.GoogleWorkspace, "from_env") as google:
             for student in app_server.DB.state()["students"]:
                 for options in ({"archive": False, "preview": True}, {"archive": True}):
                     with self.subTest(student=student["id"], options=options):
-                        with self.assertRaisesRegex(ValidationError, "homework comment"):
-                            app_server.generate_report(student["id"], self.period_id, **options)
+                        with self.assertRaisesRegex(ValidationError, "no data"):
+                            app_server.generate_report(student["id"], empty_week["id"], **options)
             render_pdf.assert_not_called()
             google.assert_not_called()
         self.assertEqual(app_server.DB.state()["reports"], [])
 
-    def test_zip_uses_real_readiness_and_generates_only_students_with_matched_comments(self):
+    def test_zip_uses_real_readiness_and_missing_comments_do_not_block(self):
         self.upload(["Mark", "", "Mark's saved comment.", "", "Unknown", "",
                      "No report for this name.", "", "김민준", "", "An uncertain comment."])
         mark = app_server.DB.find_students_by_name(self.class_id, "Mark")[0]
@@ -343,16 +436,15 @@ class CommentPdfImportTests(unittest.TestCase):
                 patch.object(app_server, "EXPORT_DIR", output / "exports"):
             # Class/week roster and student readiness are computed from the real database.
             state = app_server.app_state()
-            self.assertEqual([student["id"] for student in state["students"] if student["report_ready"]],
-                             [mark["id"]])
+            # Every roster student has Sheet data, so missing comments never block them.
+            self.assertEqual(len([s for s in state["students"] if s["report_ready"]]), 5)
             archive, manifest, _ = app_server.generate_zip(self.class_id)
-        generate.assert_called_once_with(mark["id"], self.period_id)
-        self.assertEqual([item["student_id"] for item in manifest["generated"]], [mark["id"]])
-        self.assertEqual(len(manifest["skipped"]), 4)
-        self.assertTrue(all("teacher comment" in item["reason"] for item in manifest["skipped"]))
+        self.assertEqual(generate.call_count, 5)
+        self.assertIn(mark["id"], [item["student_id"] for item in manifest["generated"]])
+        self.assertEqual(manifest["skipped"], [])
         self.assertEqual(manifest["failed"], [])
         with zipfile.ZipFile(archive) as bundle:
-            self.assertEqual(len([name for name in bundle.namelist() if name.endswith(".pdf")]), 1)
+            self.assertEqual(len([name for name in bundle.namelist() if name.endswith(".pdf")]), 5)
 
 
 if __name__ == "__main__":

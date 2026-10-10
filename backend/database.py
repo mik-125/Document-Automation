@@ -1407,10 +1407,12 @@ class Database:
             student["weekly_test_ready"] = bool(scored_exams)
             student["comments_ready"] = bool(student["homework_comment_ready"] and (
                 student["weekly_test_comment_ready"] or student["general_comment_ready"]))
+            # Missing pieces never block a report: any data for the week is enough.
             student["ready"] = bool(
                 student["assignment_ready"]
-                and student["weekly_test_ready"]
-                and student["comments_ready"]
+                or student["homework"]
+                or student["weekly_test_ready"]
+                or any(student["comments_by_section"].values())
             )
             students.append(student)
             student_lookup[student["id"]] = student

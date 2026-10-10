@@ -48,6 +48,7 @@ from backend.report_engine import (
     inspect_template,
     parse_date_label,
     parse_comment_pdf,
+    parse_shared_comment_pdf,
     student_payload,
 )
 from backend.template_mapping import default_mapping, validate_mapping
@@ -443,12 +444,11 @@ def prepare_google_identity(workspace: GoogleWorkspace) -> None:
 
 
 def period_input_matrix() -> tuple[list[dict[str, Any]], dict[tuple[str, str], set[str]]]:
-    """Return week-specific input readiness using Assignment rows as the roster.
+    """Return week-specific input status for each class/week roster.
 
-    Students remain attached to a class across weeks in the underlying directory, but a
-    report week should only include students present in that week's Assignment import.
-    Building the matrix from ``homework_periods`` keeps both readiness and report lists
-    scoped to the selected class and week without changing the existing import format.
+    A week's roster is every student with Sheet data (``homework_periods``) or any
+    ``period_exams`` row (scores or comments) for that week, so a week can start
+    from a Weekly Test or general comments PDF before Sheet data exists.
     """
     with DB.connect() as connection:
         homework_rows = connection.execute(
@@ -457,10 +457,13 @@ def period_input_matrix() -> tuple[list[dict[str, Any]], dict[tuple[str, str], s
             "FROM homework_periods h JOIN students s ON s.id = h.student_id"
         ).fetchall()
         exam_rows = connection.execute(
-            "SELECT student_id, period_id, score, comment, comment_section FROM period_exams"
+            "SELECT e.student_id, e.period_id, s.class_id, e.score, e.comment, e.comment_section "
+            "FROM period_exams e JOIN students s ON s.id = e.student_id"
         ).fetchall()
 
     exam_flags: dict[tuple[str, str], dict[str, bool]] = {}
+    members: dict[tuple[str, str], dict[str, bool]] = {}
+    rosters: dict[tuple[str, str], set[str]] = {}
     for row in exam_rows:
         key = (str(row["student_id"]), str(row["period_id"]))
         flags = exam_flags.setdefault(key, {"weekly_test": False, "comments": False})
@@ -468,29 +471,30 @@ def period_input_matrix() -> tuple[list[dict[str, Any]], dict[tuple[str, str], s
         section = str(row["comment_section"])
         flags[f"{section}_comment"] = bool(flags.get(f"{section}_comment") or str(row["comment"] or "").strip())
         flags["comments"] = bool(flags.get("homework_comment") and (flags.get("weekly_test_comment") or flags.get("general_comment")))
+        rosters.setdefault((str(row["class_id"]), str(row["period_id"])), set()).add(key[0])
+    for row in homework_rows:
+        key = (str(row["student_id"]), str(row["period_id"]))
+        members[key] = {"assignment": bool(
+            int(row["homework_completed"] or 0)
+            + int(row["homework_incomplete"] or 0)
+            + int(row["homework_excluded"] or 0)
+            > 0
+            or row["homework_percent"] is not None
+        )}
+        rosters.setdefault((str(row["class_id"]), str(row["period_id"])), set()).add(key[0])
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    rosters: dict[tuple[str, str], set[str]] = {}
-    for row in homework_rows:
-        class_id = str(row["class_id"])
-        period_id = str(row["period_id"])
-        student_id = str(row["student_id"])
-        flags = exam_flags.get((student_id, period_id), {})
-        grouped.setdefault((class_id, period_id), []).append(
-            {
-                "assignment": bool(
-                    int(row["homework_completed"] or 0)
-                    + int(row["homework_incomplete"] or 0)
-                    + int(row["homework_excluded"] or 0)
-                    > 0
-                    or row["homework_percent"] is not None
-                ),
-                "weekly_test": bool(flags.get("weekly_test")),
-                "comments": bool(flags.get("comments")),
-                **{f"{section}_comment": bool(flags.get(f"{section}_comment")) for section in COMMENT_SECTIONS},
-            }
-        )
-        rosters.setdefault((class_id, period_id), set()).add(student_id)
+    for (class_id, period_id), student_ids in rosters.items():
+        for student_id in student_ids:
+            flags = exam_flags.get((student_id, period_id), {})
+            grouped.setdefault((class_id, period_id), []).append(
+                {
+                    "assignment": bool(members.get((student_id, period_id), {}).get("assignment")),
+                    "weekly_test": bool(flags.get("weekly_test")),
+                    "comments": bool(flags.get("comments")),
+                    **{f"{section}_comment": bool(flags.get(f"{section}_comment")) for section in COMMENT_SECTIONS},
+                }
+            )
 
     statuses: list[dict[str, Any]] = []
     for (class_id, period_id), students in grouped.items():
@@ -512,9 +516,8 @@ def period_input_matrix() -> tuple[list[dict[str, Any]], dict[tuple[str, str], s
                 "weekly_test_ready": bool(students)
                 and weekly_test_count == len(students),
                 "comments_ready": bool(students) and comment_count == len(students),
-                "comments_allowed": bool(students)
-                and assignment_count == len(students)
-                and weekly_test_count == len(students),
+                # Missing pieces never block comment imports into a week with a roster.
+                "comments_allowed": bool(students),
             }
         )
     statuses.sort(key=lambda item: (item["period_id"], item["class_id"]))
@@ -532,6 +535,12 @@ def app_state() -> dict[str, Any]:
                 set(),
             )
         )
+    class_student_counts: dict[str, int] = {}
+    for student in state["students"]:
+        class_student_counts[student["class_id"]] = class_student_counts.get(student["class_id"], 0) + 1
+    for class_item in state["classes"]:
+        # Lets the UI allow comment imports into a new week before Sheet data exists.
+        class_item["student_count"] = class_student_counts.get(class_item["id"], 0)
     state["students"] = [
         student for student in state["students"] if student["id"] in active_roster_ids
     ]
@@ -642,6 +651,9 @@ def app_state() -> dict[str, Any]:
         template_lookup[class_item["id"]] = item
     state["class_templates"] = templates
     for student in state["students"]:
+        student["exams"] = effective_score_exams(student.get("exams", []))
+        scored_exams = [exam for exam in student["exams"] if exam.get("score") is not None]
+        student["latest_exam"] = scored_exams[-1] if scored_exams else None
         student["template_ready"] = bool(
             template_lookup.get(student["class_id"], {}).get("ready")
         )
@@ -660,17 +672,15 @@ def app_state() -> dict[str, Any]:
                     for s in guide.get("sections", []))
             and not organized["sections"]["weekly_test"].strip()
         )
-        if student["missing_test_feedback_assumption"]:
-            student["report_ready"] = bool(student.get("assignment_ready")
-                and organized["sections"]["homework"].strip() and student["template_ready"])
         student["missing_test_score_warning"] = bool(
             student["missing_test_feedback_assumption"]
             and any(exam.get("score") is not None for exam in student.get("exams", []))
         )
-        if student["routing_review_required"]:
-            student["report_ready"] = False
         student["output_ready"] = bool(output_mode == "pdf_template" or google_docs_ready)
         student["google_ready"] = student["output_ready"]
+        student["preview_ready"] = bool(student["report_ready"] and student["output_ready"])
+        if student["routing_review_required"]:
+            student["report_ready"] = False
         student["report_ready"] = bool(student["report_ready"] and student["output_ready"])
 
     period_status_lookup = {
@@ -1761,32 +1771,101 @@ def import_assignment_csv(
     return summary
 
 
-def get_ready_student(student_id: str, period_id: str | None = None) -> dict[str, Any]:
+def _is_sheet_score_row(exam: dict[str, Any]) -> bool:
+    """Sheet scores use the week label; PDF 총점 scores live on Teacher comment rows."""
+    return not normalize_value(str(exam.get("label") or "")).startswith("teacher comment")
+
+
+def effective_score_exams(exams: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply score precedence: a Sheet score wins over a PDF 총점 score for the same week."""
+    if not any(exam.get("score") is not None and _is_sheet_score_row(exam) for exam in exams):
+        return exams
+    return [
+        exam if _is_sheet_score_row(exam) else {**exam, "score": None, "max_score": None}
+        for exam in exams
+    ]
+
+
+def _score_percent(exam: dict[str, Any]) -> float | None:
+    if exam.get("score") is None or not exam.get("max_score"):
+        return None
+    return float(exam["score"]) / float(exam["max_score"]) * 100
+
+
+def weekly_test_history(
+    class_id: str, student_id: str, end_date: str | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return (this student's scored rows, class test series) up to ``end_date``."""
+    if not end_date:
+        return [], []
+    with DB.connect() as connection:
+        rows = [dict(row) for row in connection.execute(
+            "SELECT e.student_id, e.period_id, e.label, e.score, e.max_score, "
+            "p.label AS period_label, p.start_date, p.end_date "
+            "FROM period_exams e JOIN periods p ON p.id = e.period_id "
+            "JOIN students s ON s.id = e.student_id "
+            "WHERE s.class_id = ? AND e.score IS NOT NULL AND p.end_date <= ? "
+            "ORDER BY p.end_date, p.start_date, e.imported_at, e.label",
+            (class_id, end_date),
+        )]
+    periods: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        period = periods.setdefault(row["period_id"], {"row": row, "students": {}})
+        period["students"].setdefault(row["student_id"], []).append(row)
+    history: list[dict[str, Any]] = []
+    series: list[dict[str, Any]] = []
+    for period in periods.values():
+        percents: dict[str, float] = {}
+        for owner, exams in period["students"].items():
+            scored = [exam for exam in effective_score_exams(exams) if exam.get("score") is not None]
+            if owner == student_id:
+                history.extend(
+                    {key: exam[key] for key in ("score", "max_score", "label", "period_label", "end_date")}
+                    for exam in scored
+                )
+            percent = _score_percent(scored[-1]) if scored else None
+            if percent is not None:
+                percents[owner] = percent
+        if not percents:
+            continue
+        values = list(percents.values())
+        first = period["row"]
+        series.append({
+            "period_label": first["period_label"],
+            "start_date": first["start_date"],
+            "end_date": first["end_date"],
+            "student": percents.get(student_id),
+            "average": sum(values) / len(values),
+            "highest": max(values),
+            "lowest": min(values),
+        })
+    return history, series
+
+
+def get_ready_student(
+    student_id: str,
+    period_id: str | None = None,
+    *,
+    allow_routing_review: bool = False,
+) -> dict[str, Any]:
     student = DB.get_student_for_period(student_id, period_id)
     if not student:
         raise ValidationError("Student not found.")
     if not student.get("period_id"):
         raise ValidationError("Choose a reporting period for this class.")
-    exams = DB.get_exams(student_id, student["period_id"])
+    exams = effective_score_exams(DB.get_exams(student_id, student["period_id"]))
     payload = student_payload(student, exams)
-    with DB.connect() as connection:
-        payload["test_history"] = [dict(row) for row in connection.execute(
-            "SELECT e.score, e.max_score, e.label, p.label AS period_label, p.end_date "
-            "FROM period_exams e JOIN periods p ON p.id = e.period_id "
-            "WHERE e.student_id = ? AND e.score IS NOT NULL AND p.end_date <= ? "
-            "ORDER BY p.end_date, e.label", (student_id, student["period_end"])
-        )]
-    attempted = int(payload.get("homework_completed") or 0) + int(
-        payload.get("homework_incomplete") or 0
+    payload["test_history"], payload["test_series"] = weekly_test_history(
+        student["class_id"], student_id, student["period_end"]
     )
-    excluded = int(payload.get("homework_excluded") or 0)
-    if not attempted and not excluded and payload.get("homework_percent") is None:
-        raise ValidationError("This student still needs Assignment data.")
     guide = merge_content_guides(class_example_manifest(student["class_id"]))
     organized = organize_comments(exams, guide)
     payload["comments_by_section"] = organized["sections"]
     payload["comment_placement"] = organized["decisions"]
-    if any(decision.get("requires_review") for decision in organized["decisions"]):
+    if (
+        not allow_routing_review
+        and any(decision.get("requires_review") for decision in organized["decisions"])
+    ):
         raise ValidationError(
             "Comment routing needs review because at least one passage has low confidence. "
             "Add explicit section headings or upload the comments in separate sections."
@@ -1799,39 +1878,19 @@ def get_ready_student(student_id: str, period_id: str | None = None) -> dict[str
                 for s in guide.get("sections", []))
         and not organized["sections"]["weekly_test"].strip())
     payload["missing_test_feedback_assumption"] = missing_test_assumption
-    if not any(exam.get("score") is not None for exam in exams) and not missing_test_assumption:
-        raise ValidationError("This student still needs a Weekly Test score.")
-    if not payload["comments_by_section"]["homework"]:
-        raise ValidationError("This student still needs a homework comment.")
-    if not missing_test_assumption and not (payload["comments_by_section"]["weekly_test"] or payload["comments_by_section"]["general"]):
-        raise ValidationError("This student still needs a weekly test or general comment.")
+    # Missing pieces never block a report; the student only needs some data for the week.
+    has_week_data = bool(
+        payload["homework"]
+        or int(payload.get("homework_completed") or 0)
+        + int(payload.get("homework_incomplete") or 0)
+        + int(payload.get("homework_excluded") or 0)
+        or payload.get("homework_percent") is not None
+        or any(text.strip() for text in organized["sections"].values())
+        or any(exam.get("score") is not None for exam in exams)
+    )
+    if not has_week_data:
+        raise ValidationError("This student has no data for the selected reporting week.")
     return payload
-
-
-def student_period_has_assignment_and_test(student_id: str, period_id: str) -> bool:
-    student = DB.get_student_for_period(student_id, period_id)
-    if not student:
-        return False
-    has_assignment = bool(
-        int(student.get("homework_completed") or 0)
-        + int(student.get("homework_incomplete") or 0)
-        + int(student.get("homework_excluded") or 0)
-        > 0
-        or student.get("homework_percent") is not None
-    )
-    has_weekly_test = any(
-        exam.get("score") is not None for exam in DB.get_exams(student_id, period_id)
-    )
-    return has_assignment and has_weekly_test
-
-
-def class_period_has_assignment_and_test(class_id: str, period_id: str) -> bool:
-    _, rosters = period_input_matrix()
-    student_ids = rosters.get((class_id, period_id), set())
-    return bool(student_ids) and all(
-        student_period_has_assignment_and_test(student_id, period_id)
-        for student_id in student_ids
-    )
 
 
 def generate_report(
@@ -1841,7 +1900,11 @@ def generate_report(
     archive: bool = True,
     preview: bool = False,
 ) -> Path:
-    student = get_ready_student(student_id, period_id)
+    student = get_ready_student(
+        student_id,
+        period_id,
+        allow_routing_review=preview,
+    )
     pdf_template = DB.get_class_template_version(
         student["class_id"], published_only=True
     )
@@ -1942,9 +2005,7 @@ def generate_zip(class_id: str | None = None) -> tuple[Path | None, dict[str, An
                 missing = [
                     label
                     for field, label in (
-                        ("assignment_ready", "Assignment data"),
-                        ("weekly_test_ready", "Weekly Test score"),
-                        ("comments_ready", "teacher comment"),
+                        ("ready", "data for this week"),
                         ("template_ready", "class template"),
                         ("google_ready", "report output"),
                     )
@@ -2457,7 +2518,13 @@ class AppHandler(BaseHTTPRequestHandler):
         )
         self._send_json({"ok": True, "summary": summary, "state": app_state()})
 
-    def _import_shared_comment(self, payload: dict[str, Any]) -> None:
+    def _import_shared_comment(
+        self,
+        payload: dict[str, Any],
+        *,
+        source_name: str = "Shared homework comment",
+        import_kind: str = "comments_shared",
+    ) -> None:
         class_id = str(payload.get("class_id") or "")
         period_id = str(payload.get("period_id") or "")
         if not isinstance(payload.get("comment"), str):
@@ -2468,11 +2535,17 @@ class AppHandler(BaseHTTPRequestHandler):
         if not comment:
             raise ValidationError("Enter a homework comment for this class and week.")
         if not DB.get_class(class_id) or not DB.get_period(period_id):
-            raise ValidationError("Choose a class and reporting period.")
-        if not class_period_has_assignment_and_test(class_id, period_id):
-            raise ValidationError("Import Assignment and Weekly Test data for this class before Comments.")
+            raise ValidationError(
+                "Import Sheet data, Weekly Test comments, or general comments for this "
+                "class and week before a shared 과제이행도 comment."
+            )
         _, rosters = period_input_matrix()
         student_ids = sorted(rosters.get((class_id, period_id), set()))
+        if not student_ids:
+            raise ValidationError(
+                "Import Sheet data, Weekly Test comments, or general comments for this "
+                "class and week before a shared 과제이행도 comment."
+            )
         if payload.get("confirm_replace") is not True and any(
             exam.get("comment_section") == "homework" and str(exam.get("comment") or "").strip() not in {"", comment}
             for student_id in student_ids for exam in DB.get_exams(student_id, period_id)
@@ -2484,18 +2557,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 transaction.execute("UPDATE period_exams SET comment = '' WHERE student_id = ? AND period_id = ? AND comment_section = 'homework'", (student_id, period_id))
                 exam_id = DB.upsert_exam(student_id, class_id, {
                     "label": _comment_label("homework"), "comment": comment,
-                    "comment_section": "homework", "source_name": "Shared homework comment",
+                    "comment_section": "homework", "source_name": source_name,
                 }, period_id, connection=transaction)
                 entities["exam"].add(exam_id)
             summary = f"Homework comment applied to {len(student_ids)} students."
-            import_id = DB.add_import("Shared homework comment", "comments_shared", "complete", summary, period_id, connection=transaction)
+            import_id = DB.add_import(source_name, import_kind, "complete", summary, period_id, connection=transaction)
             DB.link_import_entities(import_id, entities, connection=transaction)
         self._send_json({"ok": True, "summary": summary, "state": app_state()})
 
     def _import_comments_pdf(self, payload: dict[str, Any]) -> None:
         filename = str(payload.get("filename") or "teacher-comments.pdf")
         class_id = str(payload.get("class_id") or "")
-        period_id = str(payload.get("period_id") or DB.period_id_for_class(class_id) or "")
         section = str(payload.get("comment_section", "weekly_test"))
         if section not in COMMENT_SECTIONS:
             raise ValidationError("Choose a valid comment section.")
@@ -2503,14 +2575,36 @@ class AppHandler(BaseHTTPRequestHandler):
         selected_class = DB.get_class(class_id)
         if not selected_class:
             raise ValidationError("Choose the class represented by this PDF.")
-        selected_period = DB.get_period(period_id)
+        with DB.connect() as connection:
+            has_students = connection.execute(
+                "SELECT 1 FROM students WHERE class_id = ? LIMIT 1", (class_id,)
+            ).fetchone()
+        if not has_students:
+            raise ValidationError("This class has no students yet. Import Sheet data for it first.")
+        if payload.get("period_start") or payload.get("period_end"):
+            # A new week from "+ Add week" is created only when its import is saved.
+            selected_period = _reuse_existing_period(period_from_payload(payload))
+        else:
+            selected_period = DB.get_period(
+                str(payload.get("period_id") or DB.period_id_for_class(class_id) or "")
+            )
         if not selected_period:
             raise ValidationError("Choose the reporting period represented by this PDF.")
-        if not class_period_has_assignment_and_test(class_id, period_id):
-            raise ValidationError(
-                "Import Assignment and Weekly Test data for this class before Comments."
-            )
+        period_id = str(selected_period.get("id") or "")
         pdf_bytes = decode_base64(payload.get("pdf_base64"), "Comments PDF")
+        if section == "homework":
+            AppHandler._import_shared_comment(
+                self,
+                {
+                    "class_id": class_id,
+                    "period_id": period_id,
+                    "comment": parse_shared_comment_pdf(pdf_bytes),
+                    "confirm_replace": payload.get("confirm_replace") is True,
+                },
+                source_name=filename,
+                import_kind="comments_shared_pdf",
+            )
+            return
         records = parse_comment_pdf(pdf_bytes, label, filename)
         if not records:
             raise ValidationError("No student comments could be extracted from this PDF.")
@@ -2525,14 +2619,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 raise ValidationError(
                     f"No teacher comment could be extracted for {record.get('name') or 'a student'}."
                 )
-            candidates = [
-                student
-                for student in DB.find_students_by_name(class_id, record["name"])
-                if student_period_has_assignment_and_test(student["id"], period_id)
-            ]
+            # Exact class-scoped names only; this week's Sheet data is not required.
+            candidates = [] if record.get("review_reason") else DB.find_students_by_name(
+                class_id, record["name"]
+            )
             record["comment_section"] = section
-            record["score"] = None
-            record["max_score"] = None
+            if section != "weekly_test":
+                # Only Weekly Test PDFs carry a 총점 fallback score.
+                record["score"] = None
+                record["max_score"] = None
             prepared.append((record, candidates))
             if len(candidates) == 1:
                 destination = (candidates[0]["id"], record["label"])
@@ -2544,7 +2639,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 existing = next(
                     (
                         exam
-                        for exam in DB.get_exams(candidates[0]["id"], period_id)
+                        for exam in (DB.get_exams(candidates[0]["id"], period_id) if period_id else [])
                         if (exam.get("comment_section", "weekly_test") == section if "comment_section" in payload else exam["label"] == record["label"])
                         and str(exam.get("comment") or "").strip() not in {"", str(record.get("comment") or "").strip()}
                     ),
@@ -2564,10 +2659,18 @@ class AppHandler(BaseHTTPRequestHandler):
             )
         entities = {"exam": set(), "issue": set()}
         with DB.connect() as transaction:
+            if not period_id:
+                selected_period = DB.ensure_period(
+                    selected_period["start_date"], selected_period["end_date"],
+                    selected_period["label"], connection=transaction,
+                )
+                period_id = selected_period["id"]
             for record, candidates in prepared:
                 if len(candidates) == 1:
                     if "comment_section" in payload:
                         transaction.execute("UPDATE period_exams SET comment = '' WHERE student_id = ? AND period_id = ? AND comment_section = ?", (candidates[0]["id"], period_id, section))
+                    # A replaced PDF must not leave its previous 총점 score behind.
+                    transaction.execute("UPDATE period_exams SET score = NULL, max_score = NULL WHERE student_id = ? AND period_id = ? AND label = ?", (candidates[0]["id"], period_id, record["label"]))
                     exam_id = DB.upsert_exam(
                         candidates[0]["id"],
                         class_id,
@@ -2581,7 +2684,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 else:
                     unmatched_comments.append({
                         "name": record["name"],
-                        "reason": (
+                        "reason": record.get("review_reason") or (
                             "Multiple students have this name" if candidates
                             else "No matching student in this class and week"
                         ),
@@ -2598,15 +2701,17 @@ class AppHandler(BaseHTTPRequestHandler):
                     )
                     entities["issue"].add(issue_id)
                     review += 1
+            # The week's roster: Sheet rows or any score/comment row for this week.
             missing_comments = [dict(row) for row in transaction.execute(
-                "SELECT s.id, s.name, s.school, s.grade FROM homework_periods h "
-                "JOIN students s ON s.id = h.student_id "
-                "WHERE s.class_id = ? AND h.period_id = ? AND NOT EXISTS ("
+                "SELECT s.id, s.name, s.school, s.grade FROM students s "
+                "WHERE s.class_id = ? AND (EXISTS (SELECT 1 FROM homework_periods h "
+                "WHERE h.student_id = s.id AND h.period_id = ?) OR EXISTS (SELECT 1 FROM "
+                "period_exams r WHERE r.student_id = s.id AND r.period_id = ?)) AND NOT EXISTS ("
                 "SELECT 1 FROM period_exams e WHERE e.student_id = s.id "
-                "AND e.period_id = h.period_id AND e.comment_section = ? "
+                "AND e.period_id = ? AND e.comment_section = ? "
                 "AND TRIM(COALESCE(e.comment, ''), ' ' || CHAR(9) || CHAR(10) || CHAR(13)) <> '') "
                 "ORDER BY s.name, s.school, s.grade, s.id",
-                (class_id, period_id, section),
+                (class_id, period_id, period_id, period_id, section),
             )]
             import_state = "review" if review else "complete"
             summary = f"{matched} comments matched · {review} need review"
@@ -3061,10 +3166,8 @@ class AppHandler(BaseHTTPRequestHandler):
         if not student or student["class_id"] != issue["class_id"]:
             raise ValidationError("Choose a student from the selected class.")
         period_id = str(issue.get("period_id") or "")
-        if not student_period_has_assignment_and_test(student_id, period_id):
-            raise ValidationError(
-                "This student still needs Assignment and Weekly Test data for the selected period."
-            )
+        if not DB.get_period(period_id):
+            raise ValidationError("The reporting period for this review item no longer exists.")
         record = dict(issue["payload"])
         section = record.get("comment_section", "weekly_test")
         if section not in COMMENT_SECTIONS:
@@ -3094,6 +3197,7 @@ class AppHandler(BaseHTTPRequestHandler):
         import_id = DB.import_id_for_entity("issue", issue_id)
         with DB.connect() as transaction:
             transaction.execute("UPDATE period_exams SET comment = '' WHERE student_id = ? AND period_id = ? AND comment_section = ?", (student_id, period_id, section))
+            transaction.execute("UPDATE period_exams SET score = NULL, max_score = NULL WHERE student_id = ? AND period_id = ? AND label = ?", (student_id, period_id, record["label"]))
             exam_id = DB.upsert_exam(student_id, issue["class_id"], record, period_id, "manual", connection=transaction)
             if import_id:
                 DB.link_import_entities(import_id, {"exam": {exam_id}}, connection=transaction)

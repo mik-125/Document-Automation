@@ -772,6 +772,7 @@ input:focus, select:focus, textarea:focus { border-color: #78a9a1; }
 .source-note span, .source-note strong, .source-note small { display: block; }
 .source-note strong { margin-top: 3px; color: var(--ink); }
 .source-note small { margin-top: 2px; }
+.issue-comment { max-height: 180px; overflow-y: auto; margin: 10px 0 0; padding: 11px 12px; border-radius: 8px; background: #f1f5f2; color: var(--ink); font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
 .placeholder-modal-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
 .generation-errors { max-height: 320px; margin: 16px 0 0; padding: 0; overflow: auto; list-style: none; }
 .generation-errors li { padding: 11px 0; border-bottom: 1px solid var(--line); }

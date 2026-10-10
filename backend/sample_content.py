@@ -281,10 +281,11 @@ def merge_content_guides(examples: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def organize_comments(exams: list[dict[str, Any]], guide: dict[str, Any]) -> dict[str, Any]:
-    """Route source spans by explicit headings or supported class sample roles.
+    """Place comments by their explicit import section; route only legacy rows.
 
-    Without sufficient sample evidence, retain the selected import category.
-    Homework imports stay homework; no source wording is rewritten.
+    A comment imported with ``comment_section`` stays whole in that section with full
+    confidence and never needs review. Only rows without an explicit section are
+    routed by headings or class sample roles. No source wording is rewritten.
     """
     parts = {section: [] for section in SECTION_LABELS}
     decisions = []
@@ -298,6 +299,16 @@ def organize_comments(exams: list[dict[str, Any]], guide: dict[str, Any]) -> dic
         selected = exam.get("comment_section") or "weekly_test"
         if selected not in parts:
             raise ValueError("Choose a report section for the imported comment.")
+        if exam.get("comment_section"):
+            parts[selected].append(text)
+            passage_index += 1
+            decisions.append({
+                "passage_index": passage_index, "source_section": selected,
+                "destination": selected, "confidence": 1.0,
+                "signals": ["explicitly selected upload section"],
+                "requires_review": False, "passage": text,
+            })
+            continue
         heading_chunks = []
         active = selected
         explicit = False

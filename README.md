@@ -51,12 +51,12 @@ Things to know:
 ## How to make reports
 
 1. **Import scores.** Import homework and Weekly Test scores from one Google Sheet. Include student details, dated homework marks, and a Weekly Test percentage column (0–100). This creates the reporting period, classes, and students. Blank cells keep existing scores; `0` counts as a score.
-2. **Add 과제이행도 comments (required).** Upload a searchable PDF of individual homework comments, or enter one shared comment for the whole class and week.
-3. **Add Weekly Test and/or general comments.** Upload searchable PDFs, one class per PDF. If a comment can't be matched to a student with confidence, it goes to manual review.
+2. **Add 과제이행도 comments.** Upload a searchable PDF of individual homework comments, or enter one shared comment for the whole class and week. A `___` in a shared comment is printed as each student's name.
+3. **Add Weekly Test and/or general comments.** Upload searchable PDFs, one class per PDF. Each student's comment can start with their name on its own line, or each student's block can start with its score lines (such as `총점: 18 / 21`) followed by a comment that opens with `OOO 학생은`. If a comment can't be matched to a student with confidence (no name, or more than one student named), it goes to manual review. A Weekly Test PDF can go into a new week before that week's Sheet data exists; its `총점` lines are used as scores until Sheet scores are imported.
 4. **Set up a template for each class.** Pick one of the two options under [Templates](#templates).
 5. **Review and export.** Resolve unmatched comments, preview at least one student, then download individual PDFs or a class ZIP.
 
-A student is ready when they have assignment data, a 과제이행도 comment, a Weekly Test score, and at least one Weekly Test or general comment. Students who are ready can generate reports even if others in the class aren't.
+Missing data never blocks a report. A student is ready when the class template is ready and they have at least one piece of data for the week (homework marks, a 과제이행도 comment, a Weekly Test comment or score, or a general comment). Missing parts are left out or blank; Brightline never fills them with invented or generated text.
 
 **Student matching:** Include a unique Student ID in the Sheet. Without one, Brightline accepts only an exact, unambiguous name match within the class, narrowed by school or grade when you provide them. It never guesses.
 
@@ -88,7 +88,9 @@ Formatting around each placeholder carries through to the finished report.
 ## What Brightline guarantees about report content
 
 - **Teacher wording is never changed.** Brightline can move whole passages into the correct section, but it never paraphrases, summarizes, invents, drops, or duplicates text.
-- **No clipped text.** If content can't fit under the layout rules, the report stops for review and is not cut off.
+- **No clipped text.** Weekly Test comments stay at a readable 10–10.5pt and continue onto extra pages instead of shrinking. If content can't fit under the layout rules, the report stops for review and is not cut off.
+- **Graphs.** Reports with a PDF template show a 과제이행도 graph (daily A/B/F) and a 위클리 테스트 graph (student, class average, highest, lowest) whenever the data exists.
+- **Display clean-up only.** The 성명 field hides `(ON)` and the class line hides tags like `[25FA]`; stored data keeps them.
 - **No guessing.** Ambiguous students, unreadable layouts, and unclear sections go to review.
 - **Each class is handled on its own.** A layout that works for one class does not prove it works for another format.
 - **Routing is inspectable.** Preview shows where each passage was assigned, its confidence, and the class-sample signals used. Low-confidence routing blocks generation for review.

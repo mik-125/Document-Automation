@@ -35,7 +35,7 @@ class ReportCommentWorkflowTests(unittest.TestCase):
         return self.invoke('_import_comments_pdf', comment_section=section,
             filename='all-comments.pdf', pdf_base64=base64.b64encode(fixtures.comments_pdf([lines])).decode(), **options)
 
-    def test_every_required_section_combination(self):
+    def test_no_comment_combination_blocks_a_student_with_sheet_data(self):
         student = app.DB.state()['students'][0]
         for homework, weekly, general in itertools.product((False, True), repeat=3):
             with self.subTest(homework=homework, weekly=weekly, general=general):
@@ -44,21 +44,17 @@ class ReportCommentWorkflowTests(unittest.TestCase):
                 for section, enabled in zip(('homework', 'weekly_test', 'general'), (homework, weekly, general)):
                     if enabled:
                         self.record(student, section, section + ' full feedback')
-                expected = homework and (weekly or general)
                 actual = next(s for s in app.DB.state()['students'] if s['id'] == student['id'])
-                self.assertEqual(actual['ready'], expected)
-                if expected:
-                    payload = app.get_ready_student(student['id'], self.period_id)
-                    self.assertEqual(bool(payload['comments_by_section']['homework']), homework)
-                else:
-                    with self.assertRaises(ValidationError):
-                        app.get_ready_student(student['id'], self.period_id)
+                self.assertTrue(actual['ready'])
+                payload = app.get_ready_student(student['id'], self.period_id)
+                for section, enabled in zip(('homework', 'weekly_test', 'general'), (homework, weekly, general)):
+                    self.assertEqual(bool(payload['comments_by_section'][section]), enabled)
 
     def test_shared_homework_and_one_matched_optional_pdf_allow_partial_class(self):
         self.invoke('_import_shared_comment', comment='Everyone: complete all homework.')
         self.pdf('general', ['Mark', '', 'General advice mentioning a test remains general.'])
         students = app.DB.state()['students']
-        self.assertEqual(sum(s['ready'] for s in students), 1)
+        self.assertEqual(sum(s['ready'] for s in students), 5)
         self.assertEqual(sum(s['homework_comment_ready'] for s in students), 5)
         matrix, _ = app.period_input_matrix()
         self.assertEqual(matrix[0]['homework_comment_count'], 5)
@@ -66,8 +62,22 @@ class ReportCommentWorkflowTests(unittest.TestCase):
         self.assertEqual(matrix[0]['comment_count'], 1)
         self.assertFalse(matrix[0]['comments_ready'])
 
+    def test_homework_pdf_applies_one_comment_to_every_student(self):
+        result = self.pdf('homework', ['Review ionic bonding and Lewis structures.'])
+        self.assertEqual(result['summary'], 'Homework comment applied to 5 students.')
+        students = app.DB.state()['students']
+        self.assertEqual(sum(student['homework_comment_ready'] for student in students), 5)
+        for student in students:
+            self.assertEqual(
+                report_comment_sections(app.DB.get_exams(student['id'], self.period_id))['homework'],
+                'Review ionic bonding and Lewis structures.',
+            )
+        upload = next(file for file in app.DB.state()['files'] if file['kind'] == 'comments_shared_pdf')
+        self.assertEqual(upload['name'], 'all-comments.pdf')
+
     def test_three_pdf_sections_stay_separate_and_replacement_preserves_scores(self):
-        for section in ('homework', 'weekly_test', 'general'):
+        self.pdf('homework', ['homework feedback.'])
+        for section in ('weekly_test', 'general'):
             self.pdf(section, ['Mark', '', section + ' feedback.'])
         mark = app.DB.find_students_by_name(self.class_id, 'Mark')[0]
         sections = report_comment_sections(app.DB.get_exams(mark['id'], self.period_id))
@@ -80,14 +90,16 @@ class ReportCommentWorkflowTests(unittest.TestCase):
         self.assertEqual(report_comment_sections(exams)['weekly_test'], 'New weekly feedback.')
         self.assertEqual(report_comment_sections(exams)['homework'], 'homework feedback.')
 
-    def test_shared_scope_and_deleting_import_revoke_readiness(self):
+    def test_shared_scope_and_deleting_import_removes_only_that_comment(self):
         self.invoke('_import_shared_comment', comment='Class homework.')
         self.pdf('weekly_test', ['Mark', '', 'Weekly feedback.'])
-        self.assertEqual(sum(s['ready'] for s in app.DB.state()['students']), 1)
+        self.assertEqual(sum(s['homework_comment_ready'] for s in app.DB.state()['students']), 5)
         upload = next(f for f in app.DB.state()['files'] if f['kind'] == 'comments_shared')
         app.DB.delete_imports([upload['id']])
-        self.assertFalse(any(s['ready'] for s in app.DB.state()['students']))
         self.assertFalse(any(s['homework_comment_ready'] for s in app.DB.state()['students']))
+        self.assertEqual(sum(s['weekly_test_comment_ready'] for s in app.DB.state()['students']), 1)
+        # Sheet data keeps students ready; missing comments never block generation.
+        self.assertTrue(all(s['ready'] for s in app.DB.state()['students']))
 
     def test_shared_comment_does_not_touch_another_class_or_week(self):
         app.import_mapped_table(
@@ -106,7 +118,7 @@ class ReportCommentWorkflowTests(unittest.TestCase):
         self.assertTrue(all(row['class_id'] == self.class_id and row['period_id'] == self.period_id for row in rows))
 
     def test_review_resolution_keeps_section_and_import_ownership(self):
-        self.pdf('homework', ['Unknown', '', 'Homework feedback.'])
+        self.pdf('general', ['Unknown', '', 'General feedback.'])
         issue = app.DB.state()['issues'][0]
         mark = app.DB.find_students_by_name(self.class_id, 'Mark')[0]
         class Handler:
@@ -115,11 +127,11 @@ class ReportCommentWorkflowTests(unittest.TestCase):
         with patch.object(app, 'app_state', return_value={}):
             app.AppHandler._resolve_issue(Handler(), issue['id'], {'student_id': mark['id']})
         exams = app.DB.get_exams(mark['id'], self.period_id)
-        self.assertEqual(report_comment_sections(exams)['homework'], 'Homework feedback.')
+        self.assertEqual(report_comment_sections(exams)['general'], 'General feedback.')
         self.assertFalse(report_comment_sections(exams)['weekly_test'])
         upload = next(f for f in app.DB.state()['files'] if f['kind'] == 'comments_pdf')
         app.DB.delete_imports([upload['id']])
-        self.assertFalse(report_comment_sections(app.DB.get_exams(mark['id'], self.period_id))['homework'])
+        self.assertFalse(report_comment_sections(app.DB.get_exams(mark['id'], self.period_id))['general'])
 
     def test_score_reimport_keeps_explicit_comment_section(self):
         student = app.DB.state()['students'][0]

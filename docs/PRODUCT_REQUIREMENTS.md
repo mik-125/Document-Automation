@@ -41,18 +41,37 @@ files. They must be considered when changing the application or reviewing a PR.
 - Split incoming feedback at paragraph and numbered-question boundaries. Record one
   destination, confidence score, and matching signals for every passage. Show those
   decisions in review. Low-confidence routing blocks report generation.
+- Multi-student comment PDFs may mark each student with a standalone name line,
+  or with a score block (총점 and/or Q-score lines, optionally followed by
+  "Overall Feedback") whose comment opens with `OOO 학생은`. A score block whose
+  comment names no student, names more than one, or does not open with the
+  name goes to manual review. A Sheet score wins; otherwise a score block's own
+  `총점: X / Y` line is the Weekly Test score. Q scores are never summed.
+- Comments keep their paragraph breaks, date lines, and original characters
+  (superscripts/subscripts). A comment imported into an explicit section stays there.
+- Missing data never blocks an otherwise valid report. A week's roster is every
+  student with Sheet data or any imported score/comment for that week; a rostered
+  student needs only one piece of data. Missing parts are omitted or blank, never
+  invented or replaced by generated summaries.
 
 ## Fitting and page rules
 
-- Weekly Test feedback stays inside its original text area; shrink the body font
-  as necessary instead of creating a continuation page for it.
+- Comment text starts at 10.5 points. Weekly Test feedback (product-owner approved)
+  never goes below 10 points: it fills the space beside its graph, then the full
+  width below, then continues on generated pages built from the original template
+  page with the template's own 위클리 테스트 heading bar and a full-width box.
+- An empty 선생님 코멘트 panel is hidden and the Weekly Test panel extends into it.
+- Graphs: 과제이행도 shows the week's daily A/B/F marks (X/blank = gap); 위클리 테스트
+  shows 학생점수, 평균, 최고점, 최저점 per week. Titles use the raw name and class with
+  `기간`. No data means no graph.
+- Display-only: 성명 drops a leading `(ON)`, the class line drops `[...]` tags, `___`
+  in the 과제이행도 comment becomes the student's name, and characters the font cannot
+  draw use a plain look-alike. Stored data is unchanged.
 - Additional teacher-comment pages are allowed only when the last page's comment
   area is at least half occupied. Build them from an appropriate full-width feedback
   page in the blank template, relabel the continuing section, and compact sparse
   remainders into earlier pages. Never use a completed sample as page artwork.
-- Start from the completed sample's observed body size and adjust toward its typical
-  fill. Smaller-than-8-point text is approved. The implementation uses a 7-point
-  safety floor; if the page rules still cannot be met, request review rather than clip or
+- 과제이행도 text may shrink to fit its panel with a 7-point safety floor; if the page rules still cannot be met, request review rather than clip or
   silently discard text. Preserve readable fonts and inspect rendered output.
 - Remove unused trailing blank-template pages from generated reports.
 - Missing appropriate Weekly Test feedback uses this academy-requested assumption:
@@ -62,8 +81,7 @@ files. They must be considered when changing the application or reviewing a PR.
   > 학생은 이번 위클리 테스트를 응시하지 않았기에 정확한 이해도 판단이 어렵습니다. 위클리 테스트를 나중에 한 번 풀어보시는 것을 추천드립니다.
 
   This is an explicit output policy, not verified attendance. Do not overwrite
-  stored scores or source comments with the assumption. Assignment data and
-  homework comments remain prerequisites.
+  stored scores or source comments with the assumption.
 
 ## Connection and release checks
 

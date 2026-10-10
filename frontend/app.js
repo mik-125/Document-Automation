@@ -110,6 +110,13 @@ function statusForClassPeriod(classId, periodId) {
   return state.period_input_status.find(item => item.class_id === classId && item.period_id === periodId) || {};
 }
 
+// Weekly Test and general comments only need class students; a shared 과제이행도 comment
+// needs the week's roster (Sheet data or earlier comments/scores for that week).
+function classAcceptsComments(classItem, periodId, kind) {
+  if (statusForClassPeriod(classItem.id, periodId).comments_allowed) return true;
+  return kind !== "homework_comment" && Number(classItem.student_count || 0) > 0;
+}
+
 function periodOptions(selected = "", includeBlank = false) {
   return `${includeBlank ? '<option value="">Choose a reporting period</option>' : ""}${state.periods.map(period => `<option value="${period.id}" ${period.id === selected ? "selected" : ""}>${escapeHtml(period.label)} · ${escapeHtml(period.start_date)}–${escapeHtml(period.end_date)}</option>`).join("")}`;
 }
@@ -458,16 +465,20 @@ function renderTemplates() {
   }).join("");
 }
 
+// Missing pieces are shown for information only; they never block generation.
 function reportReason(student) {
   if (student.routing_review_required) return "Comment routing review required";
-  if (student.report_ready && student.missing_test_feedback_assumption) return "Ready · no test feedback";
-  if (!student.assignment_ready) return "Assignment missing";
-  if (!student.weekly_test_ready) return "Weekly Test missing";
-  if (!student.homework_comment_ready) return "과제이행도 comment missing";
-  if (!student.weekly_test_comment_ready && !student.general_comment_ready) return "Weekly test or general comment missing";
+  if (!student.ready) return "No data for this week";
   if (!student.template_ready) return "Template missing";
   if (!(student.output_ready ?? student.google_ready)) return "Report output missing";
-  return "Ready";
+  const missing = [
+    [student.assignment_ready, "Assignment"], [student.weekly_test_ready, "Weekly Test score"],
+    [student.homework_comment_ready, "과제이행도 comment"],
+    [student.weekly_test_comment_ready || student.missing_test_feedback_assumption, "Weekly Test comment"],
+    [student.general_comment_ready, "general comment"],
+  ].filter(([present]) => !present).map(([, label]) => label);
+  if (student.missing_test_feedback_assumption) return missing.length ? `Ready · no test feedback · missing ${missing.join(", ")}` : "Ready · no test feedback";
+  return missing.length ? `Ready · missing ${missing.join(", ")}` : "Ready";
 }
 
 function showRoutingReview(studentId) {
@@ -498,12 +509,13 @@ function renderReports() {
   ];
   $("#report-checklist").innerHTML = checks.map(([label, ready]) => `<div class="check-card ${ready ? "done" : ""}"><span>${ready ? "✓" : "·"}</span><b>${escapeHtml(label)}</b></div>`).join("");
   const selectedStudents = selectedClass ? studentsForClass(selectedClass.id) : [];
+  const firstPreview = selectedStudents.find(student => student.preview_ready);
   const firstReady = selectedStudents.find(student => student.report_ready);
   const previewButton = $("#preview-report");
-  previewButton.classList.toggle("disabled", !firstReady);
-  previewButton.disabled = !firstReady;
-  previewButton.dataset.studentId = firstReady?.id || "";
-  previewButton.dataset.periodId = firstReady?.period_id || "";
+  previewButton.classList.toggle("disabled", !firstPreview);
+  previewButton.disabled = !firstPreview;
+  previewButton.dataset.studentId = firstPreview?.id || "";
+  previewButton.dataset.periodId = firstPreview?.period_id || "";
   const classZip = $("#download-class-zip");
   classZip.classList.toggle("disabled", !firstReady);
   classZip.disabled = !firstReady;
@@ -517,16 +529,19 @@ function renderReports() {
   } else {
     $("#reports-by-class").innerHTML = state.classes.map(classItem => {
       const students = studentsForClass(classItem.id);
+      const previewable = students.filter(student => student.preview_ready).length;
       const ready = students.filter(student => student.report_ready).length;
       const rows = students.map(student => {
         const exam = student.latest_exam;
         const attempted = Number(student.homework_completed || 0) + Number(student.homework_incomplete || 0);
         const missed = attempted || Number(student.homework_excluded || 0) ? formatNumber(student.homework_incomplete || 0) : student.homework_percent == null ? "—" : "Unavailable";
         const routingButton = `<button class="table-action" data-routing-student="${student.id}">Routing</button>`;
-        const reportActions = student.report_ready ? `<button class="table-action" data-preview-student="${student.id}" data-period-id="${student.period_id || ""}">Preview</button><button class="table-action" data-download-student="${student.id}" data-period-id="${student.period_id || ""}" data-filename="${escapeHtml(student.name)}-report.pdf">Download PDF</button>` : '<button class="table-action disabled">Needs review</button>';
+        const previewAction = student.preview_ready ? `<button class="table-action" data-preview-student="${student.id}" data-period-id="${student.period_id || ""}">Preview</button>` : "";
+        const downloadAction = student.report_ready ? `<button class="table-action" data-download-student="${student.id}" data-period-id="${student.period_id || ""}" data-filename="${escapeHtml(student.name)}-report.pdf">Download PDF</button>` : '<button class="table-action disabled">Needs review</button>';
+        const reportActions = previewAction + downloadAction;
         return `<div class="report-student-row"><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.school || "School missing")} · ${escapeHtml(student.grade || "Grade missing")}</small></span></div><div class="report-data"><span>Assignments missed<b>${missed}</b></span><span>Weekly Test<b>${exam ? `${formatNumber(exam.score)}${exam.max_score === 100 ? "%" : exam.max_score == null ? "" : `/${formatNumber(exam.max_score)}`}` : "—"}</b></span></div><span class="status-pill ${student.report_ready && !student.missing_test_score_warning ? "" : "warn"}">${escapeHtml(reportReason(student))}</span><div class="row-actions">${routingButton}${reportActions}</div></div>`;
       }).join("");
-      return `<section class="report-class-section"><header><div><span class="eyebrow">${escapeHtml(classItem.subject || "CLASS REPORTS")}</span><h2>${escapeHtml(classItem.name)}</h2><p>${ready} of ${students.length} students ready · ${escapeHtml(classItem.selected_period_label || "No period")}</p></div><button class="secondary-button ${ready ? "" : "disabled"}" data-download-class="${classItem.id}" data-filename="${escapeHtml(classItem.name)}-reports.zip" ${ready ? "" : "disabled"}>Download class ZIP</button></header>${rows || emptyState("No students in this class", "Import an Assignment file containing this class.")}</section>`;
+      return `<section class="report-class-section"><header><div><span class="eyebrow">${escapeHtml(classItem.subject || "CLASS REPORTS")}</span><h2>${escapeHtml(classItem.name)}</h2><p>${previewable} previewable · ${ready} ready for download · ${escapeHtml(classItem.selected_period_label || "No period")}</p></div><button class="secondary-button ${ready ? "" : "disabled"}" data-download-class="${classItem.id}" data-filename="${escapeHtml(classItem.name)}-reports.zip" ${ready ? "" : "disabled"}>Download class ZIP</button></header>${rows || emptyState("No students in this class", "Import an Assignment file containing this class.")}</section>`;
     }).join("");
   }
   $("#report-history-count").textContent = `${state.reports.length} report${state.reports.length === 1 ? "" : "s"}`;
@@ -600,7 +615,7 @@ const UPLOAD_COPY = {
   homework_comment: {
     eyebrow: "02 · REQUIRED",
     title: "과제이행도 comment",
-    copy: "Upload one searchable PDF with every student’s homework comment, or write one comment for everyone in the selected class and week. It appears beside the homework graph.",
+    copy: "Upload one searchable PDF or write one comment to apply the same homework feedback to every student in the selected class and week. It appears beside each homework graph.",
   },
   weekly_test_comment: {
     eyebrow: "03 · CHOOSE 3 OR 4, OR BOTH",
@@ -719,20 +734,18 @@ function uploadPrerequisite() {
   if (kind === "assignment") {
     return { ready: true, message: target.draft ? "This week will be created only when Assignment is saved." : "Assignment can add or update this week's roster." };
   }
-  if (target.draft) {
-    return { ready: false, message: `Import Assignment for ${target.label} before adding ${kind === "weekly_test" ? "Weekly Test" : "Comments"} data.` };
-  }
-  const statuses = periodInputStatuses(target.id);
   if (kind === "weekly_test") {
-    const ready = statuses.some(item => item.assignment_ready);
+    const ready = !target.draft && periodInputStatuses(target.id).some(item => item.assignment_ready);
     return { ready, message: ready ? "Assignment data is ready. Every score must match this week's roster." : `Import Assignment for ${target.label} before Weekly Test.` };
   }
-  const eligible = statuses.filter(item => item.comments_allowed);
+  const eligible = state.classes.filter(item => classAcceptsComments(item, target.draft ? "" : target.id, kind));
   return {
     ready: Boolean(eligible.length),
     message: eligible.length
-      ? `${eligible.length} class${eligible.length === 1 ? " is" : "es are"} ready for Comments. Every imported student must already have Assignment and Weekly Test data.`
-      : `Import homework and test scores together for ${target.label} before Comments.`,
+      ? `${eligible.length} class${eligible.length === 1 ? " is" : "es are"} ready for Comments. Missing scores or comments never block a report.`
+      : kind === "homework_comment"
+        ? `Import Sheet data, Weekly Test comments, or general comments for ${target.label} before a 과제이행도 comment.`
+        : "Import Sheet data first so classes have students.",
   };
 }
 
@@ -795,14 +808,15 @@ function uploadStageEditor() {
   }
   if (stage.mode === "comments_pdf" || stage.mode === "comments_shared") {
     const shared = stage.mode === "comments_shared";
+    const kind = shared ? "homework_comment" : uploadSession?.kind;
     const classOptions = state.classes.map(item => {
-      const status = statusForClassPeriod(item.id, target?.id || "");
-      const missing = status.comments_allowed ? "" : status.assignment_ready ? " — Weekly Test scores missing" : " — Homework missing for this week";
-      return `<option value="${item.id}" ${item.id === stage.classId ? "selected" : ""} ${status.comments_allowed ? "" : "disabled"}>${escapeHtml(item.name + missing)}</option>`;
+      const allowed = classAcceptsComments(item, target?.draft ? "" : target?.id || "", kind);
+      const missing = allowed ? "" : Number(item.student_count || 0) > 0 ? " — No students in this week yet" : " — No students yet";
+      return `<option value="${item.id}" ${item.id === stage.classId ? "selected" : ""} ${allowed ? "" : "disabled"}>${escapeHtml(item.name + missing)}</option>`;
     }).join("");
     const classField = `<label><span>${shared ? "Class for this comment" : "Class in this PDF"}</span><select id="upload-comments-class" required><option value="">${shared ? "Choose a class" : "Choose the PDF’s class"}</option>${classOptions}</select></label>`;
     if (shared) return `${classField}<label><span>Comment for every student</span><textarea id="upload-shared-comment" rows="6" required>${escapeHtml(stage.comment || "")}</textarea></label><div class="safety-note">This comment applies to every student in this class for ${escapeHtml(target?.label || "the selected week")} only.</div>`;
-    return `${classField}<div class="safety-note">Select the class named in your student data. Unavailable classes show what is missing for this week. Uncertain student names go to the review queue; scores found in the PDF are ignored.</div>`;
+    return `${classField}<div class="safety-note">Select the class named in your student data. Unavailable classes show what is missing for this week. Uncertain student names go to the review queue. A Weekly Test PDF’s 총점 is used only when the Sheet has no score for that student and week.</div>`;
   }
   if (stage.mode === "google_sheet") {
     stage.previewRowsShown = Math.min(
@@ -862,7 +876,7 @@ function renderUploadModal() {
     .join("");
   const sourceDisabled = uploadSession.saving;
   const pdfChoice = COMMENT_SECTIONS[uploadSession.kind]
-    ? `<button class="upload-source-choice" type="button" data-upload-manual ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">PDF</span><span><strong>Upload comments PDF</strong><small>One searchable PDF for one class; held locally until Save.</small></span></button>`
+    ? `<button class="upload-source-choice" type="button" data-upload-manual ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">PDF</span><span><strong>${uploadSession.kind === "homework_comment" ? "Upload one comment PDF for everyone" : "Upload comments PDF"}</strong><small>${uploadSession.kind === "homework_comment" ? "Applies the PDF’s searchable text to every student in this class and week." : "One searchable PDF for one class; held locally until Save."}</small></span></button>`
     : "";
   const saveDisabled = !stage || !target || !prerequisite.ready || uploadSession.saving;
   openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">${copy.eyebrow}</span><h2>${copy.title}</h2><p>${copy.copy}</p></div><div class="upload-modal-controls"><label class="upload-week-control"><span>Week</span><select id="upload-week-select" aria-label="Week" ${uploadSession.saving ? "disabled" : ""}>${weekOptions}</select></label><button class="upload-add-week" type="button" data-upload-add-week ${uploadSession.saving ? "disabled" : ""}>+ Add week</button><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving" ${uploadSession.saving ? "disabled" : ""}>×</button></div></div><div class="upload-modal-body"><div class="upload-prerequisite-copy ${prerequisite.ready ? "ready" : ""}"><span>${prerequisite.ready ? "✓" : "!"}</span><div>${escapeHtml(prerequisite.message)}</div></div><div class="upload-source-choices">${uploadSession.kind === "assignment" ? `<button class="upload-source-choice" type="button" data-upload-google ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">GS</span><span><strong>Import Google Sheet</strong><small>Preview the sheet before saving.</small></span></button>` : ""}${pdfChoice}${uploadSession.kind === "homework_comment" ? `<button class="upload-source-choice" type="button" data-upload-shared ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">TEXT</span><span><strong>Write one comment for everyone</strong><small>Applies only to the class and week you choose.</small></span></button>` : ""}</div>${sheetSourceForm()}${stagedSourceRow()}${uploadStageEditor()}</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button ${saveDisabled ? "disabled" : ""}" type="button" data-upload-save ${saveDisabled ? "disabled" : ""}>${uploadSession.saving ? "Saving…" : "Save"}</button><button class="secondary-button upload-cancel-button" type="button" data-close-modal ${uploadSession.saving ? "disabled" : ""}>Cancel</button><span class="upload-modal-footer-note">Closing without Save discards the staged source. Added week options remain for this browser session.</span></div>`);
@@ -987,7 +1001,7 @@ async function saveUpload(confirmed = false) {
   if (!prerequisite.ready) return toast(prerequisite.message, "error");
   let period;
   if (target?.draft) {
-    if (session.kind !== "assignment") return toast(`Import Assignment for ${target.label} first.`, "error");
+    if (session.kind !== "assignment" && !(stage.mode === "comments_pdf" && session.kind !== "homework_comment")) return toast(`Import Assignment for ${target.label} first.`, "error");
     if (!target.start_date || !target.end_date) return toast("Choose the new week's start and end dates.", "error");
     if (target.start_date > target.end_date) return toast("The week start must be before its end.", "error");
     period = { period_label: target.label, period_start: target.start_date, period_end: target.end_date };
@@ -1014,7 +1028,7 @@ async function saveUpload(confirmed = false) {
     payload = {
       filename: stage.name,
       class_id: stage.classId,
-      period_id: target.id,
+      ...period,
       comment_section: COMMENT_SECTIONS[session.kind],
     };
   } else if (stage.mode === "comments_shared") {
@@ -1034,7 +1048,7 @@ async function saveUpload(confirmed = false) {
     payload = { kind: session.kind, filename: stage.name, text: stage.text, mapping: stage.mapping, ...period };
   }
 
-  if (COMMENT_SECTIONS[session.kind] && !statusForClassPeriod(stage.classId, target.id).comments_allowed) return toast("Import homework and test scores for this class and week first.", "error");
+  if (COMMENT_SECTIONS[session.kind] && !classAcceptsComments(classById(stage.classId) || {id: stage.classId}, target.draft ? "" : target.id, session.kind)) return toast(session.kind === "homework_comment" ? "Import Sheet data or other comments for this class and week first." : "This class has no students yet.", "error");
 
   if (!confirmed) {
     session.confirming = true;
@@ -1087,7 +1101,7 @@ function showCommentImportResult(result, kind = "weekly_test_comment") {
   const unmatched = matching.unmatched_comments || [];
   if (!missing.length && !unmatched.length) return toast(result.summary || "Comments saved.");
   const missingList = missing.length
-    ? `<h3>Students without ${escapeHtml(sectionLabel)} (${missing.length})</h3><p>${kind === "homework_comment" ? "These students need a 과제이행도 comment before their reports can be generated." : "These students can still generate reports if they have a 과제이행도 comment and the other comment type (weekly test or general)."} Complete students remain available for reports.</p><ul>${missing.map(student => `<li><strong>${escapeHtml(student.name)}</strong>${student.school ? ` · ${escapeHtml(student.school)}` : ""}${student.grade ? ` · Grade ${escapeHtml(student.grade)}` : ""}</li>`).join("")}</ul>`
+    ? `<h3>Students without ${escapeHtml(sectionLabel)} (${missing.length})</h3><p>These students can still generate reports without this section; missing pieces never block a report.</p><ul>${missing.map(student => `<li><strong>${escapeHtml(student.name)}</strong>${student.school ? ` · ${escapeHtml(student.school)}` : ""}${student.grade ? ` · Grade ${escapeHtml(student.grade)}` : ""}</li>`).join("")}</ul>`
     : "";
   const unmatchedList = unmatched.length
     ? `<h3>PDF comments without a unique student match (${unmatched.length})</h3><p>These comments were not assigned and cannot be used in reports. Check the review queue in Data Inbox.</p><ul>${unmatched.map(comment => `<li><strong>${escapeHtml(comment.name)}</strong> · ${escapeHtml(comment.reason)}</li>`).join("")}</ul>`
@@ -1310,7 +1324,7 @@ function reviewIssue(issueId) {
   if (!issue) return;
   const candidateIds = new Set(issue.candidates.map(item => item.id));
   const students = [...studentsForClass(issue.class_id)].sort((a, b) => Number(candidateIds.has(b.id)) - Number(candidateIds.has(a.id)) || a.name.localeCompare(b.name));
-  openModal(`<span class="eyebrow">MANUAL REVIEW</span><h2>Match ${escapeHtml(issue.subject_name)}</h2><p>Choose the correct student inside <strong>${escapeHtml(classById(issue.class_id)?.name || "this class")}</strong>.</p><form id="issue-form"><label><span>Student record</span><select id="issue-student" required><option value="">Choose using school and grade</option>${students.map(student => `<option value="${student.id}">${candidateIds.has(student.id) ? "Possible match · " : ""}${escapeHtml(student.name)} · ${escapeHtml(student.school)} · ${escapeHtml(student.grade)}</option>`).join("")}</select></label><div class="source-note"><span>Source</span><strong>${escapeHtml(issue.source_name)}</strong><small>${escapeHtml(issue.payload.label || "Teacher comment")}</small></div><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Confirm match</button></div></form>`);
+  openModal(`<span class="eyebrow">MANUAL REVIEW</span><h2>Match ${escapeHtml(issue.subject_name)}</h2><p>Choose the correct student inside <strong>${escapeHtml(classById(issue.class_id)?.name || "this class")}</strong>.</p><form id="issue-form"><label><span>Student record</span><select id="issue-student" required><option value="">Choose using school and grade</option>${students.map(student => `<option value="${student.id}">${candidateIds.has(student.id) ? "Possible match · " : ""}${escapeHtml(student.name)} · ${escapeHtml(student.school)} · ${escapeHtml(student.grade)}</option>`).join("")}</select></label><div class="source-note"><span>Source</span><strong>${escapeHtml(issue.source_name)}</strong><small>${escapeHtml(issue.payload.label || "Teacher comment")}</small>${issue.payload.review_reason ? `<small>${escapeHtml(issue.payload.review_reason)}</small>` : ""}</div>${issue.payload.comment ? `<p class="issue-comment">${escapeHtml(issue.payload.comment)}</p>` : ""}<div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Confirm match</button></div></form>`);
   $("#issue-form").onsubmit = async event => {
     event.preventDefault();
     try {

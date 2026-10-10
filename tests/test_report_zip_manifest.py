@@ -40,6 +40,7 @@ class ReportZipManifestTests(unittest.TestCase):
                 "period_id": "p" * 32,
                 "period_label": "Week 1",
                 "report_ready": False,
+                "ready": False,
                 "assignment_ready": True,
                 "weekly_test_ready": False,
                 "comments_ready": False,
@@ -68,8 +69,8 @@ class ReportZipManifestTests(unittest.TestCase):
             self.assertEqual([item["student_id"] for item in manifest["generated"]], [ready_id])
             self.assertEqual([item["student_id"] for item in manifest["skipped"]], [unready_id])
             self.assertEqual(manifest["failed"], [])
-            self.assertIn("Weekly Test score", manifest["skipped"][0]["reason"])
-            self.assertIn("teacher comment", manifest["skipped"][0]["reason"])
+            self.assertIn("data for this week", manifest["skipped"][0]["reason"])
+            self.assertNotIn("Weekly Test score", manifest["skipped"][0]["reason"])
             generate.assert_called_once_with(ready_id, "p" * 32)
 
             with zipfile.ZipFile(archive) as bundle:
