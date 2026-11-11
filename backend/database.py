@@ -5,7 +5,7 @@ import re
 import sqlite3
 import unicodedata
 import uuid
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -15,6 +15,30 @@ from backend.comment_sections import COMMENT_SECTIONS, report_comment_sections
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+_WEEK_LABEL = re.compile(r"(?:week\s*0*(\d+))|(?:0*(\d+)\s*주차)", re.IGNORECASE)
+_PERIOD_ORDER = "week_number IS NULL, week_number DESC, start_date DESC, end_date DESC"
+_PERIODS_TABLE = """
+    CREATE TABLE {name} (
+        id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        start_date TEXT NOT NULL,
+        end_date TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        week_number INTEGER
+    )
+"""
+
+
+def week_number_from_label(label: str) -> int | None:
+    """Return the week number a label such as ``Week 2`` or ``3주차`` names, if any."""
+    match = _WEEK_LABEL.search(unicodedata.normalize("NFKC", str(label or "")))
+    if not match:
+        return None
+    number = int(match.group(1) or match.group(2))
+    return number if number >= 1 else None
 
 
 def normalize_value(value: str) -> str:
@@ -78,7 +102,70 @@ class Database:
         if column not in columns:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    def _migrate_period_week_numbers(self) -> None:
+        """One-time upgrade: weeks are identified by number, so dates may repeat.
+
+        SQLite cannot drop a table constraint in place, so ``periods`` is rebuilt
+        with foreign keys off (other tables cascade from it). A backup is written
+        first, and the rebuild is rolled back unless every row count is unchanged.
+        """
+        with closing(sqlite3.connect(self.path, timeout=15)) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(periods)")}
+            if not columns or "week_number" in columns:
+                return
+            backup_dir = self.path.parent / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup = backup_dir / f"brightline-before-week-number-{datetime.now():%Y%m%d-%H%M%S}.db"
+            with closing(sqlite3.connect(backup)) as copy:
+                db.backup(copy)
+            backup.chmod(0o600)
+            tables = [
+                row[0] for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                )
+            ]
+
+            def counts() -> dict[str, int]:
+                return {
+                    table: db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                    for table in tables
+                }
+
+            db.isolation_level = None
+            db.execute("PRAGMA foreign_keys = OFF")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                before = counts()
+                # Orphan rows that already exist are not the upgrade's doing; only
+                # references the rebuild changes count as a failure.
+                orphans_before = sorted(map(tuple, db.execute("PRAGMA foreign_key_check").fetchall()))
+                rows = db.execute(
+                    "SELECT id, label, start_date, end_date, created_at, updated_at FROM periods "
+                    "ORDER BY start_date, end_date, created_at, id"
+                ).fetchall()
+                db.execute(_PERIODS_TABLE.format(name="periods_upgraded"))
+                taken: set[int] = set()
+                for row in rows:
+                    number = week_number_from_label(row[1])
+                    if number in taken:
+                        number = None  # The earliest week keeps a duplicated number.
+                    elif number is not None:
+                        taken.add(number)
+                    db.execute("INSERT INTO periods_upgraded VALUES(?, ?, ?, ?, ?, ?, ?)", (*row, number))
+                db.execute("DROP TABLE periods")
+                db.execute("ALTER TABLE periods_upgraded RENAME TO periods")
+                orphans_after = sorted(map(tuple, db.execute("PRAGMA foreign_key_check").fetchall()))
+                if counts() != before or orphans_after != orphans_before:
+                    raise RuntimeError("row counts or references changed")
+                db.execute("COMMIT")
+            except Exception as exc:
+                db.execute("ROLLBACK")
+                raise RuntimeError(
+                    "Week-number upgrade failed; the database was not changed."
+                ) from exc
+
     def _initialize(self) -> None:
+        self._migrate_period_week_numbers()
         with self.connect() as db:
             db.executescript(
                 """
@@ -122,8 +209,11 @@ class Database:
                     end_date TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    UNIQUE(start_date, end_date)
+                    week_number INTEGER
                 );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_periods_week_number
+                ON periods(week_number) WHERE week_number IS NOT NULL;
 
                 CREATE TABLE IF NOT EXISTS class_periods (
                     class_id TEXT PRIMARY KEY REFERENCES classes(id) ON DELETE CASCADE,
@@ -291,19 +381,19 @@ class Database:
         ).fetchone() or db.execute("SELECT 1 FROM exams LIMIT 1").fetchone()
         if not has_legacy or not start or not end:
             return
-        period_id = uuid.uuid4().hex
         timestamp = now_iso()
-        db.execute(
-            "INSERT OR IGNORE INTO periods(id, label, start_date, end_date, created_at, updated_at) "
-            "VALUES(?, ?, ?, ?, ?, ?)",
-            (period_id, f"{start} to {end}", start, end, timestamp, timestamp),
-        )
         row = db.execute(
             "SELECT id FROM periods WHERE start_date = ? AND end_date = ?", (start, end)
         ).fetchone()
-        if not row:
-            return
-        period_id = str(row["id"])
+        if row:
+            period_id = str(row["id"])
+        else:
+            period_id = uuid.uuid4().hex
+            db.execute(
+                "INSERT INTO periods(id, label, start_date, end_date, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?)",
+                (period_id, f"{start} to {end}", start, end, timestamp, timestamp),
+            )
         db.execute(
             "INSERT OR IGNORE INTO homework_periods(student_id, period_id, homework_json, "
             "homework_completed, homework_incomplete, homework_excluded, homework_percent, updated_at) "
@@ -389,34 +479,65 @@ class Database:
                 (key, value),
             )
 
+    def find_period(
+        self,
+        *,
+        start_date: str = "",
+        end_date: str = "",
+        label: str = "",
+        week_number: int | None = None,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        """Find a week by its number, or by its dates when no number is known."""
+        number = week_number if week_number is not None else week_number_from_label(label)
+        with self._connection_scope(connection) as db:
+            if number is not None:
+                row = db.execute("SELECT * FROM periods WHERE week_number = ?", (number,)).fetchone()
+                return dict(row) if row else None
+            rows = db.execute(
+                "SELECT * FROM periods WHERE start_date = ? AND end_date = ?", (start_date, end_date)
+            ).fetchall()
+        if len(rows) > 1:
+            rows = [row for row in rows if row["week_number"] is None]
+            if len(rows) != 1:
+                raise ValueError("Several weeks share these dates. Choose the week by its number.")
+        return dict(rows[0]) if rows else None
+
     def ensure_period(
         self,
         start_date: str,
         end_date: str,
         label: str = "",
         connection: sqlite3.Connection | None = None,
+        *,
+        week_number: int | None = None,
     ) -> dict[str, Any]:
         try:
             start = date.fromisoformat(start_date)
             end = date.fromisoformat(end_date)
         except ValueError as exc:
-            raise ValueError("Reporting period dates are invalid.") from exc
+            raise ValueError("Week dates are invalid.") from exc
         if start > end:
-            raise ValueError("The reporting period start must be before its end.")
-        label = label.strip() or f"{start_date} to {end_date}"
+            raise ValueError("The week's start date must be before its end date.")
+        number = week_number if week_number is not None else week_number_from_label(label)
+        if number is not None and number < 1:
+            raise ValueError("Week number must be a whole number of 1 or more.")
+        label = label.strip() or (
+            f"Week {number}" if number is not None else f"{start_date} to {end_date}"
+        )
         timestamp = now_iso()
         with self._connection_scope(connection) as db:
-            row = db.execute(
-                "SELECT * FROM periods WHERE start_date = ? AND end_date = ?", (start_date, end_date)
-            ).fetchone()
+            row = self.find_period(
+                start_date=start_date, end_date=end_date, week_number=number, connection=db
+            )
             if row:
                 period_id = str(row["id"])
             else:
                 period_id = uuid.uuid4().hex
                 db.execute(
-                    "INSERT INTO periods(id, label, start_date, end_date, created_at, updated_at) "
-                    "VALUES(?, ?, ?, ?, ?, ?)",
-                    (period_id, label, start_date, end_date, timestamp, timestamp),
+                    "INSERT INTO periods(id, label, start_date, end_date, created_at, updated_at, "
+                    "week_number) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (period_id, label, start_date, end_date, timestamp, timestamp, number),
                 )
             result = db.execute("SELECT * FROM periods WHERE id = ?", (period_id,)).fetchone()
         return dict(result)
@@ -437,7 +558,7 @@ class Database:
                 "SELECT * FROM periods WHERE id = ?", (period_id,)
             ).fetchone()
             if not period:
-                raise ValueError("Reporting period not found.")
+                raise ValueError("Week not found.")
             for key, value in (
                 ("selected_period_id", period_id),
                 ("period_start", period["start_date"]),
@@ -460,7 +581,7 @@ class Database:
             if not db.execute("SELECT 1 FROM classes WHERE id = ?", (class_id,)).fetchone():
                 raise ValueError("Class not found.")
             if not db.execute("SELECT 1 FROM periods WHERE id = ?", (period_id,)).fetchone():
-                raise ValueError("Reporting period not found.")
+                raise ValueError("Week not found.")
             db.execute(
                 "INSERT INTO class_periods(class_id, period_id, updated_at) VALUES(?, ?, ?) "
                 "ON CONFLICT(class_id) DO UPDATE SET period_id = excluded.period_id, "
@@ -892,7 +1013,7 @@ class Database:
             if not period_id or not db.execute(
                 "SELECT 1 FROM periods WHERE id = ?", (period_id,)
             ).fetchone():
-                raise ValueError("Choose a reporting period before importing comments.")
+                raise ValueError("Choose a week before importing comments.")
             existing = db.execute(
                 "SELECT id, comment_section FROM period_exams WHERE student_id = ? AND period_id = ? AND label = ?",
                 (student_id, period_id, record["label"]),
@@ -1064,7 +1185,7 @@ class Database:
                 "SELECT 1 FROM periods WHERE id = ?", (selected["value"],)
             ).fetchone():
                 replacement = db.execute(
-                    "SELECT id, start_date, end_date FROM periods ORDER BY start_date DESC, end_date DESC LIMIT 1"
+                    f"SELECT id, start_date, end_date FROM periods ORDER BY {_PERIOD_ORDER} LIMIT 1"
                 ).fetchone()
                 if replacement:
                     db.execute(
@@ -1147,7 +1268,7 @@ class Database:
     ) -> dict[str, Any]:
         period = self.get_period(period_id)
         if not period:
-            raise ValueError("Reporting period not found.")
+            raise ValueError("Week not found.")
         report_id = uuid.uuid4().hex
         with self.connect() as db:
             row = db.execute(
@@ -1227,7 +1348,7 @@ class Database:
                 (
                     template_id,
                     class_id,
-                    name.strip() or "Company report template",
+                    name.strip() or "Class report template",
                     version,
                     str(source_pdf_path),
                     source_sha256,
@@ -1323,7 +1444,7 @@ class Database:
     def state(self) -> dict[str, Any]:
         with self.connect() as db:
             period_rows = db.execute(
-                "SELECT * FROM periods ORDER BY start_date DESC, end_date DESC"
+                f"SELECT * FROM periods ORDER BY {_PERIOD_ORDER}"
             ).fetchall()
             class_rows = db.execute(
                 "SELECT c.*, cp.period_id AS selected_period_id FROM classes c "

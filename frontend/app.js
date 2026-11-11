@@ -118,7 +118,7 @@ function classAcceptsComments(classItem, periodId, kind) {
 }
 
 function periodOptions(selected = "", includeBlank = false) {
-  return `${includeBlank ? '<option value="">Choose a reporting period</option>' : ""}${state.periods.map(period => `<option value="${period.id}" ${period.id === selected ? "selected" : ""}>${escapeHtml(period.label)} · ${escapeHtml(period.start_date)}–${escapeHtml(period.end_date)}</option>`).join("")}`;
+  return `${includeBlank ? '<option value="">Choose a week</option>' : ""}${state.periods.map(period => `<option value="${period.id}" ${period.id === selected ? "selected" : ""}>${escapeHtml(period.label)} · ${escapeHtml(period.start_date)}–${escapeHtml(period.end_date)}</option>`).join("")}`;
 }
 
 function setLoading(active) {
@@ -209,6 +209,10 @@ async function downloadGenerated(url, payload, filename) {
   }
 }
 
+function readyReportCount(classId = "") {
+  return state.students.filter(student => student.report_ready && (!classId || student.class_id === classId)).length;
+}
+
 function showArchiveResult(result) {
   const failures = result.failed || [];
   const skipped = result.skipped || [];
@@ -218,11 +222,13 @@ function showArchiveResult(result) {
   }
   const rows = [...failures.map(item => ({ ...item, reason: item.error, status: "Failed" })), ...skipped.map(item => ({ ...item, status: "Skipped" }))]
     .map(item => `<li><strong>${escapeHtml(item.student)}</strong><span>${escapeHtml(item.class_name || "")} · ${item.status}</span><p>${escapeHtml(item.reason)}</p></li>`).join("");
+  hideToast();
   openModal(`<span class="eyebrow">GENERATION RESULT</span><h2>${result.generated_count || 0} generated · ${result.skipped_count || skipped.length} skipped · ${result.failed_count || failures.length} failed</h2><p>${result.generated_count ? "The successful PDFs were downloaded. Every roster student is accounted for below and in generation-summary.json." : "No ZIP was downloaded because no report could be generated."}</p><ul class="generation-errors">${rows}</ul><div class="modal-footer"><button class="primary-button" data-close-modal>Done</button></div>`);
 }
 
-async function generateArchive(url, fallbackFilename) {
+async function generateArchive(url, fallbackFilename, reportCount = 0) {
   if (!beginGeneration()) return;
+  toast(`Generating ${reportCount ? `${reportCount} report${reportCount === 1 ? "" : "s"}` : "reports"}… Keep this tab open; larger classes can take a minute.`, "progress");
   try {
     let result;
     try {
@@ -249,6 +255,7 @@ async function generateArchive(url, fallbackFilename) {
     showArchiveResult(result);
     await loadState();
   } finally {
+    if ($("#toast").classList.contains("progress")) hideToast();
     endGeneration();
   }
 }
@@ -273,12 +280,31 @@ async function previewGenerated(studentId, periodId) {
   }
 }
 
+function hideToast() {
+  clearTimeout(toastTimer);
+  $("#toast").classList.add("hidden");
+}
+
+// Success and warning messages fade; errors stay until dismissed so they can be read;
+// progress messages stay until the next message replaces them.
 function toast(message, type = "success") {
   const element = $("#toast");
   clearTimeout(toastTimer);
   element.textContent = message;
   element.className = `toast ${type}`;
-  toastTimer = setTimeout(() => element.classList.add("hidden"), 4200);
+  element.setAttribute("role", type === "error" ? "alert" : "status");
+  if (type === "error") {
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "toast-dismiss";
+    dismiss.dataset.toastDismiss = "";
+    dismiss.setAttribute("aria-label", "Dismiss message");
+    dismiss.textContent = "×";
+    element.appendChild(dismiss);
+    return;
+  }
+  if (type === "progress") return;
+  toastTimer = setTimeout(() => element.classList.add("hidden"), type === "warning" ? 8000 : 4200);
 }
 
 let lockedPageScroll = null;
@@ -330,6 +356,13 @@ function openModal(html) {
   lockPageScroll();
   $("#modal").className = "modal";
   $("#modal").innerHTML = html;
+  const heading = $("#modal").querySelector("h2");
+  if (heading) {
+    heading.id = "modal-title";
+    $("#modal").setAttribute("aria-labelledby", "modal-title");
+  } else {
+    $("#modal").removeAttribute("aria-labelledby");
+  }
   $("#modal").scrollTop = 0;
   $("#modal-backdrop").classList.remove("hidden");
   requestAnimationFrame(() => $("#modal").querySelector("input, select, button")?.focus({ preventScroll: true }));
@@ -359,20 +392,20 @@ const PAGE_COPY = {
   connections: ["API ACCESS", "Connections"],
 };
 
-function go(page) {
+function go(page, { push = true } = {}) {
   if (!PAGE_COPY[page]) page = "inbox";
   $$(".page").forEach(element => element.classList.toggle("active", element.id === page));
   $$('[data-nav]').forEach(element => element.classList.toggle("active", element.dataset.nav === page));
   $("#page-kicker").textContent = PAGE_COPY[page][0];
   $("#page-title").textContent = PAGE_COPY[page][1];
-  history.replaceState(null, "", `#${page}`);
+  if (window.location.hash !== `#${page}`) history[push ? "pushState" : "replaceState"](null, "", `#${page}`);
   $("#sidebar").classList.remove("open");
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 function renderPeriods() {
   const global = $("#global-period-select");
-  global.innerHTML = state.periods.length ? periodOptions(state.selected_period_id) : '<option value="">No period yet</option>';
+  global.innerHTML = state.periods.length ? periodOptions(state.selected_period_id) : '<option value="">No week yet</option>';
   global.disabled = !state.periods.length;
 }
 
@@ -386,7 +419,7 @@ function renderSourceStatuses() {
     ["#assignment-source-status", assignmentReady && testsReady, assignmentReady ? (testsReady ? "Imported" : "Test scores missing") : "Start here"],
     ...Object.entries(COMMENT_SECTIONS).map(([kind, section]) => {
       const ready = current.some(item => item[`${section}_comment_count`] > 0);
-      return [`#${kind}-source-status`, ready, ready ? "Imported" : kind === "homework_comment" ? "Required" : "Choose 3 or 4, or both"];
+      return [`#${kind}-source-status`, ready, ready ? "Imported" : "Not added"];
     }),
   ];
   statuses.forEach(([selector, ready, label]) => {
@@ -398,14 +431,14 @@ function renderSourceStatuses() {
 
 function renderReadiness() {
   if (!state.classes.length) {
-    $("#data-readiness").innerHTML = emptyState("No academy data yet", "Import the Assignment file or Sheet to create classes and students.", true);
+    $("#data-readiness").innerHTML = emptyState("No academy data yet", "Import the Google Sheet to create classes and students.", true);
     return;
   }
   const cell = (ready, count, total, label) => `<div class="check-cell ${ready ? "done" : ""}"><span class="check-mark">${ready ? "✓" : "·"}</span><span>${count}/${total} ${escapeHtml(label)}</span></div>`;
-  $("#data-readiness").innerHTML = `<div class="readiness-row header"><span>Class and period</span><span>Assignment</span><span>Weekly Test</span><span>과제이행도 + (3 or 4)</span><span>Template</span></div>${state.classes.map(classItem => {
+  $("#data-readiness").innerHTML = `<div class="readiness-row header"><span>Class and week</span><span>과제이행도 marks</span><span>Weekly Test score</span><span>Comments</span><span>Template</span></div>${state.classes.map(classItem => {
     const status = statusForClass(classItem.id, classItem.selected_period_id);
     const total = status.student_count || 0;
-    return `<div class="readiness-row"><div class="class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.selected_period_label || "No reporting period")}</small></div>${cell(status.assignment_ready, status.assignment_count || 0, total, "ready")}${cell(status.weekly_test_ready, status.weekly_test_count || 0, total, "ready")}${cell(status.comments_ready, status.comment_count || 0, total, "ready")}${cell(status.template_ready, status.template_ready ? 1 : 0, 1, "connected")}</div>`;
+    return `<div class="readiness-row"><div class="class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.selected_period_label || "No week")}</small></div>${cell(status.assignment_ready, status.assignment_count || 0, total, "students")}${cell(status.weekly_test_ready, status.weekly_test_count || 0, total, "students")}${cell(status.comments_ready, status.comment_count || 0, total, "students")}${cell(status.template_ready, status.template_ready ? 1 : 0, 1, "connected")}</div>`;
   }).join("")}`;
 }
 
@@ -413,12 +446,12 @@ function renderFiles() {
   $("#upload-count").textContent = `${state.files.length} import${state.files.length === 1 ? "" : "s"}`;
   $("#inbox-badge").textContent = state.issues.length;
   if (!state.files.length) {
-    $("#file-list").innerHTML = emptyState("Nothing imported", "Your product starts empty. Import Assignment data when you are ready.");
+    $("#file-list").innerHTML = emptyState("Nothing imported", "Brightline starts empty. Import the Google Sheet when you are ready.");
     return;
   }
   const labels = {
-    assignment_csv: "Assignment CSV",
-    assignment_sheet: "Assignment · Google Sheets",
+    assignment_csv: "Scores CSV",
+    assignment_sheet: "Scores · Google Sheets",
     weekly_test_csv: "Weekly Test CSV",
     weekly_test_sheet: "Weekly Test · Google Sheets",
     comments_csv: "Comments CSV",
@@ -426,7 +459,7 @@ function renderFiles() {
     comments_pdf: "Comments PDF",
     comments_shared: "Shared 과제이행도 comment",
     example_report: "Example report",
-    report_template: "Company PDF template",
+    report_template: "Class PDF template",
   };
   $("#file-list").innerHTML = state.files.map(file => `<div class="file-row"><span class="file-icon">${file.source_provider === "google_sheets" ? "API" : (file.name.split(".").pop() || "FILE").slice(0, 4).toUpperCase()}</span><div class="file-info"><strong>${escapeHtml(file.name)}</strong><small>${escapeHtml(labels[file.kind] || file.kind)} · ${escapeHtml(file.summary)}${file.period_label ? ` · ${escapeHtml(file.period_label)}` : ""}</small></div><div class="file-meta"><span class="status-pill ${file.state === "review" ? "warn" : ""}">${file.state === "review" ? "Review" : "Imported"}</span><time>${escapeHtml(formatDateTime(file.created_at))}</time></div></div>`).join("");
 }
@@ -443,7 +476,7 @@ function renderIssues() {
 function renderTemplates() {
   const body = $("#templates-table");
   if (!state.classes.length) {
-    body.innerHTML = `<tr><td colspan="2">${emptyState("No classes yet", "Import Assignment data first; classes appear here automatically.", true)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="2">${emptyState("No classes yet", "Import the Google Sheet first; classes appear here automatically.", true)}</td></tr>`;
     return;
   }
   body.innerHTML = state.classes.map(classItem => {
@@ -452,16 +485,16 @@ function renderTemplates() {
     const profile = template.example_profile || {};
     const exampleCount = template.example_count || 0;
     const sampleSummary = exampleCount
-      ? `Content reference · ${profile.content_guide?.sections?.length || 0} section observations${profile.content_guide?.requires_review ? " · Review analysis" : ""}`
+      ? `Content reference · ${profile.content_guide?.sections?.length || 0} report section${(profile.content_guide?.sections?.length || 0) === 1 ? "" : "s"} found${profile.content_guide?.requires_review ? " · Review analysis" : ""}`
       : "Upload a completed report to guide content placement; teacher wording is preserved.";
     const activeVersionNote = pdf?.status !== "published" && pdf?.active_version
       ? ` · Version ${pdf.active_version} remains active`
       : "";
     const pdfSummary = pdf
       ? `Original design · Version ${pdf.version} · ${pdf.page_count} page${pdf.page_count === 1 ? "" : "s"} · ${pdf.layout_review_required ? "Review original PDF mapping" : pdf.status === "published" ? "Published" : "Mapping confirmation required"}${activeVersionNote}`
-      : "Upload the clean company PDF before generating reports.";
+      : "Upload the class’s blank report PDF before generating reports.";
     const pdfActions = `<button class="table-action" type="button" data-template-pdf-upload="${classItem.id}">${pdf ? "Upload new version" : "Upload PDF template"}</button>${pdf ? `<button class="table-action" type="button" data-template-pdf-map="${classItem.id}">${pdf.status === "published" ? "Review mapping" : "Confirm mapping"}</button><a class="table-action" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open PDF</a><button class="table-action danger" type="button" data-template-pdf-disconnect="${classItem.id}">Remove</button>` : ""}`;
-    return `<tr><td class="template-class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.teacher || "Teacher not set")}</small></td><td class="template-sample-cell"><div class="template-output-stack"><div class="template-sample-layout"><div class="template-sample-summary"><strong>${escapeHtml(pdf?.name || "No company template")}</strong><small>${escapeHtml(pdfSummary)}</small></div><div class="template-sample-actions">${pdfActions}</div></div><div class="template-sample-layout template-example-layout"><div class="template-sample-summary"><strong>${exampleCount ? `${exampleCount} completed sample${exampleCount === 1 ? "" : "s"}` : "No completed sample"}</strong><small>${escapeHtml(sampleSummary)}</small></div><div class="template-sample-actions"><button class="table-action" type="button" data-template-example="${classItem.id}">Upload sample report</button>${exampleCount ? `<button class="table-action" type="button" data-template-analysis="${classItem.id}">View analysis</button>` : ""}</div></div></div></td></tr>`;
+    return `<tr><td class="template-class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.teacher || "Teacher not set")}</small></td><td class="template-sample-cell"><div class="template-output-stack"><div class="template-sample-layout"><div class="template-sample-summary"><strong>${escapeHtml(pdf?.name || "No template yet")}</strong><small>${escapeHtml(pdfSummary)}</small></div><div class="template-sample-actions">${pdfActions}</div></div><div class="template-sample-layout template-example-layout"><div class="template-sample-summary"><strong>${exampleCount ? `${exampleCount} completed sample${exampleCount === 1 ? "" : "s"}` : "No completed sample"}</strong><small>${escapeHtml(sampleSummary)}</small></div><div class="template-sample-actions"><button class="table-action" type="button" data-template-example="${classItem.id}">Upload sample report</button>${exampleCount ? `<button class="table-action" type="button" data-template-analysis="${classItem.id}">View analysis</button>` : ""}</div></div></div></td></tr>`;
   }).join("");
 }
 
@@ -470,9 +503,9 @@ function reportReason(student) {
   if (student.routing_review_required) return "Comment routing review required";
   if (!student.ready) return "No data for this week";
   if (!student.template_ready) return "Template missing";
-  if (!(student.output_ready ?? student.google_ready)) return "Report output missing";
+  if (!(student.output_ready ?? student.google_ready)) return "Report PDF can’t be made yet";
   const missing = [
-    [student.assignment_ready, "Assignment"], [student.weekly_test_ready, "Weekly Test score"],
+    [student.assignment_ready, "과제이행도 marks"], [student.weekly_test_ready, "Weekly Test score"],
     [student.homework_comment_ready, "과제이행도 comment"],
     [student.weekly_test_comment_ready || student.missing_test_feedback_assumption, "Weekly Test comment"],
     [student.general_comment_ready, "general comment"],
@@ -490,10 +523,7 @@ function showRoutingReview(studentId) {
     const signals = (decision.signals || []).join(" · ");
     return `<tr><td>${decision.passage_index}</td><td>${escapeHtml(decision.destination || "review")}</td><td><span class="status-pill ${decision.requires_review ? "warn" : ""}">${confidence}</span></td><td>${escapeHtml(signals)}</td></tr><tr class="routing-passage-row"><td colspan="4"><pre>${escapeHtml(decision.passage || "")}</pre></td></tr>`;
   }).join("") : `<tr><td colspan="4">No comment passages were found.</td></tr>`;
-  const scoreWarning = student.missing_test_score_warning
-    ? `<div class="safety-note warning"><strong>Review warning:</strong> A Weekly Test score is stored, but the missed-test notice will be used because no passage matched the Weekly Test section.</div>`
-    : "";
-  openModal(`<span class="eyebrow">PASSAGE ROUTING</span><h2>${escapeHtml(student.name)}</h2><p>Every source passage is shown with its destination, confidence, and matching signals. Low-confidence passages keep their original upload section and block generation.</p>${scoreWarning}<div class="table-card routing-table"><table><thead><tr><th>#</th><th>Section</th><th>Confidence</th><th>Why</th></tr></thead><tbody>${rows}</tbody></table></div><div class="modal-footer"><button type="button" class="primary-button" data-close-modal>Close</button></div>`);
+  openModal(`<span class="eyebrow">WHERE COMMENTS GO</span><h2>${escapeHtml(student.name)}</h2><p>Every source passage is shown with its destination, confidence, and matching signals. Low-confidence passages keep their original upload section and block generation.</p><div class="table-card routing-table"><table><thead><tr><th>#</th><th>Section</th><th>Confidence</th><th>Why</th></tr></thead><tbody>${rows}</tbody></table></div><div class="modal-footer"><button type="button" class="primary-button" data-close-modal>Close</button></div>`);
 }
 
 function renderReports() {
@@ -501,11 +531,11 @@ function renderReports() {
   const selectedClass = classById(selectedReportClass);
   const selectedPeriod = selectedClass?.selected_period_id || state.selected_period_id;
   $("#report-class-select").innerHTML = `<option value="">Choose a class</option>${state.classes.map(item => `<option value="${item.id}" ${item.id === selectedReportClass ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}`;
-  $("#report-period-select").innerHTML = state.periods.length ? periodOptions(selectedPeriod, true) : '<option value="">No periods yet</option>';
+  $("#report-period-select").innerHTML = state.periods.length ? periodOptions(selectedPeriod, true) : '<option value="">No weeks yet</option>';
   $("#report-period-select").disabled = !selectedReportClass || !state.periods.length;
   const status = selectedClass ? statusForClass(selectedClass.id, selectedPeriod) : {};
   const checks = [
-    ["Assignment", status.assignment_ready], ["Weekly Test", status.weekly_test_ready], ["과제이행도 + (3 or 4)", status.comments_ready], ["Template", status.template_ready], ["Report output", status.output_ready ?? status.google_ready],
+    ["과제이행도 marks", status.assignment_ready], ["Weekly Test score", status.weekly_test_ready], ["Comments", status.comments_ready], ["Template", status.template_ready], ["Report PDF", status.output_ready ?? status.google_ready],
   ];
   $("#report-checklist").innerHTML = checks.map(([label, ready]) => `<div class="check-card ${ready ? "done" : ""}"><span>${ready ? "✓" : "·"}</span><b>${escapeHtml(label)}</b></div>`).join("");
   const selectedStudents = selectedClass ? studentsForClass(selectedClass.id) : [];
@@ -525,7 +555,7 @@ function renderReports() {
   $("#download-all").disabled = readyCount === 0;
 
   if (!state.classes.length) {
-    $("#reports-by-class").innerHTML = emptyState("No reports to prepare", "Import homework + scores, 과제이행도 comments, and weekly test or general comments first.", true);
+    $("#reports-by-class").innerHTML = emptyState("No reports to prepare", "Import the Google Sheet first to create classes and students.", true);
   } else {
     $("#reports-by-class").innerHTML = state.classes.map(classItem => {
       const students = studentsForClass(classItem.id);
@@ -535,13 +565,13 @@ function renderReports() {
         const exam = student.latest_exam;
         const attempted = Number(student.homework_completed || 0) + Number(student.homework_incomplete || 0);
         const missed = attempted || Number(student.homework_excluded || 0) ? formatNumber(student.homework_incomplete || 0) : student.homework_percent == null ? "—" : "Unavailable";
-        const routingButton = `<button class="table-action" data-routing-student="${student.id}">Routing</button>`;
+        const routingButton = `<button class="table-action" data-routing-student="${student.id}">Where comments go</button>`;
         const previewAction = student.preview_ready ? `<button class="table-action" data-preview-student="${student.id}" data-period-id="${student.period_id || ""}">Preview</button>` : "";
         const downloadAction = student.report_ready ? `<button class="table-action" data-download-student="${student.id}" data-period-id="${student.period_id || ""}" data-filename="${escapeHtml(student.name)}-report.pdf">Download PDF</button>` : '<button class="table-action disabled">Needs review</button>';
         const reportActions = previewAction + downloadAction;
-        return `<div class="report-student-row"><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.school || "School missing")} · ${escapeHtml(student.grade || "Grade missing")}</small></span></div><div class="report-data"><span>Assignments missed<b>${missed}</b></span><span>Weekly Test<b>${exam ? `${formatNumber(exam.score)}${exam.max_score === 100 ? "%" : exam.max_score == null ? "" : `/${formatNumber(exam.max_score)}`}` : "—"}</b></span></div><span class="status-pill ${student.report_ready && !student.missing_test_score_warning ? "" : "warn"}">${escapeHtml(reportReason(student))}</span><div class="row-actions">${routingButton}${reportActions}</div></div>`;
+        return `<div class="report-student-row"><div class="student-name"><span class="student-avatar">${escapeHtml(initials(student.name))}</span><span><strong>${escapeHtml(student.name)}</strong><small>${escapeHtml(student.school || "School missing")} · ${escapeHtml(student.grade || "Grade missing")}</small></span></div><div class="report-data"><span>과제이행도 missed (F)<b>${missed}</b></span><span>Weekly Test<b>${exam ? `${formatNumber(exam.score)}${exam.max_score === 100 ? "%" : exam.max_score == null ? "" : `/${formatNumber(exam.max_score)}`}` : "—"}</b></span></div><span class="status-pill ${student.report_ready ? "" : "warn"}">${escapeHtml(reportReason(student))}</span><div class="row-actions">${routingButton}${reportActions}</div></div>`;
       }).join("");
-      return `<section class="report-class-section"><header><div><span class="eyebrow">${escapeHtml(classItem.subject || "CLASS REPORTS")}</span><h2>${escapeHtml(classItem.name)}</h2><p>${previewable} previewable · ${ready} ready for download · ${escapeHtml(classItem.selected_period_label || "No period")}</p></div><button class="secondary-button ${ready ? "" : "disabled"}" data-download-class="${classItem.id}" data-filename="${escapeHtml(classItem.name)}-reports.zip" ${ready ? "" : "disabled"}>Download class ZIP</button></header>${rows || emptyState("No students in this class", "Import an Assignment file containing this class.")}</section>`;
+      return `<section class="report-class-section"><header><div><span class="eyebrow">${escapeHtml(classItem.subject || "CLASS REPORTS")}</span><h2>${escapeHtml(classItem.name)}</h2><p>${previewable} previewable · ${ready} ready for download · ${escapeHtml(classItem.selected_period_label || "No week")}</p></div><button class="secondary-button ${ready ? "" : "disabled"}" data-download-class="${classItem.id}" data-filename="${escapeHtml(classItem.name)}-reports.zip" ${ready ? "" : "disabled"}>Download class ZIP</button></header>${rows || emptyState("No students in this class", "Import a Google Sheet that includes this class.")}</section>`;
     }).join("");
   }
   $("#report-history-count").textContent = `${state.reports.length} report${state.reports.length === 1 ? "" : "s"}`;
@@ -568,7 +598,7 @@ function renderConnections() {
     return `<article class="connection-card"><div class="connection-card-head"><span class="connection-logo">${short}</span><span class="status-pill ${style}">${label}</span></div><h2>${title}</h2><p>${copy}</p><div class="connection-meta"><span>Account<b>${escapeHtml(connection.account_name || "Not connected")}</b></span><span>${key === "google_docs" ? "Output folder" : "Last sync"}<b>${escapeHtml(key === "google_docs" ? (connection.resource_name || "Not configured") : formatDateTime(connection.last_synced_at))}</b></span></div>${connection.error ? `<p class="connection-error">${escapeHtml(connection.error)}</p>` : ""}<div class="connection-actions">${actions}</div></article>`;
   };
   $("#connections-grid").innerHTML = [
-    card({ key: "google_sheets", short: "GS", title: "Google Sheets", copy: "Read Assignment, Weekly Test, and Comments data from Sheets in your connected Google account.", connection: sheets, primary: "Reconnect account" }),
+    card({ key: "google_sheets", short: "GS", title: "Google Sheets", copy: "Read 과제이행도 marks and Weekly Test scores from Google Sheets in your connected account.", connection: sheets, primary: "Reconnect account" }),
     card({ key: "google_docs", short: "GD", title: "Google Docs + Drive", copy: "Copy class templates, replace controlled fields, and save PDFs in your My Drive.", connection: docs, primary: docs.status === "needs_setup" ? "Create output folder" : "Reconnect account" }),
   ].join("");
 }
@@ -608,22 +638,22 @@ const COMMENT_SECTIONS = { homework_comment: "homework", weekly_test_comment: "w
 
 const UPLOAD_COPY = {
   assignment: {
-    eyebrow: "HOMEWORK + TEST SCORES",
+    eyebrow: "01 · GOOGLE SHEET",
     title: "Import this week’s student data",
-    copy: "Use one Google Sheet with student details, dated homework marks, and a Test score or weekly test 점수 (%) column. Percentages use 0–100. Blank scores preserve existing results; students without a score remain incomplete.",
+    copy: "Use one Google Sheet with student details, dated 과제이행도 marks (A/B/F), and a Test score or weekly test 점수 (%) column. Percentages use 0–100. Blank scores preserve existing results; students without a score remain incomplete.",
   },
   homework_comment: {
-    eyebrow: "02 · REQUIRED",
+    eyebrow: "02 · 과제이행도 COMMENT",
     title: "과제이행도 comment",
-    copy: "Upload one searchable PDF or write one comment to apply the same homework feedback to every student in the selected class and week. It appears beside each homework graph.",
+    copy: "Upload one searchable PDF or write one comment to apply the same feedback to every student in the selected class and week. It appears beside each 과제이행도 graph.",
   },
   weekly_test_comment: {
-    eyebrow: "03 · CHOOSE 3 OR 4, OR BOTH",
+    eyebrow: "03 · OPTIONAL",
     title: "Weekly test comment",
     copy: "Upload one searchable PDF with every student’s weekly test comment. It appears beside the weekly test graph, continuing below when needed.",
   },
   general_comment: {
-    eyebrow: "04 · CHOOSE 3 OR 4, OR BOTH",
+    eyebrow: "04 · OPTIONAL",
     title: "General comment",
     copy: "Upload one searchable PDF with every student’s general comment. It appears in the general comment section.",
   },
@@ -655,9 +685,20 @@ function normalizedPeriodLabel(period) {
   return String(period?.label || "").trim().toLocaleLowerCase();
 }
 
+function weekNumberOf(period) {
+  if (Number(period?.week_number) > 0) return Number(period.week_number);
+  const match = String(period?.label || "").match(/week\s*0*(\d+)|0*(\d+)\s*주차/i);
+  const number = match ? Number(match[1] || match[2]) : 0;
+  return number > 0 ? number : null;
+}
+
+// A week is identified by its number; dates identify only unnumbered weeks.
 function matchingSavedPeriod(draft) {
   const label = normalizedPeriodLabel(draft);
+  const number = weekNumberOf(draft);
   return state.periods.find(period => {
+    const savedNumber = weekNumberOf(period);
+    if (number !== null || savedNumber !== null) return number === savedNumber;
     const sameDates = draft.start_date && draft.end_date
       && period.start_date === draft.start_date && period.end_date === draft.end_date;
     return sameDates || (label && normalizedPeriodLabel(period) === label);
@@ -685,7 +726,7 @@ function nextWeekNumber() {
     ...state.periods,
     ...(uploadSession?.draftPeriods || uploadDraftPeriods),
   ];
-  return Math.max(knownPeriods.length, ...knownPeriods.map(period => Number.parseInt(String(period.label || "").match(/\bweek\s+(\d+)\b/i)?.[1] || "0", 10))) + 1;
+  return Math.max(knownPeriods.length, ...knownPeriods.map(period => Number(period.week_number) || Number.parseInt(String(period.label || "").match(/\bweek\s+(\d+)\b/i)?.[1] || "0", 10))) + 1;
 }
 
 function nextWeekDates(previousPeriod = null) {
@@ -732,11 +773,11 @@ function uploadPrerequisite() {
   const kind = uploadSession?.kind;
   if (!target) return { ready: false, message: "Upload a source now or choose a week first. A week is required before Save." };
   if (kind === "assignment") {
-    return { ready: true, message: target.draft ? "This week will be created only when Assignment is saved." : "Assignment can add or update this week's roster." };
+    return { ready: true, message: target.draft ? "This week will be created only when the Google Sheet is saved." : "The Google Sheet can add or update this week's roster." };
   }
   if (kind === "weekly_test") {
     const ready = !target.draft && periodInputStatuses(target.id).some(item => item.assignment_ready);
-    return { ready, message: ready ? "Assignment data is ready. Every score must match this week's roster." : `Import Assignment for ${target.label} before Weekly Test.` };
+    return { ready, message: ready ? "Google Sheet data is ready. Every score must match this week's roster." : `Import the Google Sheet for ${target.label} before Weekly Test.` };
   }
   const eligible = state.classes.filter(item => classAcceptsComments(item, target.draft ? "" : target.id, kind));
   return {
@@ -835,12 +876,29 @@ function uploadStageEditor() {
   const suggested = { ...(stage.preview.suggested_mapping || {}), ...(state.sheet_sources[uploadSession.kind]?.mapping || {}), ...(stage.mapping || {}) };
   const datedColumns = stage.preview.headers.filter(header => /^(?:\d{4}\/)?\d{1,2}\/\d{1,2}$/.test(header));
   const assignmentNote = uploadSession.kind === "assignment" && datedColumns.length
-    ? `<div class="safety-note">Assignments missed will be counted from <strong>F</strong> across ${datedColumns.length} dated column${datedColumns.length === 1 ? "" : "s"}.</div>`
+    ? `<div class="safety-note">Missed 과제 will be counted from <strong>F</strong> across ${datedColumns.length} dated column${datedColumns.length === 1 ? "" : "s"}.</div>`
     : "";
   const periodFields = target?.draft
     ? `<label><span>Week name</span><input id="upload-period-label" value="${escapeHtml(target.label)}" required /></label><div class="form-grid"><label><span>Start date</span><input id="upload-period-start" type="date" value="${escapeHtml(target.start_date || "")}" required /></label><label><span>End date</span><input id="upload-period-end" type="date" value="${escapeHtml(target.end_date || "")}" required /></label></div>`
     : "";
   return `${sampleTable(stage.preview)}<div class="mapping-grid">${fields.map(field => uploadMappingSelect(field, stage.preview, suggested[field] || "", required.includes(field))).join("")}</div>${assignmentNote}${periodFields}`;
+}
+
+// A Sheet with WEEK N blocks names its own weeks; the Week selector is then unused.
+function sheetWeeks() {
+  const stage = currentUploadStage();
+  return stage?.mode === "google_sheet" && Array.isArray(stage.preview?.weeks) ? stage.preview.weeks : [];
+}
+
+function sheetWeeksLabel() {
+  return sheetWeeks().map(week => week.label).join(", ");
+}
+
+function sheetWeeksSummary() {
+  const weeks = sheetWeeks();
+  if (!weeks.length) return "";
+  const rows = weeks.map(week => `<li><strong>${escapeHtml(week.label)}</strong> · ${week.exists ? "existing" : "new"} · ${Number(week.student_count) || 0} students · ${Number(week.homework_columns) || 0} homework days · ${week.has_scores ? "scores" : "no scores"}</li>`).join("");
+  return `<div class="safety-note sheet-weeks"><strong>This sheet names its own weeks.</strong> Every week listed here is imported together, so the Week selector is not used.<ul>${rows}</ul></div>`;
 }
 
 function stagedSourceRow() {
@@ -849,7 +907,7 @@ function stagedSourceRow() {
   const target = uploadTargetPeriod();
   const extension = stage.mode === "google_sheet" ? "GS" : stage.mode === "comments_pdf" ? "PDF" : stage.mode === "comments_shared" ? "TEXT" : "CSV";
   const source = stage.mode === "google_sheet" ? "Google Sheets" : stage.mode === "comments_shared" ? "Shared comment" : "Local file";
-  return `<div class="staged-source-list"><div class="staged-source-row"><span class="staged-source-icon">${extension}</span><div class="staged-source-details"><strong>${escapeHtml(stage.name)}</strong><small>${source} · staged, not imported</small></div><span class="staged-source-meta">${escapeHtml(target?.label || "Choose week")}</span><button class="staged-source-remove" type="button" data-upload-remove aria-label="Remove staged source">×</button></div></div>`;
+  return `<div class="staged-source-list"><div class="staged-source-row"><span class="staged-source-icon">${extension}</span><div class="staged-source-details"><strong>${escapeHtml(stage.name)}</strong><small>${source} · staged, not imported</small></div><span class="staged-source-meta">${escapeHtml(sheetWeeksLabel() || target?.label || "Choose week")}</span><button class="staged-source-remove" type="button" data-upload-remove aria-label="Remove staged source">×</button></div></div>`;
 }
 
 function sheetSourceForm() {
@@ -865,9 +923,9 @@ function renderUploadModal() {
   const prerequisite = uploadPrerequisite();
   const stage = currentUploadStage();
   if (uploadSession.confirming && stage && target) {
-    const kindLabel = uploadSession.kind === "assignment" ? "Homework + test scores" : copy.title;
+    const kindLabel = uploadSession.kind === "assignment" ? "과제이행도 + Weekly Test scores" : copy.title;
     const classSummary = stage.mode === "comments_pdf" || stage.mode === "comments_shared" ? `<div><span>Class</span><strong>${escapeHtml(state.classes.find(item => item.id === stage.classId)?.name || "")}</strong></div>` : "";
-    openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">CONFIRM UPLOAD</span><h2>Check the source and week</h2><p>Nothing has been imported yet. Review these details before continuing.</p></div><div class="upload-modal-controls"><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving">×</button></div></div><div class="upload-confirmation-summary"><div><span>Source</span><strong>${escapeHtml(stage.name)}</strong></div><div><span>Data type</span><strong>${escapeHtml(kindLabel)}</strong></div><div><span>Week</span><strong>${escapeHtml(target.label)}</strong><small>${escapeHtml(target.start_date || "")}–${escapeHtml(target.end_date || "")}</small></div>${classSummary}${stage.mode === "comments_shared" ? `<div><span>Comment for every student</span><p class="shared-comment-preview">${escapeHtml(stage.comment)}</p></div>` : ""}</div><div class="safety-note">Choose Go back if the source, class, or week is not correct. Confirm upload will import this source only for the selection shown above.</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button" type="button" data-upload-confirm>Confirm upload</button><button class="secondary-button upload-cancel-button" type="button" data-upload-confirm-back>Go back</button><span class="upload-modal-footer-note">This is the final check before data is imported.</span></div>`);
+    openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">CONFIRM UPLOAD</span><h2>Check the source and week</h2><p>Nothing has been imported yet. Review these details before continuing.</p></div><div class="upload-modal-controls"><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving">×</button></div></div><div class="upload-confirmation-summary"><div><span>Source</span><strong>${escapeHtml(stage.name)}</strong></div><div><span>Data type</span><strong>${escapeHtml(kindLabel)}</strong></div>${sheetWeeks().length ? `<div><span>Weeks</span><strong>${escapeHtml(sheetWeeksLabel())}</strong><small>Named by the sheet</small></div>` : `<div><span>Week</span><strong>${escapeHtml(target.label)}</strong><small>${escapeHtml(target.start_date || "")}–${escapeHtml(target.end_date || "")}</small></div>`}${classSummary}${stage.mode === "comments_shared" ? `<div><span>Comment for every student</span><p class="shared-comment-preview">${escapeHtml(stage.comment)}</p></div>` : ""}</div><div class="safety-note">Choose Go back if the source, class, or week is not correct. Confirm upload will import this source only for the selection shown above.</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button" type="button" data-upload-confirm>Confirm upload</button><button class="secondary-button upload-cancel-button" type="button" data-upload-confirm-back>Go back</button><span class="upload-modal-footer-note">This is the final check before data is imported.</span></div>`);
     $("#modal").classList.add("upload-modal");
     return;
   }
@@ -879,7 +937,7 @@ function renderUploadModal() {
     ? `<button class="upload-source-choice" type="button" data-upload-manual ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">PDF</span><span><strong>${uploadSession.kind === "homework_comment" ? "Upload one comment PDF for everyone" : "Upload comments PDF"}</strong><small>${uploadSession.kind === "homework_comment" ? "Applies the PDF’s searchable text to every student in this class and week." : "One searchable PDF for one class; held locally until Save."}</small></span></button>`
     : "";
   const saveDisabled = !stage || !target || !prerequisite.ready || uploadSession.saving;
-  openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">${copy.eyebrow}</span><h2>${copy.title}</h2><p>${copy.copy}</p></div><div class="upload-modal-controls"><label class="upload-week-control"><span>Week</span><select id="upload-week-select" aria-label="Week" ${uploadSession.saving ? "disabled" : ""}>${weekOptions}</select></label><button class="upload-add-week" type="button" data-upload-add-week ${uploadSession.saving ? "disabled" : ""}>+ Add week</button><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving" ${uploadSession.saving ? "disabled" : ""}>×</button></div></div><div class="upload-modal-body"><div class="upload-prerequisite-copy ${prerequisite.ready ? "ready" : ""}"><span>${prerequisite.ready ? "✓" : "!"}</span><div>${escapeHtml(prerequisite.message)}</div></div><div class="upload-source-choices">${uploadSession.kind === "assignment" ? `<button class="upload-source-choice" type="button" data-upload-google ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">GS</span><span><strong>Import Google Sheet</strong><small>Preview the sheet before saving.</small></span></button>` : ""}${pdfChoice}${uploadSession.kind === "homework_comment" ? `<button class="upload-source-choice" type="button" data-upload-shared ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">TEXT</span><span><strong>Write one comment for everyone</strong><small>Applies only to the class and week you choose.</small></span></button>` : ""}</div>${sheetSourceForm()}${stagedSourceRow()}${uploadStageEditor()}</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button ${saveDisabled ? "disabled" : ""}" type="button" data-upload-save ${saveDisabled ? "disabled" : ""}>${uploadSession.saving ? "Saving…" : "Save"}</button><button class="secondary-button upload-cancel-button" type="button" data-close-modal ${uploadSession.saving ? "disabled" : ""}>Cancel</button><span class="upload-modal-footer-note">Closing without Save discards the staged source. Added week options remain for this browser session.</span></div>`);
+  openModal(`<div class="upload-modal-header"><div class="upload-modal-heading"><span class="eyebrow">${copy.eyebrow}</span><h2>${copy.title}</h2><p>${copy.copy}</p></div><div class="upload-modal-controls"><label class="upload-week-control"><span>Week</span><select id="upload-week-select" aria-label="Week" ${uploadSession.saving || sheetWeeks().length ? "disabled" : ""}>${weekOptions}</select></label><button class="upload-add-week" type="button" data-upload-add-week ${uploadSession.saving || sheetWeeks().length ? "disabled" : ""}>+ Add week</button><button class="upload-modal-close" type="button" data-close-modal aria-label="Close without saving" ${uploadSession.saving ? "disabled" : ""}>×</button></div></div><div class="upload-modal-body"><div class="upload-prerequisite-copy ${prerequisite.ready ? "ready" : ""}"><span>${prerequisite.ready ? "✓" : "!"}</span><div>${escapeHtml(prerequisite.message)}</div></div><div class="upload-source-choices">${uploadSession.kind === "assignment" ? `<button class="upload-source-choice" type="button" data-upload-google ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">GS</span><span><strong>Import Google Sheet</strong><small>Preview the sheet before saving.</small></span></button>` : ""}${pdfChoice}${uploadSession.kind === "homework_comment" ? `<button class="upload-source-choice" type="button" data-upload-shared ${sourceDisabled ? "disabled" : ""}><span class="upload-source-choice-icon">TEXT</span><span><strong>Write one comment for everyone</strong><small>Applies only to the class and week you choose.</small></span></button>` : ""}</div>${sheetSourceForm()}${stagedSourceRow()}${sheetWeeksSummary()}${uploadStageEditor()}</div><div class="modal-footer upload-modal-footer"><button class="primary-button upload-save-button ${saveDisabled ? "disabled" : ""}" type="button" data-upload-save ${saveDisabled ? "disabled" : ""}>${uploadSession.saving ? "Saving…" : "Save"}</button><button class="secondary-button upload-cancel-button" type="button" data-close-modal ${uploadSession.saving ? "disabled" : ""}>Cancel</button><span class="upload-modal-footer-note">Closing without Save discards the staged source. Added week options remain for this browser session.</span></div>`);
   $("#modal").classList.add("upload-modal");
   if (stage?.mode === "legacy_assignment" && target?.draft) {
     $("#upload-period-start").value = target.start_date || stage.inspection.dates[0]?.iso || "";
@@ -1001,7 +1059,7 @@ async function saveUpload(confirmed = false) {
   if (!prerequisite.ready) return toast(prerequisite.message, "error");
   let period;
   if (target?.draft) {
-    if (session.kind !== "assignment" && !(stage.mode === "comments_pdf" && session.kind !== "homework_comment")) return toast(`Import Assignment for ${target.label} first.`, "error");
+    if (session.kind !== "assignment" && !(stage.mode === "comments_pdf" && session.kind !== "homework_comment")) return toast(`Import the Google Sheet for ${target.label} first.`, "error");
     if (!target.start_date || !target.end_date) return toast("Choose the new week's start and end dates.", "error");
     if (target.start_date > target.end_date) return toast("The week start must be before its end.", "error");
     period = { period_label: target.label, period_start: target.start_date, period_end: target.end_date };
@@ -1039,7 +1097,7 @@ async function saveUpload(confirmed = false) {
     payload = { class_id: stage.classId, period_id: target.id, comment: stage.comment.trim() };
   } else if (stage.mode === "google_sheet") {
     url = "/api/google/sheets/sync";
-    payload = { kind: session.kind, spreadsheet: stage.spreadsheet, worksheet: stage.worksheet, ...period };
+    payload = { kind: session.kind, spreadsheet: stage.spreadsheet, worksheet: stage.worksheet, ...(sheetWeeks().length ? {} : period) };
   } else {
     const required = requiredFields(session.kind);
     const missing = required.filter(field => !stage.mapping?.[field]);
@@ -1296,7 +1354,7 @@ async function chooseCommentsFile(file) {
 
 function openCommentsPdfModal(file) {
   if (!state.classes.length || !state.periods.length) return toast("Import Assignment and Weekly Test data first.", "error");
-  openModal(`<span class="eyebrow">COMMENTS PDF</span><h2>Identify this class file</h2><p>One PDF must represent one class and one reporting period. Uncertain names go to the review queue.</p><form id="comments-pdf-form"><div class="form-grid"><label><span>Class</span><select id="comments-class" required><option value="">Choose a class</option>${state.classes.map(item => `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("")}</select></label><label><span>Reporting period</span><select id="comments-period" required><option value="">Choose a period</option>${periodOptions()}</select></label></div><label><span>Comment label</span><input id="comments-label" value="${escapeHtml(file.name.replace(/\.pdf$/i, ""))}" required /></label><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Match comments</button></div></form>`);
+  openModal(`<span class="eyebrow">COMMENTS PDF</span><h2>Identify this class file</h2><p>One PDF must represent one class and one week. Uncertain names go to the review queue.</p><form id="comments-pdf-form"><div class="form-grid"><label><span>Class</span><select id="comments-class" required><option value="">Choose a class</option>${state.classes.map(item => `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("")}</select></label><label><span>Week</span><select id="comments-period" required><option value="">Choose a week</option>${periodOptions()}</select></label></div><label><span>Comment label</span><input id="comments-label" value="${escapeHtml(file.name.replace(/\.pdf$/i, ""))}" required /></label><div class="modal-footer"><button type="button" class="secondary-button" data-close-modal>Cancel</button><button class="primary-button">Match comments</button></div></form>`);
   $("#comments-class").onchange = event => {
     const selected = classById(event.target.value);
     if (selected?.selected_period_id) $("#comments-period").value = selected.selected_period_id;
@@ -1347,8 +1405,8 @@ const PDF_REGION_LABELS = {
   class_name: "Class / subject",
   school_grade: "School and grade",
   reporting_week: "Reporting week",
-  homework_chart: "Homework graph",
-  homework_summary: "Homework summary",
+  homework_chart: "과제이행도 graph",
+  homework_summary: "과제이행도 summary",
   weekly_test_chart: "Weekly-test graph",
   weekly_test_summary: "Weekly-test summary",
   teacher_comment: "Teacher comment",
@@ -1417,7 +1475,7 @@ function pdfRegionEditor(region, pageCount) {
   const pageOptions = Array.from({ length: pageCount }, (_, index) => `<option value="${index + 1}" ${Number(region.page || 1) === index + 1 ? "selected" : ""}>Page ${index + 1}</option>`).join("");
   const fontFields = region.content_type === "text"
     ? `<label><span>Font size</span><input data-map-font-size type="number" min="7" max="36" step="0.25" value="${escapeHtml(region.font_size || 8.5)}" /></label><label><span>Minimum</span><input data-map-font-min type="number" min="7" max="36" step="0.25" value="${escapeHtml(region.minimum_font_size || 7)}" /></label><label><span>Alignment</span><select data-map-align><option value="left" ${region.align === "left" ? "selected" : ""}>Left</option><option value="center" ${region.align === "center" ? "selected" : ""}>Center</option><option value="right" ${region.align === "right" ? "selected" : ""}>Right</option></select></label>`
-    : `<div class="mapping-region-type">Deterministic line graph</div>`;
+    : `<div class="mapping-region-type">Graph drawn from the data</div>`;
   return `<article class="mapping-region-row" data-mapping-region="${escapeHtml(region.key)}"><header><div><strong>${escapeHtml(PDF_REGION_LABELS[region.key] || region.key)}</strong><small>${escapeHtml(region.content_type)}</small></div><label><span>Page</span><select data-map-page>${pageOptions}</select></label></header><div class="mapping-coordinate-grid"><label><span>Left %</span><input data-map-field="x" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.x)}" /></label><label><span>Bottom %</span><input data-map-field="y" type="number" min="0" max="100" step="0.1" value="${mappingPercent(box.y)}" /></label><label><span>Width %</span><input data-map-field="width" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.width)}" /></label><label><span>Height %</span><input data-map-field="height" type="number" min="0.1" max="100" step="0.1" value="${mappingPercent(box.height)}" /></label>${fontFields}</div></article>`;
 }
 
@@ -1431,12 +1489,12 @@ function pdfContinuationEditor(region, pageCount) {
 function showPdfMapping(classId) {
   const classItem = classById(classId);
   const pdf = templateForClass(classId)?.pdf_template;
-  if (!pdf) return toast("Upload a company PDF template first.", "error");
+  if (!pdf) return toast("Upload the class’s PDF template first.", "error");
   const mapping = pdf.mapping || {};
   const regions = (mapping.regions || []).map(region => pdfRegionEditor(region, pdf.page_count || 1)).join("");
   const guide = templateForClass(classId)?.example_profile?.content_guide || {};
   const continuations = pdfContinuationRegions(mapping, guide).map(region => pdfContinuationEditor(region, pdf.page_count || 1)).join("");
-  openModal(`<div class="mapping-modal-header"><div><span class="eyebrow">PDF TEMPLATE MAPPING</span><h2>${escapeHtml(classItem?.name || "Class")} · version ${pdf.version}</h2><p>Confirm where Brightline should place each student field. Coordinates are percentages of the PDF page, measured from the bottom-left.</p></div><a class="secondary-button button-link" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open source PDF</a></div><label><span>Mapping name</span><input id="pdf-mapping-name" value="${escapeHtml(mapping.name || "Company report layout")}" /></label><div class="mapping-region-list">${regions}</div><section class="mapping-continuation-section"><h3>Teacher-comment continuation</h3><p>Weekly Test feedback never continues. Extra teacher-comment pages clone a selected blank-template page and are used only when the final panel is at least half full.</p><div class="mapping-region-list">${continuations}</div></section><div class="safety-note">Publish only after checking the source PDF. Brightline will never guess a missing student match or silently clip an overflowing comment.</div><div class="modal-footer"><button class="secondary-button" id="pdf-map-draft" type="button">Save draft</button><button class="primary-button" id="pdf-map-publish" type="button">Publish mapping</button><button class="secondary-button" type="button" data-close-modal>Cancel</button></div>`);
+  openModal(`<div class="mapping-modal-header"><div><span class="eyebrow">PDF TEMPLATE MAPPING</span><h2>${escapeHtml(classItem?.name || "Class")} · version ${pdf.version}</h2><p>Confirm where Brightline should place each student field. Coordinates are percentages of the PDF page, measured from the bottom-left.</p></div><a class="secondary-button button-link" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open source PDF</a></div><label><span>Mapping name</span><input id="pdf-mapping-name" value="${escapeHtml(mapping.name || "Class report layout")}" /></label><div class="mapping-region-list">${regions}</div><section class="mapping-continuation-section"><h3>Teacher-comment continuation</h3><p>Weekly Test feedback never continues. Extra teacher-comment pages clone a selected blank-template page and are used only when the final panel is at least half full.</p><div class="mapping-region-list">${continuations}</div></section><div class="safety-note">Publish only after checking the source PDF. Brightline will never guess a missing student match or silently clip an overflowing comment.</div><div class="modal-footer"><button class="secondary-button" id="pdf-map-draft" type="button">Save draft</button><button class="primary-button" id="pdf-map-publish" type="button">Publish mapping</button><button class="secondary-button" type="button" data-close-modal>Cancel</button></div>`);
   $("#modal").classList.add("template-mapping-modal");
   const designNotice = document.createElement("p");
   designNotice.textContent = "The original PDF controls page design and mapped typography. Completed samples guide content sections only. Check these positions against the original PDF before publishing.";
@@ -1448,7 +1506,7 @@ function showPdfMapping(classId) {
 function collectPdfMapping(classId) {
   const pdf = templateForClass(classId)?.pdf_template;
   const mapping = structuredClone(pdf?.mapping || {});
-  mapping.name = $("#pdf-mapping-name").value.trim() || "Company report layout";
+  mapping.name = $("#pdf-mapping-name").value.trim() || "Class report layout";
   mapping.layout = "uploaded_pdf";
   mapping.regions = (mapping.regions || []).map(region => {
     const row = document.querySelector(`[data-mapping-region="${region.key}"]`);
@@ -1602,7 +1660,7 @@ function showExampleAnalysis(classId) {
   }).join("");
   openModal(`<span class="eyebrow">SAMPLE REPORT ANALYSIS</span><h2>${escapeHtml(classItem?.name || "Class")} sample reports</h2><p>Brightline compares structural clues across the completed PDF reports uploaded for this class.</p><div class="analysis-summary-grid"><div><span>Samples</span><strong>${profile.sample_count || 0}</strong></div><div><span>Multi-page</span><strong>${profile.multi_page_count || 0}</strong></div><div><span>Image / graph regions</span><strong>${profile.image_xobject_count || 0}</strong></div></div><div class="analysis-section"><strong>Common fonts</strong><div class="placeholder-list">${chips(profile.common_fonts)}</div></div><div class="analysis-section"><strong>Likely report sections</strong><div class="placeholder-list">${chips(profile.section_clues)}</div></div><div class="example-analysis-list">${rows || emptyState("No sample reports", "Upload a completed PDF for this class.")}</div><div class="safety-note">Clues are advisory: font names and coordinates can be approximate, image-heavy areas are only possible graph regions, and scanned PDFs need future OCR.</div><div class="modal-footer"><button class="secondary-button" type="button" data-template-example="${classId}">Upload another sample</button><button class="primary-button" data-close-modal>Done</button></div>`);
   const guide = profile.content_guide || {};
-  const sectionNames = { homework: "Homework / learning feedback", weekly_test: "Weekly test feedback", general: "General teacher feedback" };
+  const sectionNames = { homework: "과제이행도 feedback", weekly_test: "Weekly test feedback", general: "General teacher feedback" };
   const observations = (guide.sections || []).map(section => `<article class="analysis-section"><strong>${escapeHtml(sectionNames[section.section] || section.section)}</strong><p>Sample heading: ${escapeHtml(section.label)} · Page ${section.page} → ${escapeHtml(PDF_REGION_LABELS[section.target_region] || section.target_region)}</p><small>${escapeHtml((section.topics || []).join(" · ") || "No reliable content topics extracted")} · ${section.text_characters || 0} characters observed${section.graph_type_labels?.length ? ` · Chart labels: ${escapeHtml(section.graph_type_labels.join(", "))}` : ""}</small></article>`).join("");
   const contentGuide = document.createElement("div");
   const typography = (guide.sections || []).filter(section => section.preferred_font_size).map(section => `<p>${escapeHtml(sectionNames[section.section] || section.section)} · Sample page ${section.page}: ${escapeHtml((section.body_fonts || []).join(", "))}, ${Number(section.preferred_font_size).toFixed(1)} pt · ${Math.round(Number(section.text_fill_ratio || 0) * 100)}% panel fill. Text never shrinks below 7 pt.</p>`).join("");
@@ -1657,6 +1715,7 @@ async function disconnectGoogle() {
 
 function bindEvents() {
   document.addEventListener("click", async event => {
+    if (event.target.closest("[data-toast-dismiss]")) { hideToast(); return; }
     const nav = event.target.closest("[data-nav]");
     if (nav) { event.preventDefault(); go(nav.dataset.nav); return; }
     const goto = event.target.closest("[data-go]");
@@ -1755,6 +1814,7 @@ function bindEvents() {
       await generateArchive(
         `/api/reports/class/${classDownload.dataset.downloadClass}/download`,
         classDownload.dataset.filename || "class-reports.zip",
+        readyReportCount(classDownload.dataset.downloadClass),
       );
       return;
     }
@@ -1762,18 +1822,30 @@ function bindEvents() {
     if (event.target === $("#modal-backdrop") && !uploadSession?.saving) closeModal();
   });
 
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || event.defaultPrevented) return;
+    if ($("#modal-backdrop").classList.contains("hidden") || uploadSession?.saving) return;
+    event.preventDefault();
+    if (uploadSession?.confirming) { uploadSession.confirming = false; renderUploadModal(); return; }
+    closeModal();
+  });
+
+  const syncPageFromAddress = () => go(window.location.hash.slice(1) || "inbox", { push: false });
+  window.addEventListener("popstate", syncPageFromAddress);
+  window.addEventListener("hashchange", syncPageFromAddress);
+
   document.addEventListener("change", async event => {
     try {
       if (event.target.matches("#global-period-select") && event.target.value) {
         const result = await api("/api/periods/select", { method: "POST", body: JSON.stringify({ period_id: event.target.value }) });
-        state = normalizeState(result.state); render(); toast("Active reporting period changed.");
+        state = normalizeState(result.state); render(); toast("Week changed.");
       }
       if (event.target.matches("#report-class-select")) {
         selectedReportClass = event.target.value; renderReports();
       }
       if (event.target.matches("#report-period-select") && selectedReportClass && event.target.value) {
         const result = await api(`/api/classes/${selectedReportClass}/period`, { method: "POST", body: JSON.stringify({ period_id: event.target.value }) });
-        state = normalizeState(result.state); render(); toast("Class reporting period changed.");
+        state = normalizeState(result.state); render(); toast("Week changed for this class.");
       }
       if (event.target.matches("#upload-week-select") && uploadSession) {
         captureUploadFields();
@@ -1806,11 +1878,12 @@ function bindEvents() {
     await generateArchive(
       `/api/reports/class/${event.currentTarget.dataset.classId}/download`,
       `${classItem?.name || "class"}-reports.zip`,
+      readyReportCount(event.currentTarget.dataset.classId),
     );
   };
   $("#download-all").onclick = async event => {
     if (event.currentTarget.classList.contains("disabled")) return;
-    await generateArchive("/api/reports/all/download", "all-class-reports.zip");
+    await generateArchive("/api/reports/all/download", "all-class-reports.zip", readyReportCount());
   };
   $("#sidebar-toggle").onclick = () => {
     if (window.matchMedia("(max-width: 900px)").matches) $("#sidebar").classList.remove("open");
@@ -1823,7 +1896,9 @@ function bindEvents() {
     $("#sidebar-toggle").setAttribute("aria-expanded", "true");
   };
   $("#reset-data").onclick = async () => {
-    if (!confirm("Clear imported students, reporting periods, local examples, and report history? Google credentials and Google Drive files are not deleted.")) return;
+    const typed = prompt("This permanently clears imported students, weeks, sample reports, and report history on this Mac. It cannot be undone. Google credentials and Google Drive files are not deleted.\n\nType CLEAR to confirm.");
+    if (typed === null) return;
+    if (typed.trim().toUpperCase() !== "CLEAR") return toast("Nothing was cleared. Type CLEAR to confirm.", "warning");
     try {
       const result = await api("/api/reset", { method: "POST", body: JSON.stringify({ confirm: true }) });
       clearUploadDraftPeriods();
@@ -1833,5 +1908,5 @@ function bindEvents() {
 }
 
 bindEvents();
-go(window.location.hash.slice(1) || "inbox");
+go(window.location.hash.slice(1) || "inbox", { push: false });
 loadState();

@@ -50,13 +50,21 @@ Things to know:
 
 ## How to make reports
 
-1. **Import scores.** Import homework and Weekly Test scores from one Google Sheet. Include student details, dated homework marks, and a Weekly Test percentage column (0–100). This creates the reporting period, classes, and students. Blank cells keep existing scores; `0` counts as a score.
+1. **Import scores.** Import homework and Weekly Test scores from one Google Sheet. Include student details, dated homework marks, and a Weekly Test percentage column (0–100). This creates the reporting period, classes, and students. Blank cells keep existing scores; `0` counts as a score. One Sheet can hold several weeks side by side; see [Weeks](#weeks).
 2. **Add 과제이행도 comments.** Upload a searchable PDF of individual homework comments, or enter one shared comment for the whole class and week. A `___` in a shared comment is printed as each student's name.
 3. **Add Weekly Test and/or general comments.** Upload searchable PDFs, one class per PDF. Each student's comment can start with their name on its own line, or each student's block can start with its score lines (such as `총점: 18 / 21`) followed by a comment that opens with `OOO 학생은`. If a comment can't be matched to a student with confidence (no name, or more than one student named), it goes to manual review. A Weekly Test PDF can go into a new week before that week's Sheet data exists; its `총점` lines are used as scores until Sheet scores are imported.
 4. **Set up a template for each class.** Pick one of the two options under [Templates](#templates).
 5. **Review and export.** Resolve unmatched comments, preview at least one student, then download individual PDFs or a class ZIP.
 
 Missing data never blocks a report. A student is ready when the class template is ready and they have at least one piece of data for the week (homework marks, a 과제이행도 comment, a Weekly Test comment or score, or a general comment). Missing parts are left out or blank; Brightline never fills them with invented or generated text.
+
+## Weeks
+
+- **A week is identified by its number.** `Week 2`, `WEEK 2` and `2주차` all mean week 2. Dates are shown as written but do not identify a week, so two weeks may carry the same dates. A week whose label has no number is still matched by its dates.
+- **One Sheet, several weeks.** Put each week in its own block of columns (class, student, optional grade and school, dated homework marks, Weekly Test %) under a `WEEK N` heading, side by side. Brightline lists the weeks it found before you save, then imports all of them together: if one block has an error, nothing is saved. The class column may have a blank header. Week numbers need not be consecutive.
+- **The sheet's heading wins.** For a Sheet with `WEEK N` headings, the Week selector in the upload window is not used. A Sheet with no week heading goes into the week you select, as before.
+- **Reports are cumulative.** A report for week N shows the Weekly Test graph for weeks 1 to N and the student's average over them. A week without a score for that student is left out of both.
+- **One-time upgrade.** The first start after this change rebuilds the weeks table. Brightline first writes `data/backups/brightline-before-week-number-<timestamp>.db` and leaves the database unchanged if any row count differs afterwards.
 
 **Student matching:** Include a unique Student ID in the Sheet. Without one, Brightline accepts only an exact, unambiguous name match within the class, narrowed by school or grade when you provide them. It never guesses.
 
@@ -89,7 +97,7 @@ Formatting around each placeholder carries through to the finished report.
 
 - **Teacher wording is never changed.** Brightline can move whole passages into the correct section, but it never paraphrases, summarizes, invents, drops, or duplicates text.
 - **No clipped text.** Weekly Test comments stay at a readable 10–10.5pt and continue onto extra pages instead of shrinking. If content can't fit under the layout rules, the report stops for review and is not cut off.
-- **Graphs.** Reports with a PDF template show a 과제이행도 graph (daily A/B/F) and a 위클리 테스트 graph (student, class average, highest, lowest) whenever the data exists.
+- **Graphs.** Reports with a PDF template show a 과제이행도 graph (daily A/B/F) and a 위클리 테스트 graph (student, class average, highest, lowest) whenever the data exists. The 위클리 테스트 graph covers week 1 up to the chosen week, labels each point `Week N`, and prints the student's average on its subtitle line, for example `Week 1 ~ Week 4 · 평균 84%`.
 - **Display clean-up only.** The 성명 field hides `(ON)` and the class line hides tags like `[25FA]`; stored data keeps them.
 - **No guessing.** Ambiguous students, unreadable layouts, and unclear sections go to review.
 - **Each class is handled on its own.** A layout that works for one class does not prove it works for another format.
@@ -99,7 +107,7 @@ The detailed fitting, pagination, and section-routing rules (font size limits, c
 
 ### Missing Weekly Test feedback
 
-With a published PDF template whose samples clearly show a Weekly Test section, a student who has **no Weekly Test feedback** gets a standard Korean notice saying they did not take the test. The test graph is left out and the report fits on one page. **This happens even if a score is stored.** Stored scores and comments are not changed. This behavior was requested by the academy and does not apply to Google Docs templates. See the product requirements for the exact rule.
+With a published PDF template whose samples clearly show a Weekly Test section, a student who has **neither Weekly Test feedback nor a Weekly Test score** for the chosen week gets a standard Korean notice saying they did not take the test. The test graph is left out and the report fits on one page. A student with a score but no feedback keeps the graph and average; the feedback area is left blank. Stored scores and comments are not changed. This behavior does not apply to Google Docs templates. See the product requirements for the exact rule.
 
 ## Your data
 

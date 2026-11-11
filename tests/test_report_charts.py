@@ -5,7 +5,8 @@ from pypdf import PdfReader
 from reportlab.pdfgen import canvas
 
 from backend.report_charts import (draw_homework_chart, draw_homework_status_chart, draw_test_chart,
-                                   draw_weekly_test_chart, homework_points, test_points)
+                                   draw_weekly_test_chart, homework_points, test_points,
+                                   weekly_test_subtitle)
 from backend.report_engine import register_fonts
 
 
@@ -119,6 +120,47 @@ class AcademyChartTests(unittest.TestCase):
         text = PdfReader(output).pages[0].extract_text()
         for legend in ("학생점수", "평균", "최고점", "최저점", "2026-07-10", "100"):
             self.assertIn(legend, text)
+
+
+    @staticmethod
+    def week(number, student=80.0):
+        return {"week_number": number, "period_label": f"Week {number}", "start_date": "2026-07-13",
+                "end_date": "2026-07-17", "student": student, "average": 70, "highest": 90, "lowest": 50}
+
+    def drawn_text(self, series, average):
+        output = io.BytesIO()
+        document = canvas.Canvas(output)
+        draw_weekly_test_chart(document, 40, 500, 260, 180, series, "Synthetic (WT - Class A)",
+                               weekly_test_subtitle(series, average), font_name=register_fonts())
+        document.save()
+        return PdfReader(io.BytesIO(output.getvalue())).pages[0].extract_text()
+
+    def test_subtitle_formats(self):
+        week = self.week
+        self.assertEqual(weekly_test_subtitle([week(1), week(2), week(4)], 84.0), "Week 1 ~ Week 4 · 평균 84%")
+        self.assertEqual(weekly_test_subtitle([week(2)], 84.25), "Week 2 · 평균 84.2%")
+        self.assertEqual(weekly_test_subtitle([week(1), week(2)], 79.96), "Week 1 ~ Week 2 · 평균 80%")
+        self.assertEqual(weekly_test_subtitle([week(1), week(2)], None), "Week 1 ~ Week 2")
+        legacy = {"week_number": None, "period_label": "Summer", "start_date": "2026-07-13",
+                  "end_date": "2026-07-17", "student": 80.0}
+        self.assertEqual(weekly_test_subtitle([legacy], 80.0), "기간: 2026-07-13 ~ 2026-07-17 · 평균 80%")
+        self.assertEqual(weekly_test_subtitle([], None), "")
+
+    def test_chart_axis_uses_week_labels(self):
+        text = self.drawn_text([self.week(1), self.week(2), self.week(4)], 80.0)
+        for expected in ("Week 1", "Week 2", "Week 4", "Week 1 ~ Week 4 · 평균 80%"):
+            self.assertIn(expected, text)
+        self.assertNotIn("2026-07-17", text)
+
+    def test_single_point_chart_renders(self):
+        text = self.drawn_text([self.week(3, 73.0)], 73.0)
+        self.assertIn("Week 3 · 평균 73%", text)
+        self.assertIn("73", text)
+
+    def test_unnumbered_weeks_keep_date_axis_labels(self):
+        legacy = {"week_number": None, "period_label": "Summer", "start_date": "2026-07-13",
+                  "end_date": "2026-07-17", "student": 80.0, "average": 70, "highest": 90, "lowest": 50}
+        self.assertIn("2026-07-17", self.drawn_text([legacy], 80.0))
 
 
 if __name__ == "__main__":

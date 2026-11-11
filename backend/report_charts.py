@@ -255,11 +255,32 @@ def draw_homework_status_chart(c: Any, x: float, y: float, width: float, height:
                        subtitle=subtitle, font_name=font_name, legend=False)
 
 
+def _week_label(item: dict[str, Any]) -> str:
+    """``Week N`` for a numbered week; otherwise its end date, as before."""
+    if item.get("week_number") is not None:
+        return f"Week {item['week_number']}"
+    return str(item.get("end_date") or item.get("period_label") or "")
+
+
+def weekly_test_subtitle(series: list[dict[str, Any]], average: float | None) -> str:
+    """Range of weeks shown, then the student's average over them, if any."""
+    if not series:
+        return ""
+    first, last = series[0], series[-1]
+    if all(item.get("week_number") is not None for item in series):
+        span = _week_label(first) if len(series) == 1 else f"{_week_label(first)} ~ {_week_label(last)}"
+    else:
+        span = f"기간: {first.get('start_date') or ''} ~ {last.get('end_date') or ''}"
+    if average is None:
+        return span
+    return f"{span} · 평균 {round(float(average), 1):g}%"
+
+
 def draw_weekly_test_chart(c: Any, x: float, y: float, width: float, height: float,
                            series: list[dict[str, Any]], title: str, subtitle: str,
                            *, font_name: str | None = None) -> None:
     """Student, average, highest, and lowest percentages per reporting period."""
-    labels = [str(item.get("end_date") or item.get("period_label") or "") for item in series]
+    labels = [_week_label(item) for item in series]
     lines = []
     for key, name, color, marker in WEEKLY_SERIES:
         values = [_bounded(item.get(key), 100) for item in series]

@@ -343,6 +343,16 @@ class UploadModalFrontendContractTests(unittest.TestCase):
                 "Closing an upload modal must not erase added week choices.",
             )
 
+    def test_startup_bindings_only_target_elements_in_the_page(self) -> None:
+        # bindEvents() runs once at load; a handler set on a missing element throws
+        # and stops the whole script, so the page never loads.
+        html = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
+        ids = set(re.findall(r'id="([^"]+)"', html))
+        bind = self.javascript[
+            self.javascript.index("function bindEvents("):self.javascript.index("\nbindEvents();")]
+        targets = set(re.findall(r'\$\("#([\w-]+)"\)\.(?:on\w+|addEventListener)\b', bind))
+        self.assertEqual(sorted(targets - ids), [])
+
     def test_clearing_local_data_also_clears_temporary_week_choices(self) -> None:
         helper = self.section("clearUploadDraftPeriods", "normalizedPeriodLabel")
         reset_handler = self.javascript[
@@ -554,13 +564,102 @@ assert.equal(notice, "1 matched");
 
     def test_single_combined_upload_replaces_weekly_test_upload(self) -> None:
         html = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
-        self.assertIn("Homework + test scores", html)
+        self.assertIn("과제이행도 + Weekly Test scores", html)
         self.assertNotIn('data-upload-kind="weekly_test"', html)
         self.assertIn('data-upload-kind="assignment"', html)
         self.assertNotIn('data-upload-kind="comments"', html)
         for kind in ('homework_comment', 'weekly_test_comment', 'general_comment'):
             self.assertIn(f'data-upload-kind="{kind}"', html)
         self.assertIn("Blank scores preserve existing results", self.javascript)
+
+    def run_node(self, script: str) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required for the upload UI behavior check.")
+        result = subprocess.run(
+            [node, "-e", script],
+            cwd=(Path(__file__).resolve().parent.parent / "frontend"),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_multi_week_sheet_lists_its_weeks_and_escapes_them(self) -> None:
+        self.run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync("app.js", "utf8");
+const part = source.slice(source.indexOf("function sheetWeeks("), source.indexOf("function stagedSourceRow("));
+let stage = {mode: "google_sheet", preview: {weeks: [
+  {week_number: 1, label: "Week 1", exists: false, student_count: 29, homework_columns: 5, has_scores: true},
+  {week_number: 2, label: "<b>Week 2</b>", exists: true, student_count: 3, homework_columns: 4, has_scores: false},
+]}};
+const context = {
+  currentUploadStage: () => stage,
+  escapeHtml: text => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
+};
+vm.runInNewContext(part, context);
+const html = vm.runInNewContext("sheetWeeksSummary()", context);
+assert.ok(html.includes("This sheet names its own weeks."));
+assert.ok(html.includes("<strong>Week 1</strong> · new · 29 students · 5 homework days · scores"));
+assert.ok(html.includes("&lt;b&gt;Week 2&lt;/b&gt;</strong> · existing · 3 students · 4 homework days · no scores"));
+assert.ok(!html.includes("<b>Week 2</b>"));
+assert.equal(vm.runInNewContext("sheetWeeksLabel()", context), "Week 1, <b>Week 2</b>");
+stage = {mode: "google_sheet", preview: {headers: []}};
+assert.equal(vm.runInNewContext("sheetWeeksSummary()", context), "");
+assert.equal(vm.runInNewContext("sheetWeeks().length", context), 0);
+stage = {mode: "comments_pdf", preview: {weeks: [{label: "Week 1"}]}};
+assert.equal(vm.runInNewContext("sheetWeeks().length", context), 0);
+stage = null;
+assert.equal(vm.runInNewContext("sheetWeeksSummary()", context), "");
+""")
+
+    def test_multi_week_sheet_disables_week_choice_and_sends_no_period(self) -> None:
+        modal = self.section("renderUploadModal", "addUploadWeek")
+        self.assertRegex(
+            modal, r'id="upload-week-select"[^>]*\$\{uploadSession\.saving \|\| sheetWeeks\(\)\.length \? "disabled"')
+        self.assertRegex(
+            modal, r'data-upload-add-week \$\{uploadSession\.saving \|\| sheetWeeks\(\)\.length \? "disabled"')
+        self.assertIn("${sheetWeeksSummary()}${uploadStageEditor()}", modal)
+        save = self.section("saveUpload", "fieldsForKind")
+        self.assertIn("...(sheetWeeks().length ? {} : period)", save)
+
+    def test_saved_week_matching_uses_week_numbers(self) -> None:
+        self.run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync("app.js", "utf8");
+const part = source.slice(source.indexOf("function normalizedPeriodLabel("), source.indexOf("function reconcileUploadDraftPeriods("));
+const week2 = {id: "w2", label: "Week 2", week_number: 2, start_date: "2026-07-13", end_date: "2026-07-17"};
+const summer = {id: "s", label: "Summer", week_number: null, start_date: "2026-08-03", end_date: "2026-08-07"};
+const context = {state: {periods: [week2, summer]}};
+vm.runInNewContext(part, context);
+const match = draft => vm.runInNewContext("matchingSavedPeriod(draft)", {...context, draft});
+assert.equal(match({label: "Week 5", start_date: "2026-07-13", end_date: "2026-07-17"}), null);
+assert.equal(match({label: "Week 2", start_date: "2026-09-01", end_date: "2026-09-05"}).id, "w2");
+assert.equal(match({label: "week 2", start_date: "", end_date: ""}).id, "w2");
+assert.equal(match({label: "Make-up", start_date: "2026-08-03", end_date: "2026-08-07"}).id, "s");
+assert.equal(match({label: "Make-up", start_date: "2026-07-13", end_date: "2026-07-17"}), null);
+assert.equal(match({label: "Summer", start_date: "2026-09-01", end_date: "2026-09-05"}).id, "s");
+""")
+
+    def test_next_week_number_prefers_week_number(self) -> None:
+        self.run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync("app.js", "utf8");
+const part = source.slice(source.indexOf("function nextWeekNumber("), source.indexOf("function nextWeekDates("));
+const context = {state: {periods: [{label: "Opening", week_number: 7}, {label: "Week 2", week_number: 2}]},
+                 uploadSession: null, uploadDraftPeriods: [{label: "Week 8"}]};
+vm.runInNewContext(part, context);
+assert.equal(vm.runInNewContext("nextWeekNumber()", context), 9);
+context.state.periods = [{label: "Opening", week_number: 7}];
+context.uploadDraftPeriods = [];
+assert.equal(vm.runInNewContext("nextWeekNumber()", context), 8);
+""")
 
     def test_staged_google_sheet_shows_preview_without_mapping_or_date_fields(self) -> None:
         editor = self.section("uploadStageEditor", "stagedSourceRow")
@@ -654,6 +753,7 @@ const session = {kind: "homework_comment", draftPeriods: []};
 const context = {uploadSession: session, state: {periods: []}, uploadTargetPeriod: () => null,
  uploadPrerequisite: () => ({ready: true}), currentUploadStage: () => null,
  sheetSourceForm: () => "", stagedSourceRow: () => "", uploadStageEditor: () => "", escapeHtml: value => value,
+ sheetWeeks: () => [], sheetWeeksSummary: () => "", sheetWeeksLabel: () => "",
  openModal: value => {html = value;}, $: () => ({classList: {add() {}}}), bindSamplePreviewScroll() {}};
 vm.createContext(context); vm.runInContext(constants + modal, context);
 for (const kind of ["homework_comment", "weekly_test_comment", "general_comment", "assignment"]) {

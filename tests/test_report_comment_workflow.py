@@ -64,7 +64,7 @@ class ReportCommentWorkflowTests(unittest.TestCase):
 
     def test_homework_pdf_applies_one_comment_to_every_student(self):
         result = self.pdf('homework', ['Review ionic bonding and Lewis structures.'])
-        self.assertEqual(result['summary'], 'Homework comment applied to 5 students.')
+        self.assertEqual(result['summary'], '과제이행도 comment applied to 5 students.')
         students = app.DB.state()['students']
         self.assertEqual(sum(student['homework_comment_ready'] for student in students), 5)
         for student in students:

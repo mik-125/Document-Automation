@@ -45,13 +45,17 @@ The browser upload workflow does not accept CSV. Mapped CSV and the legacy Royal
 
 ## Required user workflow and readiness
 
-1. Connect Google and import homework plus Weekly Test scores from one Google Sheet. This creates reporting periods, classes, and students. Blank reimported scores preserve existing scores; zero is a valid score.
+1. Connect Google and import homework plus Weekly Test scores from one Google Sheet. This creates reporting periods, classes, and students. Blank reimported scores preserve existing scores; zero is a valid score. A Sheet may hold several `WEEK N` blocks side by side; all are imported in one all-or-nothing step and the Week selector is ignored for such a Sheet.
 2. Add the 과제이행도 comment for the same class and period through a searchable individual PDF or a shared class comment. In a shared comment, a `___` placeholder is printed as the student's display name.
 3. Import searchable Weekly Test comments, general comments, or both. Each PDF represents exactly one class. A Weekly Test or general PDF may go into a week that has no Sheet data yet (for example a new week from "+ Add week"). Unknown or ambiguous students must go to manual review.
 4. Configure each class with either an original blank PDF whose mapping is reviewed and published, or a Google Docs template containing all required placeholders.
 5. Resolve unmatched comments, preview at least one report, then download individual reports or a class ZIP. Ready students may generate while classmates remain incomplete.
 
 A week's roster is every student with Sheet data or any imported score/comment in that week. Missing data never blocks an otherwise valid report: a rostered student is ready when the class template is ready and the student has at least one of homework entries, a 과제이행도 comment, a Weekly Test comment, a general comment, or a Weekly Test score. Missing pieces are omitted or left blank, never invented or replaced by generated text.
+
+Week identity: a week is identified by its week number (`Week N`, `WEEK N`, `N주차`); dates are descriptive and may repeat across weeks. A week whose label carries no number is matched by its dates. Never make a date range unique again, and never merge two numbered weeks because their dates match. Each `WEEK N` block is a contiguous column group (class, student, optional grade/school, dated homework marks, one Weekly Test % column); the class column may have a blank header. A block with no week heading, or a repeated week number, is an error rather than a guess.
+
+Cumulative reports: a report for week N uses the class's numbered weeks 1..N. A week in which the student has no effective score is omitted from the graph and from the average, never drawn as zero.
 
 Weekly Test score precedence: a Sheet score wins; otherwise a score PDF's own `총점: X / Y` line is used (percent = X / Y × 100). Q scores are never summed.
 
@@ -77,7 +81,7 @@ Student matching should use a stable Student ID. Without one, accept only an exa
 - Comment text starts at 10.5 points. 과제이행도 text may shrink to fit its panel (7-point floor).
 - Weekly Test feedback (approved by the product owner) never shrinks below 10 points. It fills the space beside the Weekly Test graph, then the full width below it, then continues on generated pages built from the original template page: page background kept, content area cleared, the template's own 위클리 테스트 heading bar, and a full-width bordered box.
 - When a student has no general (선생님 코멘트) comment, that panel is hidden and the Weekly Test panel extends into its space.
-- Graphs come from data, not sample detection: 과제이행도 shows daily A/B/F status (X/blank = gap) for the week, titled `(ON)Name (과제 - class)` with `기간`; 위클리 테스트 shows 학생점수, 평균, 최고점, 최저점 percentages per week (class figures computed from all scored students), titled `(ON)Name (WT - class)` with `기간`. No data means no graph.
+- Graphs come from data, not sample detection: 과제이행도 shows daily A/B/F status (X/blank = gap) for the week, titled `(ON)Name (과제 - class)` with `기간`; 위클리 테스트 shows 학생점수, 평균, 최고점, 최저점 percentages per week (class figures computed from all scored students), titled `(ON)Name (WT - class)`; numbered weeks are labelled `Week N` and the subtitle reads `Week 1 ~ Week 4 · 평균 84%` (one week: `Week 2 · 평균 84%`), where 평균 is the student's own mean over the included weeks, to one decimal with a trailing `.0` dropped. Unnumbered weeks keep date labels and a `기간` subtitle. No data means no graph.
 - Additional teacher-comment pages are allowed only when the final comment panel is at least half occupied. Compact sparse remainders into earlier panels.
 - Teacher overflow pages must derive from an appropriate original full-width feedback page, relabeled for the overflowing section. If unavailable, repeat the original section panel. Never derive layout or artwork from a completed sample.
 - Omit unused trailing original pages. Preserve the original backgrounds and stored mapping.
@@ -86,11 +90,12 @@ Student matching should use a stable Student ID. Without one, accept only an exa
 
 ## Missing Weekly Test feedback policy
 
-For a ready, published PDF template whose completed-sample analysis reliably identifies a Weekly Test section, missing Weekly Test feedback is treated as an academy-requested output assumption that the student missed the test, even if a stored score exists.
+For a ready, published PDF template whose completed-sample analysis reliably identifies a Weekly Test section, a student with neither Weekly Test feedback nor an effective Weekly Test score for the chosen week is treated, as an academy-requested output assumption, as having missed the test. A stored score without feedback is not a missed test: the graph and average are shown and the feedback area stays blank.
 
 - Replace the Weekly Test narrative with: `학생은 이번 위클리 테스트를 응시하지 않았기에 정확한 이해도 판단이 어렵습니다. 위클리 테스트를 나중에 한 번 풀어보시는 것을 추천드립니다.`
 - Suppress the Weekly Test graph and fit the report on one page.
-- Do not alter the stored score, source comments, or claim verified attendance.
+- Do not alter stored scores, source comments, or claim verified attendance.
+- Apply the same condition in `backend/server.py` (`missing_test_assumption`) and in the renderer (`backend/adaptive_reports.py`).
 - This exception does not apply to Google Docs or PDF templates without the required sample evidence.
 
 ## Architecture map
@@ -99,6 +104,7 @@ For a ready, published PDF template whose completed-sample analysis reliably ide
 - `backend/server.py`: HTTP routes, validation, local authentication, state assembly, imports, report generation, and downloads.
 - `backend/database.py`: SQLite schema, migrations, transactions, provenance, readiness, and reset behavior.
 - `backend/integrations.py`: tabular mapping and Google Sheets, Docs, Drive, and OAuth.
+- `backend/sheet_weeks.py`: splits a Sheet into its `WEEK N` column blocks; each block then goes through the single-week import.
 - `backend/report_engine.py`: CSV/PDF parsing, template inspection, mapped PDF generation, and report validation.
 - `backend/adaptive_reports.py`: sample-aware fitting and pagination.
 - `backend/template_mapping.py`: PDF mapping schema and validation.
@@ -111,6 +117,7 @@ For a ready, published PDF template whose completed-sample analysis reliably ide
 ## Implementation and security rules
 
 - Keep backend persistence, API payloads, frontend state, and regression tests synchronized when a contract changes.
+- The one-time week-number upgrade (`Database._migrate_period_week_numbers`) writes `data/backups/brightline-before-week-number-<timestamp>.db` first and rolls back unless every row count is unchanged. Test it only against temporary databases.
 - Use database methods and explicit transactions for multi-step writes. Preserve foreign keys, WAL mode, import provenance, class/period scoping, and rollback on failure.
 - Validate content type, payload shape, numeric ranges, base64 data, file size/type, filenames, ownership, and replacement confirmation before writing.
 - Scope every comment import and shared comment to its selected class, period, and section.

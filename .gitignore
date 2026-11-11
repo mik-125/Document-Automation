@@ -11,3 +11,12 @@ service-account*.json
 token*.json
 client_secret*.json
 google-oauth*.json
+graphify-out/
+*.db
+*.sqlite
+*.sqlite3
+*backup*/
+backups/
+reports/
+.env.*
+!.env.example

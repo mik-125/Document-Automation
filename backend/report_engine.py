@@ -139,7 +139,7 @@ def inspect_homework_csv(text: str) -> dict[str, Any]:
         seen_dates.add(parsed.isoformat())
         dates.append({"column": column, "label": label.strip(), "iso": parsed.isoformat()})
     if not dates:
-        raise ValidationError("No homework dates were found in the CSV header.")
+        raise ValidationError("No 과제이행도 dates were found in the CSV header.")
 
     records = []
     class_names: set[str] = set()
@@ -185,15 +185,15 @@ def homework_records(text: str, period_start: str, period_end: str) -> list[dict
         start = date.fromisoformat(period_start)
         end = date.fromisoformat(period_end)
     except ValueError as exc:
-        raise ValidationError("The reporting period is invalid.") from exc
+        raise ValidationError("The week is invalid.") from exc
     if start > end:
-        raise ValidationError("The reporting period start must be before its end.")
+        raise ValidationError("The week's start date must be before its end date.")
 
     selected_dates = [
         item for item in inspected["dates"] if start <= date.fromisoformat(item["iso"]) <= end
     ]
     if not selected_dates:
-        raise ValidationError("The selected reporting period contains no homework dates.")
+        raise ValidationError("The selected week contains no 과제이행도 dates.")
 
     parsed_records: list[dict[str, Any]] = []
     for record in inspected["records"]:
@@ -636,7 +636,7 @@ def parse_shared_comment_pdf(pdf_bytes: bytes) -> str:
         if (page_comment := _preserve_comment_sections(page, gap))
     ).strip()
     if not comment:
-        raise ValidationError("No homework comment could be extracted from this PDF.")
+        raise ValidationError("No 과제이행도 comment could be extracted from this PDF.")
     return comment
 
 

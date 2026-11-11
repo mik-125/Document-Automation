@@ -38,8 +38,6 @@ def inspect_student(student: dict, output_dir: Path) -> dict:
     flags = []
     if student.get("routing_review_required"):
         flags.append("low-confidence comment routing")
-    if student.get("missing_test_score_warning"):
-        flags.append("stored score with missed-test notice")
     result = {
         "student_id": student["id"],
         "student": student["name"],

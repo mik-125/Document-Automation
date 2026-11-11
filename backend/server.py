@@ -11,6 +11,7 @@ import mimetypes
 import os
 import re
 import shutil
+import sqlite3
 import time
 import urllib.parse
 import uuid
@@ -23,7 +24,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from backend.database import Database, normalize_student_name, normalize_value
+from backend.sheet_weeks import split_week_blocks
+from backend.database import (
+    Database,
+    normalize_student_name,
+    normalize_value,
+    week_number_from_label,
+)
 from backend.comment_sections import COMMENT_SECTIONS, report_comment_sections
 from backend.sample_content import merge_content_guides, organize_comments
 from backend.integrations import (
@@ -155,30 +162,62 @@ def report_zip_member_name(student: dict[str, Any]) -> str:
     ) + ".pdf"
 
 
-def local_request_context(host: str, origin: str = "", fetch_site: str = "") -> bool:
+def public_origin() -> tuple[str, int] | None:
+    """The one authenticated-HTTPS origin (such as an ngrok tunnel) allowed besides loopback."""
+    value = os.environ.get("BRIGHTLINE_PUBLIC_ORIGIN", "").strip()
+    if not value:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(value)
+        port = parts.port or 443
+    except ValueError:
+        parts, port = None, 0
+    if (
+        not parts
+        or parts.scheme != "https"
+        or not parts.hostname
+        or parts.username
+        or parts.password
+        or parts.path.strip("/")
+        or parts.query
+        or parts.fragment
+    ):
+        raise RuntimeError(
+            "BRIGHTLINE_PUBLIC_ORIGIN must be an https origin such as https://name.ngrok-free.app"
+        )
+    return parts.hostname.casefold(), port
+
+
+def local_request_context(
+    host: str, origin: str = "", fetch_site: str = "", *, allow_public: bool = True
+) -> bool:
     if fetch_site.casefold() == "cross-site":
         return False
     try:
         host_parts = urllib.parse.urlsplit(f"//{host}")
         host_name = (host_parts.hostname or "").casefold()
         if (
-            host_name not in LOOPBACK_HOSTS
-            or host_parts.username
+            host_parts.username
             or host_parts.password
             or host_parts.path
             or host_parts.query
             or host_parts.fragment
         ):
             return False
+        public = public_origin() if allow_public else None
+        if public and host_name == public[0] and host_parts.port in (None, public[1]):
+            scheme, default_port, host_port = "https", 443, public[1]
+        elif host_name in LOOPBACK_HOSTS:
+            scheme, default_port, host_port = "http", 80, host_parts.port or 80
+        else:
+            return False
         if not origin:
             return True
         origin_parts = urllib.parse.urlsplit(origin)
         origin_name = (origin_parts.hostname or "").casefold()
-        if origin_parts.scheme != "http" or origin_name != host_name:
+        if origin_parts.scheme != scheme or origin_name != host_name:
             return False
-        host_port = host_parts.port or 80
-        origin_port = origin_parts.port or 80
-        return host_port == origin_port
+        return (origin_parts.port or default_port) == host_port
     except ValueError:
         return False
 
@@ -606,7 +645,7 @@ def app_state() -> dict[str, Any]:
             "pdf_template": (
                 {
                     "id": str(pdf_template.get("id") or ""),
-                    "name": str(pdf_template.get("name") or "Company report template"),
+                    "name": str(pdf_template.get("name") or "Class report template"),
                     "version": int(pdf_template.get("version") or 0),
                     "status": str(pdf_template.get("status") or "draft"),
                     "ready": pdf_ready,
@@ -666,15 +705,11 @@ def app_state() -> dict[str, Any]:
         student["routing_review_required"] = any(
             decision.get("requires_review") for decision in organized["decisions"]
         )
-        student["missing_test_feedback_assumption"] = bool(
-            output_mode == "pdf_template"
-            and any(s.get("section") == "weekly_test" and s.get("reliable", True)
-                    for s in guide.get("sections", []))
-            and not organized["sections"]["weekly_test"].strip()
-        )
-        student["missing_test_score_warning"] = bool(
-            student["missing_test_feedback_assumption"]
-            and any(exam.get("score") is not None for exam in student.get("exams", []))
+        student["missing_test_feedback_assumption"] = missing_test_assumption(
+            pdf_template_ready=output_mode == "pdf_template",
+            guide=guide,
+            weekly_test_text=organized["sections"]["weekly_test"],
+            exams=student.get("exams", []),
         )
         student["output_ready"] = bool(output_mode == "pdf_template" or google_docs_ready)
         student["google_ready"] = student["output_ready"]
@@ -731,27 +766,33 @@ def period_from_payload(
     if period_id:
         period = DB.get_period(period_id)
         if not period:
-            raise ValidationError("The selected reporting period no longer exists.")
+            raise ValidationError("The selected week no longer exists.")
         return period
     if not allow_create:
-        raise ValidationError("Choose an existing reporting period for this import.")
+        raise ValidationError("Choose an existing week for this import.")
     start = str(payload.get("period_start") or "")
     end = str(payload.get("period_end") or "")
     label = str(payload.get("period_label") or "").strip()
+    week_number = payload.get("week_number")
+    if week_number is None:
+        week_number = week_number_from_label(label)
+    elif isinstance(week_number, bool) or not isinstance(week_number, int) or week_number < 1:
+        raise ValidationError("Week number must be a whole number of 1 or more.")
     if not start or not end:
-        raise ValidationError("Choose an existing reporting period or enter its start and end dates.")
+        raise ValidationError("Choose an existing week or enter its start and end dates.")
     try:
         start_date = date.fromisoformat(start)
         end_date = date.fromisoformat(end)
     except ValueError as exc:
-        raise ValidationError("Reporting period dates are invalid.") from exc
+        raise ValidationError("Week dates are invalid.") from exc
     if start_date > end_date:
-        raise ValidationError("The reporting period start must be before its end.")
+        raise ValidationError("The week's start date must be before its end date.")
     return {
         "id": "",
-        "label": label or f"{start} to {end}",
+        "label": label or (f"Week {week_number}" if week_number else f"{start} to {end}"),
         "start_date": start,
         "end_date": end,
+        "week_number": week_number,
     }
 
 
@@ -949,6 +990,88 @@ def _automatic_sheet_candidate(
     return max(candidates, key=lambda candidate: candidate["score"]) if candidates else None
 
 
+def week_block_previews(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Describe each ``WEEK N`` block of a Sheet for the upload preview."""
+    previews = []
+    for block in blocks:
+        number = int(block["week_number"])
+        values, _, preview = _automatic_sheet_values(block["values"], "assignment")
+        previews.append({
+            "week_number": number,
+            "label": f"Week {number}",
+            "exists": DB.find_period(week_number=number) is not None,
+            "student_count": int(preview.get("row_count") or 0),
+            "homework_columns": sum(_is_assignment_date_header(header) for header in values[0]),
+            "has_scores": "weekly_test_score" in (preview.get("suggested_mapping") or {}),
+        })
+    return previews
+
+
+def _week_block_worksheet(worksheets: list[dict[str, Any]]) -> str | None:
+    """Return the first worksheet tab that names its own weeks, if any."""
+    for worksheet in worksheets:
+        try:
+            found = split_week_blocks(list(worksheet.get("values") or []))
+        except IntegrationError:
+            found = True  # A week sheet with a fixable heading problem; report it on import.
+        if found:
+            return str(worksheet.get("worksheet") or "")
+    return None
+
+
+def import_week_blocks(
+    *,
+    blocks: list[dict[str, Any]],
+    year: int,
+    source_name: str,
+    source_provider: str,
+    confirm_replace: bool = False,
+) -> str:
+    """Import every ``WEEK N`` block of one Sheet, all or nothing."""
+    summaries: list[str] = []
+    conflicts: list[str] = []
+    with DB.connect() as transaction:
+        for block in blocks:
+            number = int(block["week_number"])
+            try:
+                values, _, preview = _automatic_sheet_values(block["values"], "assignment")
+                # Sheet dates have no year: a stored week keeps its own year, so a
+                # re-sync after New Year is not a change. New weeks use ``year``.
+                stored = DB.find_period(week_number=number)
+                block_year = int(str(stored["start_date"])[:4]) if stored else year
+                dates = _assignment_period_from_headers(values[0], f"{block_year}-01-01")
+                if not dates:
+                    raise ValidationError("No dated 과제이행도 columns were found.")
+                summary = import_mapped_table(
+                    values=values,
+                    mapping=dict(preview.get("suggested_mapping") or {}),
+                    kind="assignment",
+                    period={"id": "", "label": f"Week {number}", "week_number": number, **dates},
+                    source_name=source_name,
+                    source_provider=source_provider,
+                    confirm_replace=confirm_replace,
+                    connection=transaction,
+                )
+            except IntegrationError as exc:
+                if exc.code != "replacement_confirmation_required":
+                    raise IntegrationError(f"Week {number}: {exc}", exc.code) from exc
+                examples = re.sub(r"^.* existing data for |\. Confirm replacement.*$", "", str(exc))
+                conflicts.append(f"Week {number} ({examples})")
+                continue
+            except ValueError as exc:
+                raise ValidationError(f"Week {number}: {exc}") from exc
+            summaries.append(f"Week {number}: {summary}")
+        if conflicts:
+            # Raising inside the transaction rolls back the weeks already written.
+            raise IntegrationError(
+                "This import would replace different existing data in "
+                + "; ".join(conflicts)
+                + ". Confirm replacement to continue.",
+                "replacement_confirmation_required",
+            )
+    return " · ".join(summaries)
+
+
 def _automatic_sheet_error(kind: str, *, found_table: bool) -> IntegrationError:
     if not found_table:
         return IntegrationError(
@@ -972,7 +1095,7 @@ def _automatic_sheet_values(
 ) -> tuple[list[list[Any]], int, dict[str, Any]]:
     if kind not in _AUTOMATIC_SHEET_REQUIRED_FIELDS:
         raise ValidationError(
-            "Choose Assignment, Weekly Test, or Comments before previewing the sheet."
+            "Choose what you are importing before previewing the sheet."
         )
     candidate = _automatic_sheet_candidate(values, kind)
     if not candidate or not candidate["score"][0]:
@@ -989,7 +1112,7 @@ def _automatic_workbook_sheet(
 
     if kind not in _AUTOMATIC_SHEET_REQUIRED_FIELDS:
         raise ValidationError(
-            "Choose Assignment, Weekly Test, or Comments before previewing the sheet."
+            "Choose what you are importing before previewing the sheet."
         )
     found_table = False
     complete: list[tuple[dict[str, Any], dict[str, Any], int]] = []
@@ -1087,11 +1210,11 @@ def _validate_source_week(
         return
     weeks = [str(record.get("reporting_week") or "").strip() for record in records]
     if any(not week for week in weeks):
-        raise ValidationError("Every row needs a reporting week when that column is mapped.")
+        raise ValidationError("Every row needs a week when that column is mapped.")
     normalized_weeks = {normalize_value(week) for week in weeks}
     if len(normalized_weeks) != 1:
         raise ValidationError(
-            "This file contains multiple reporting weeks. Filter it to one week before importing."
+            "This file contains more than one week. Filter it to one week before importing."
         )
     if normalized_weeks != {normalize_value(str(period["label"]))}:
         raise ValidationError(
@@ -1102,15 +1225,15 @@ def _validate_source_week(
 def _reuse_existing_period(period: dict[str, Any]) -> dict[str, Any]:
     if period.get("id"):
         return period
-    existing = next(
-        (
-            item
-            for item in DB.state()["periods"]
-            if item["start_date"] == period.get("start_date")
-            and item["end_date"] == period.get("end_date")
-        ),
-        None,
-    )
+    try:
+        existing = DB.find_period(
+            start_date=str(period.get("start_date") or ""),
+            end_date=str(period.get("end_date") or ""),
+            label=str(period.get("label") or ""),
+            week_number=period.get("week_number"),
+        )
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
     return existing or period
 
 
@@ -1174,7 +1297,7 @@ def _resolve_existing_targets(
         class_item = classes.get(normalize_value(record["class_name"]))
         if not class_item:
             raise ValidationError(
-                f"Import Assignment data before {kind.replace('_', ' ')} data for {record['class_name']}."
+                f"Import the Google Sheet for {record['class_name']} before {kind.replace('_', ' ')} data."
             )
         candidates = students_by_class.get(class_item["id"], [])
         external_id = str(record.get("student_id") or "").strip()
@@ -1203,8 +1326,8 @@ def _resolve_existing_targets(
                 ]
         if not matches:
             raise ValidationError(
-                f"No Assignment roster match was found for {record['student_name']} in {class_item['name']}. "
-                "Correct the name or map the same Student ID used by Assignment."
+                f"No student in the Google Sheet roster matches {record['student_name']} in {class_item['name']}. "
+                "Correct the name or use the same Student ID as the Google Sheet."
             )
         if len(matches) > 1:
             raise ValidationError(
@@ -1218,7 +1341,7 @@ def _resolve_existing_targets(
         excluded = int(student.get("homework_excluded") or 0)
         if not attempted and not excluded and student.get("homework_percent") is None:
             raise ValidationError(
-                f"Assignment data for {record['student_name']} is missing in {period['label']}."
+                f"과제이행도 marks for {record['student_name']} are missing in {period['label']}."
             )
         if kind == "comments" and not any(
             exam.get("score") is not None
@@ -1371,9 +1494,11 @@ def import_mapped_table(
     source_name: str,
     source_provider: str,
     confirm_replace: bool = False,
+    connection: sqlite3.Connection | None = None,
 ) -> str:
+    """Import one week. With ``connection`` the caller owns the transaction."""
     if kind not in {"assignment", "weekly_test", "comments"}:
-        raise ValidationError("Choose Assignment, Weekly Test, or Comments as the import type.")
+        raise ValidationError("Choose scores, Weekly Test, or Comments as the import type.")
     if kind == "assignment" and not (
         {"assignment_completed", "assignment_total"}.issubset(mapping)
         or "assignment_percent" in mapping
@@ -1398,7 +1523,7 @@ def import_mapped_table(
         or "assignment_percent" in mapping
     ):
         raise ValidationError(
-            "Assignment imports require completed and total columns, or an assignment percent column."
+            "과제이행도 imports need completed and total columns, or a 과제이행도 percent column."
         )
     if kind == "weekly_test" and "weekly_test_score" not in mapping:
         raise ValidationError("Weekly Test imports require a score column.")
@@ -1415,17 +1540,17 @@ def import_mapped_table(
                     continue
                 day = parse_date_label(str(header), int(str(period["start_date"])[:4]))
                 if day is None or not period["start_date"] <= day.isoformat() <= period["end_date"]:
-                    raise ValidationError("Homework dates must belong to the selected reporting week.")
+                    raise ValidationError("과제이행도 dates must fall inside the selected week.")
                 value = str(record.get(field) or "").strip()
                 grade = unicodedata.normalize("NFKC", value).upper()
                 daily.append({"date": day.isoformat(), "label": str(header), "value": value,
                               "category": "completed" if grade in {"A", "B"} else "incomplete" if grade == "F" else "excluded",
                               "score": {"A": 100, "B": 75, "F": 0}.get(grade)})
             item["_daily"] = sorted(daily, key=lambda entry: entry["date"])
-            percent_value = parse_number(item.get("assignment_percent"), "Assignment percent")
+            percent_value = parse_number(item.get("assignment_percent"), "과제이행도 percent")
             if percent_value is not None:
                 if not 0 <= percent_value <= 100:
-                    raise ValidationError("Assignment percent must be between 0 and 100.")
+                    raise ValidationError("과제이행도 percent must be between 0 and 100.")
             has_count_value = bool(
                 str(item.get("assignment_completed") or "").strip()
                 or str(item.get("assignment_total") or "").strip()
@@ -1433,7 +1558,7 @@ def import_mapped_table(
             if has_count_value:
                 completed_number = parse_number(
                     item.get("assignment_completed"),
-                    "Assignments completed",
+                    "과제 completed",
                     required=True,
                 )
                 total_number = parse_number(
@@ -1441,7 +1566,7 @@ def import_mapped_table(
                 )
                 if not completed_number.is_integer() or not total_number.is_integer():
                     raise IntegrationError(
-                        "Assignment counts must be whole numbers.", "invalid_number"
+                        "과제 counts must be whole numbers.", "invalid_number"
                     )
                 completed = int(completed_number)
                 total = int(total_number)
@@ -1456,7 +1581,7 @@ def import_mapped_table(
                     or (total == 0 and not automatic_missed_count)
                 ):
                     raise ValidationError(
-                        "Assignment totals must be positive and completed cannot exceed total."
+                        "과제 totals must be positive and completed cannot exceed total."
                     )
                 calculated_percent = round(completed / total * 100, 1) if total else 100.0
                 if (
@@ -1464,7 +1589,7 @@ def import_mapped_table(
                     and abs(percent_value - calculated_percent) > 0.11
                 ):
                     raise ValidationError(
-                        "Assignment percent does not match the completed and total counts."
+                        "과제이행도 percent does not match the completed and total counts."
                     )
                 percent_value = calculated_percent
                 excluded_number = parse_number(
@@ -1484,7 +1609,7 @@ def import_mapped_table(
                 excluded = 0
             else:
                 raise ValidationError(
-                    "Every Assignment row needs completed and total counts, or a percent."
+                    "Every 과제이행도 row needs completed and total counts, or a percent."
                 )
             item.update(
                 {
@@ -1530,13 +1655,14 @@ def import_mapped_table(
     class_ids: set[str] = set()
     created = 0
     updated = 0
-    with DB.connect() as transaction:
+    with DB._connection_scope(connection) as transaction:
         if not period.get("id"):
             period = DB.ensure_period(
                 period["start_date"],
                 period["end_date"],
                 period["label"],
                 connection=transaction,
+                week_number=period.get("week_number"),
             )
         if kind == "assignment":
             DB.select_period(period["id"], connection=transaction)
@@ -1622,12 +1748,12 @@ def import_mapped_table(
         for class_id in class_ids:
             DB.select_class_period(class_id, period["id"], connection=transaction)
         label = {
-            "assignment": "Assignment",
+            "assignment": "과제이행도",
             "weekly_test": "Weekly Test",
             "comments": "Comments",
         }[kind]
         summary = (
-            f"{len(records)} {label.lower()} records imported · "
+            f"{len(records)} {label if kind == "assignment" else label.lower()} records imported · "
             + (
                 f"{created} students added · {updated} updated"
                 if kind == "assignment"
@@ -1668,19 +1794,19 @@ def import_assignment_csv(
         )
         if key in seen:
             raise ValidationError(
-                "The Assignment CSV contains duplicate rows for the same student and class."
+                "The scores CSV contains duplicate rows for the same student and class."
             )
         seen.add(key)
 
     state = DB.state()
-    existing_period = next(
-        (
-            item
-            for item in state["periods"]
-            if item["start_date"] == period_start and item["end_date"] == period_end
-        ),
-        None,
-    )
+    # Same lookup the write below uses (DB.ensure_period): the week number in the
+    # label first, dates only for unnumbered weeks.
+    try:
+        existing_period = DB.find_period(
+            start_date=period_start, end_date=period_end, label=period_label
+        )
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
     conflicts: list[str] = []
     if existing_period:
         for record in records:
@@ -1704,7 +1830,7 @@ def import_assignment_csv(
                 conflicts.append(f"{record['name']} · {record['class_name']}")
     if conflicts and not confirm_replace:
         raise IntegrationError(
-            "This Assignment CSV would replace different existing data for "
+            "This scores CSV would replace different existing data for "
             + ", ".join(conflicts[:3])
             + ". Confirm replacement to continue.",
             "replacement_confirmation_required",
@@ -1756,7 +1882,7 @@ def import_assignment_csv(
         for class_id in class_ids:
             DB.select_class_period(class_id, period["id"], connection=transaction)
         summary = (
-            f"{len(records)} assignment records matched · "
+            f"{len(records)} 과제이행도 records matched · "
             f"{created} students added · {updated} updated"
         )
         DB.add_import(
@@ -1792,21 +1918,62 @@ def _score_percent(exam: dict[str, Any]) -> float | None:
     return float(exam["score"]) / float(exam["max_score"]) * 100
 
 
+def missing_test_assumption(
+    *,
+    pdf_template_ready: bool,
+    guide: dict[str, Any],
+    weekly_test_text: str,
+    exams: list[dict[str, Any]],
+) -> bool:
+    """Whether the report prints the academy's "did not take the test" notice.
+
+    Only when the week has neither Weekly Test feedback nor a Weekly Test score.
+    A stored score without feedback shows its graph and average instead.
+    """
+    return bool(
+        pdf_template_ready
+        and any(
+            section.get("section") == "weekly_test" and section.get("reliable", True)
+            for section in guide.get("sections", [])
+        )
+        and not str(weekly_test_text or "").strip()
+        and not any(exam.get("score") is not None for exam in effective_score_exams(exams))
+    )
+
+
+def cumulative_test_average(series: list[dict[str, Any]]) -> float | None:
+    """Mean of the student's weekly percentages; weeks without a score are left out."""
+    values = [float(item["student"]) for item in series if item.get("student") is not None]
+    return sum(values) / len(values) if values else None
+
+
 def weekly_test_history(
-    class_id: str, student_id: str, end_date: str | None
+    class_id: str, student_id: str, period_id: str | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return (this student's scored rows, class test series) up to ``end_date``."""
-    if not end_date:
+    """Return (this student's scored rows, class test series) up to the chosen week.
+
+    A numbered week includes the numbered weeks up to its number, whatever their
+    dates. An unnumbered week keeps the older rule: weeks ending on or before it.
+    """
+    period = DB.get_period(period_id) if period_id else None
+    if not period:
         return [], []
+    if period.get("week_number") is not None:
+        scope = "p.week_number IS NOT NULL AND p.week_number <= ?"
+        limit: Any = period["week_number"]
+        order = "p.week_number, e.imported_at, e.label"
+    else:
+        scope = "p.end_date <= ?"
+        limit = period["end_date"]
+        order = "p.end_date, p.start_date, e.imported_at, e.label"
     with DB.connect() as connection:
         rows = [dict(row) for row in connection.execute(
             "SELECT e.student_id, e.period_id, e.label, e.score, e.max_score, "
-            "p.label AS period_label, p.start_date, p.end_date "
+            "p.label AS period_label, p.start_date, p.end_date, p.week_number "
             "FROM period_exams e JOIN periods p ON p.id = e.period_id "
             "JOIN students s ON s.id = e.student_id "
-            "WHERE s.class_id = ? AND e.score IS NOT NULL AND p.end_date <= ? "
-            "ORDER BY p.end_date, p.start_date, e.imported_at, e.label",
-            (class_id, end_date),
+            f"WHERE s.class_id = ? AND e.score IS NOT NULL AND {scope} ORDER BY {order}",
+            (class_id, limit),
         )]
     periods: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -1832,6 +1999,7 @@ def weekly_test_history(
         first = period["row"]
         series.append({
             "period_label": first["period_label"],
+            "week_number": first["week_number"],
             "start_date": first["start_date"],
             "end_date": first["end_date"],
             "student": percents.get(student_id),
@@ -1852,12 +2020,17 @@ def get_ready_student(
     if not student:
         raise ValidationError("Student not found.")
     if not student.get("period_id"):
-        raise ValidationError("Choose a reporting period for this class.")
+        raise ValidationError("Choose a week for this class.")
     exams = effective_score_exams(DB.get_exams(student_id, student["period_id"]))
     payload = student_payload(student, exams)
     payload["test_history"], payload["test_series"] = weekly_test_history(
-        student["class_id"], student_id, student["period_end"]
+        student["class_id"], student_id, student["period_id"]
     )
+    payload["test_average"] = cumulative_test_average(payload["test_series"])
+    payload["test_weeks"] = [
+        str(item["period_label"]) for item in payload["test_series"]
+        if item.get("student") is not None
+    ]
     guide = merge_content_guides(class_example_manifest(student["class_id"]))
     organized = organize_comments(exams, guide)
     payload["comments_by_section"] = organized["sections"]
@@ -1872,12 +2045,12 @@ def get_ready_student(
         )
     payload["sample_content_guide"] = guide
     pdf_template = DB.get_class_template_version(student["class_id"], published_only=True)
-    missing_test_assumption = bool(
-        pdf_template and pdf_template.get("ready")
-        and any(s.get("section") == "weekly_test" and s.get("reliable", True)
-                for s in guide.get("sections", []))
-        and not organized["sections"]["weekly_test"].strip())
-    payload["missing_test_feedback_assumption"] = missing_test_assumption
+    payload["missing_test_feedback_assumption"] = missing_test_assumption(
+        pdf_template_ready=bool(pdf_template and pdf_template.get("ready")),
+        guide=guide,
+        weekly_test_text=organized["sections"]["weekly_test"],
+        exams=exams,
+    )
     # Missing pieces never block a report; the student only needs some data for the week.
     has_week_data = bool(
         payload["homework"]
@@ -1889,7 +2062,7 @@ def get_ready_student(
         or any(exam.get("score") is not None for exam in exams)
     )
     if not has_week_data:
-        raise ValidationError("This student has no data for the selected reporting week.")
+        raise ValidationError("This student has no data for the selected week.")
     return payload
 
 
@@ -1918,7 +2091,7 @@ def generate_report(
         template_path = Path(str(pdf_template.get("source_pdf_path") or "")).resolve()
         template_root = PDF_TEMPLATE_DIR.resolve()
         if template_root not in template_path.parents or not template_path.is_file():
-            raise ValidationError("The published company PDF template is unavailable.")
+            raise ValidationError("The published class PDF template is unavailable.")
         generate_student_pdf(
             student,
             template_path,
@@ -2198,7 +2371,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self._path()
         if path == "/api/google/oauth/callback":
-            if not local_request_context(self.headers.get("Host", "")):
+            if not local_request_context(self.headers.get("Host", ""), allow_public=False):
                 self._send_json({"error": "Request host is not allowed."}, HTTPStatus.FORBIDDEN)
                 return
             try:
@@ -2227,11 +2400,11 @@ class AppHandler(BaseHTTPRequestHandler):
             if pdf_template_match:
                 template = DB.get_class_template_version(pdf_template_match.group(1))
                 if not template:
-                    raise ValidationError("Company PDF template not found.")
+                    raise ValidationError("Class PDF template not found.")
                 template_path = Path(str(template.get("source_pdf_path") or "")).resolve()
                 template_root = PDF_TEMPLATE_DIR.resolve()
                 if template_root not in template_path.parents:
-                    raise ValidationError("Company PDF template path is invalid.")
+                    raise ValidationError("Class PDF template path is invalid.")
                 self._send_file(template_path, "application/pdf")
                 return
             archived_match = re.fullmatch(r"/api/reports/archive/([a-f0-9]+)", path)
@@ -2522,18 +2695,18 @@ class AppHandler(BaseHTTPRequestHandler):
         self,
         payload: dict[str, Any],
         *,
-        source_name: str = "Shared homework comment",
+        source_name: str = "Shared 과제이행도 comment",
         import_kind: str = "comments_shared",
     ) -> None:
         class_id = str(payload.get("class_id") or "")
         period_id = str(payload.get("period_id") or "")
         if not isinstance(payload.get("comment"), str):
-            raise ValidationError("Enter a homework comment for this class and week.")
+            raise ValidationError("Enter a 과제이행도 comment for this class and week.")
         comment = payload["comment"].strip()
         if payload.get("comment_section", "homework") != "homework":
-            raise ValidationError("Shared comments are available only for homework.")
+            raise ValidationError("Shared comments are available only for 과제이행도.")
         if not comment:
-            raise ValidationError("Enter a homework comment for this class and week.")
+            raise ValidationError("Enter a 과제이행도 comment for this class and week.")
         if not DB.get_class(class_id) or not DB.get_period(period_id):
             raise ValidationError(
                 "Import Sheet data, Weekly Test comments, or general comments for this "
@@ -2550,7 +2723,7 @@ class AppHandler(BaseHTTPRequestHandler):
             exam.get("comment_section") == "homework" and str(exam.get("comment") or "").strip() not in {"", comment}
             for student_id in student_ids for exam in DB.get_exams(student_id, period_id)
         ):
-            raise IntegrationError("This would replace existing homework comments. Confirm replacement to continue.", "replacement_confirmation_required")
+            raise IntegrationError("This would replace existing 과제이행도 comments. Confirm replacement to continue.", "replacement_confirmation_required")
         entities = {"exam": set()}
         with DB.connect() as transaction:
             for student_id in student_ids:
@@ -2560,7 +2733,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     "comment_section": "homework", "source_name": source_name,
                 }, period_id, connection=transaction)
                 entities["exam"].add(exam_id)
-            summary = f"Homework comment applied to {len(student_ids)} students."
+            summary = f"과제이행도 comment applied to {len(student_ids)} students."
             import_id = DB.add_import(source_name, import_kind, "complete", summary, period_id, connection=transaction)
             DB.link_import_entities(import_id, entities, connection=transaction)
         self._send_json({"ok": True, "summary": summary, "state": app_state()})
@@ -2589,7 +2762,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 str(payload.get("period_id") or DB.period_id_for_class(class_id) or "")
             )
         if not selected_period:
-            raise ValidationError("Choose the reporting period represented by this PDF.")
+            raise ValidationError("Choose the week this PDF covers.")
         period_id = str(selected_period.get("id") or "")
         pdf_bytes = decode_base64(payload.get("pdf_base64"), "Comments PDF")
         if section == "homework":
@@ -2663,6 +2836,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 selected_period = DB.ensure_period(
                     selected_period["start_date"], selected_period["end_date"],
                     selected_period["label"], connection=transaction,
+                    week_number=selected_period.get("week_number"),
                 )
                 period_id = selected_period["id"]
             for record, candidates in prepared:
@@ -2716,7 +2890,8 @@ class AppHandler(BaseHTTPRequestHandler):
             import_state = "review" if review else "complete"
             summary = f"{matched} comments matched · {review} need review"
             if "comment_section" in payload:
-                summary = f"{section.replace('_', ' ').title()}: {summary}"
+                section_label = "과제이행도" if section == "homework" else section.replace('_', ' ').title()
+                summary = f"{section_label}: {summary}"
             if missing_comments:
                 summary += f" · {len(missing_comments)} students missing comments"
             import_id = DB.add_import(
@@ -2751,15 +2926,21 @@ class AppHandler(BaseHTTPRequestHandler):
             tabs = result["tabs"]
         else:
             workbook = workspace.read_sheets(spreadsheet)
-            selected, _, _, _ = _automatic_workbook_sheet(
-                workbook["worksheets"], kind
+            week_tab = (
+                _week_block_worksheet(workbook["worksheets"]) if kind == "assignment" else None
             )
-            result = workspace.read_sheet(
-                spreadsheet, str(selected.get("worksheet") or "")
-            )
+            if week_tab is None:
+                selected, _, _, _ = _automatic_workbook_sheet(
+                    workbook["worksheets"], kind
+                )
+                week_tab = str(selected.get("worksheet") or "")
+            result = workspace.read_sheet(spreadsheet, week_tab)
             tabs = workbook["tabs"]
         mark_google_service_verified("sheets", workspace)
-        _, header_row, preview = _automatic_sheet_values(result["values"], kind)
+        blocks = split_week_blocks(result["values"]) if kind == "assignment" else []
+        _, header_row, preview = _automatic_sheet_values(
+            blocks[0]["values"] if blocks else result["values"], kind
+        )
         response = {
             **preview,
             "spreadsheet_id": result["spreadsheet_id"],
@@ -2768,7 +2949,10 @@ class AppHandler(BaseHTTPRequestHandler):
             "tabs": tabs,
             "header_row": header_row,
         }
-        if kind == "assignment":
+        if blocks:
+            # The sheet names its own weeks, so no single period is proposed.
+            response["weeks"] = week_block_previews(blocks)
+        elif kind == "assignment":
             assignment_period = _assignment_period_from_headers(
                 preview["headers"], payload.get("period_start")
             )
@@ -2780,7 +2964,6 @@ class AppHandler(BaseHTTPRequestHandler):
         if DB.get_setting("google_connection_disabled") == "1":
             raise ValidationError("Reconnect Google Workspace before reading Sheets.")
         kind = str(payload.get("kind") or "")
-        period = period_from_payload(payload, allow_create=kind == "assignment")
         workspace = GoogleWorkspace.from_env()
         spreadsheet = str(payload.get("spreadsheet") or "")
         preferred_worksheet = str(payload.get("worksheet") or "")
@@ -2788,24 +2971,47 @@ class AppHandler(BaseHTTPRequestHandler):
             result = workspace.read_sheet(spreadsheet, preferred_worksheet)
         else:
             workbook = workspace.read_sheets(spreadsheet)
-            selected, _, _, _ = _automatic_workbook_sheet(
-                workbook["worksheets"], kind
+            week_tab = (
+                _week_block_worksheet(workbook["worksheets"]) if kind == "assignment" else None
             )
-            result = workspace.read_sheet(
-                spreadsheet, str(selected.get("worksheet") or "")
-            )
+            if week_tab is None:
+                selected, _, _, _ = _automatic_workbook_sheet(
+                    workbook["worksheets"], kind
+                )
+                week_tab = str(selected.get("worksheet") or "")
+            result = workspace.read_sheet(spreadsheet, week_tab)
         mark_google_service_verified("sheets", workspace)
-        values, header_row, preview = _automatic_sheet_values(result["values"], kind)
-        mapping = dict(preview.get("suggested_mapping") or {})
-        summary = import_mapped_table(
-            values=values,
-            mapping=mapping,
-            kind=kind,
-            period=period,
-            source_name=f"{result['spreadsheet_name']} · {result['worksheet']}",
-            source_provider="google_sheets",
-            confirm_replace=payload.get("confirm_replace") is True,
-        )
+        blocks = split_week_blocks(result["values"]) if kind == "assignment" else []
+        source_name = f"{result['spreadsheet_name']} · {result['worksheet']}"
+        confirm_replace = payload.get("confirm_replace") is True
+        if blocks:
+            # The sheet names its own weeks; the week chosen in the upload window is ignored.
+            _, header_row, preview = _automatic_sheet_values(blocks[0]["values"], kind)
+            mapping = dict(preview.get("suggested_mapping") or {})
+            try:
+                year = date.fromisoformat(str(payload.get("period_start") or "")).year
+            except ValueError:
+                year = date.today().year
+            summary = import_week_blocks(
+                blocks=blocks,
+                year=year,
+                source_name=source_name,
+                source_provider="google_sheets",
+                confirm_replace=confirm_replace,
+            )
+        else:
+            period = period_from_payload(payload, allow_create=kind == "assignment")
+            values, header_row, preview = _automatic_sheet_values(result["values"], kind)
+            mapping = dict(preview.get("suggested_mapping") or {})
+            summary = import_mapped_table(
+                values=values,
+                mapping=mapping,
+                kind=kind,
+                period=period,
+                source_name=source_name,
+                source_provider="google_sheets",
+                confirm_replace=confirm_replace,
+            )
         source = {
             "spreadsheet_id": result["spreadsheet_id"],
             "spreadsheet_name": result["spreadsheet_name"],
@@ -2947,7 +3153,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 else DB.get_class_template_version(class_id)
             )
             if not template or template.get("class_id") != class_id:
-                raise ValidationError("Company PDF template not found.")
+                raise ValidationError("Class PDF template not found.")
             deleted = DB.delete_template_version(str(template["id"]))
             if deleted:
                 template_path = Path(str(deleted.get("source_pdf_path") or "")).resolve()
@@ -2955,14 +3161,14 @@ class AppHandler(BaseHTTPRequestHandler):
                 if template_root in template_path.parents:
                     template_path.unlink(missing_ok=True)
             self._send_json(
-                {"ok": True, "message": "Company PDF template removed.", "state": app_state()}
+                {"ok": True, "message": "Class PDF template removed.", "state": app_state()}
             )
             return
         if action == "pdf-upload":
             filename = safe_filename(str(payload.get("filename") or "company-template.pdf"))
             if not filename.casefold().endswith(".pdf"):
                 filename += ".pdf"
-            pdf_bytes = decode_base64(payload.get("pdf_base64"), "Company PDF template")
+            pdf_bytes = decode_base64(payload.get("pdf_base64"), "Class PDF template")
             folder = PDF_TEMPLATE_DIR / class_id
             folder.mkdir(parents=True, exist_ok=True)
             template_id = uuid.uuid4().hex
@@ -3023,7 +3229,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 else DB.get_class_template_version(class_id)
             )
             if not template or template.get("class_id") != class_id:
-                raise ValidationError("Company PDF template not found.")
+                raise ValidationError("Class PDF template not found.")
             mapping = validate_mapping(
                 payload.get("mapping"),
                 page_width=float(template["page_width"]),
@@ -3167,7 +3373,7 @@ class AppHandler(BaseHTTPRequestHandler):
             raise ValidationError("Choose a student from the selected class.")
         period_id = str(issue.get("period_id") or "")
         if not DB.get_period(period_id):
-            raise ValidationError("The reporting period for this review item no longer exists.")
+            raise ValidationError("The week for this review item no longer exists.")
         record = dict(issue["payload"])
         section = record.get("comment_section", "weekly_test")
         if section not in COMMENT_SECTIONS:
@@ -3220,9 +3426,12 @@ def run(host: str = "127.0.0.1", port: int = 8000) -> None:
         raise RuntimeError(
             "This MVP is local-only. Put it behind authenticated HTTPS before sharing it."
         )
+    public = public_origin()
     server = ThreadingHTTPServer((host, port), AppHandler)
     restore_google_connection()
     print(f"Brightline Reports: http://{host}:{port}")
+    if public:
+        print(f"Also accepting https://{public[0]} (it must sit behind authenticated HTTPS).")
     if os.environ.get("BRIGHTLINE_PASSWORD"):
         print("Password protection is enabled.")
     else:

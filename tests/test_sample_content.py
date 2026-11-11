@@ -126,6 +126,7 @@ class SampleContentTests(unittest.TestCase):
         student = {"id": "student", "class_id": "class", "period_id": "week",
                    "period_end": "2026-09-20", "homework_json": "[]", "homework_completed": 1}
         database = Mock()
+        database.get_period.return_value = {"id": "week", "week_number": None, "start_date": "2026-09-14", "end_date": "2026-09-20", "label": "Week"}
         database.get_student_for_period.return_value = student
         database.get_exams.return_value = [
             {"score": 8, "max_score": 10, "comment_section": "weekly_test",
@@ -147,6 +148,7 @@ class SampleContentTests(unittest.TestCase):
         from backend import server
         from contextlib import nullcontext
         database=Mock()
+        database.get_period.return_value = {"id": "week", "week_number": None, "start_date": "2026-09-14", "end_date": "2026-09-20", "label": "Week"}
         database.get_student_for_period.return_value={
             'id':'student','class_id':'class','period_id':'week','period_end':'2026-09-20',
             'homework_json':'[]','homework_completed':1}
@@ -160,6 +162,10 @@ class SampleContentTests(unittest.TestCase):
             self.assertEqual(payload['comments_by_section']['weekly_test'],'')
             database.get_exams.return_value=[]
             self.assertTrue(server.get_ready_student('student','week')['missing_test_feedback_assumption'])
+            # A stored score without Weekly Test feedback is no longer treated as a missed test.
+            database.get_exams.return_value=[{'comment_section':'weekly_test','comment':'','score':73,'max_score':100}]
+            self.assertFalse(server.get_ready_student('student','week')['missing_test_feedback_assumption'])
+            database.get_exams.return_value=[]
             database.get_student_for_period.return_value={
                 'id':'student','class_id':'class','period_id':'week','period_end':'2026-09-20',
                 'homework_json':'[]','homework_completed':0}
@@ -224,6 +230,7 @@ class SampleContentTests(unittest.TestCase):
         student = {"id": "s", "class_id": "c", "period_label": "Week 1"}
         for template in ({"ready": True, "mapping": {"layout": "royal_ib_weekly"}}, None):
             database = Mock()
+            database.get_period.return_value = {"id": "week", "week_number": None, "start_date": "2026-09-14", "end_date": "2026-09-20", "label": "Week"}
             database.get_class_template_version.side_effect = [template, {"id": "original"}]
             with patch.object(server, "DB", database), patch.object(server, "get_ready_student", return_value=student), patch.object(server, "generate_student_pdf") as generate:
                 with self.assertRaisesRegex(ValidationError, "original PDF"):

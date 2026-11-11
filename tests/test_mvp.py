@@ -584,7 +584,7 @@ class ImportSafetyTests(unittest.TestCase):
 
     def test_mixed_weeks_and_duplicate_rows_write_nothing(self) -> None:
         headers = ["Student ID", "Student", "Class", "Completed", "Total", "Week"]
-        with self.assertRaisesRegex(ValueError, "multiple reporting weeks"):
+        with self.assertRaisesRegex(ValueError, "more than one week"):
             app_server.import_mapped_table(
                 values=[
                     headers,
@@ -627,7 +627,7 @@ class ImportSafetyTests(unittest.TestCase):
             source_provider="manual",
         )
         period = app_server.DB.state()["periods"][0]
-        with self.assertRaisesRegex(ValueError, "No Assignment roster match"):
+        with self.assertRaisesRegex(ValueError, "No student in the Google Sheet roster matches"):
             app_server.import_mapped_table(
                 values=[
                     ["Student ID", "Student", "Class", "Score"],
@@ -664,7 +664,8 @@ class ImportSafetyTests(unittest.TestCase):
             source_name="Assignments.csv",
             source_provider="manual",
         )
-        changed_period = {**self.new_period(), "label": "Week 2"}
+        # Same week number under another label: the stored label is kept.
+        changed_period = {**self.new_period(), "label": "Opening week", "week_number": 1}
         changed_values = [values[0], ["S-1", "Mark", "Economics", "9", "10"]]
         with self.assertRaises(IntegrationError) as raised:
             app_server.import_mapped_table(
@@ -1281,6 +1282,28 @@ class ImportSafetyTests(unittest.TestCase):
         self.assertEqual(state["classes"], [])
         self.assertEqual(state["students"], [])
 
+    def test_legacy_assignment_csv_finds_the_week_by_number(self) -> None:
+        def csv_text(mark):
+            return "\n".join(("과목명,담당자 이름,학생,학년,학교,과제", ",,,,,2026-08-17",
+                              f"Economics,Jane,Mark,11,Brightline School,{mark}"))
+        app_server.import_assignment_csv(csv_text("A"), "homework.csv", "2026-08-17", "2026-08-17", "Week 2")
+        week_2 = app_server.DB.state()["periods"][0]
+        # Same week number, other dates: lands in Week 2, so the change needs confirmation.
+        with self.assertRaises(IntegrationError) as raised:
+            app_server.import_assignment_csv(csv_text("F"), "homework.csv", "2026-08-17", "2026-08-17", "Week 2 ")
+        self.assertEqual(raised.exception.code, "replacement_confirmation_required")
+        with self.assertRaises(IntegrationError) as raised:
+            app_server.import_assignment_csv(
+                csv_text("F").replace("2026-08-17", "2026-08-24"), "homework.csv",
+                "2026-08-24", "2026-08-24", "Week 2")
+        self.assertEqual(raised.exception.code, "replacement_confirmation_required")
+        student = app_server.DB.state()["students"][0]
+        self.assertEqual(app_server.DB.get_student_for_period(student["id"], week_2["id"])["homework_completed"], 1)
+        # Another week number on Week 2's dates is a new week: no conflict, Week 2 untouched.
+        app_server.import_assignment_csv(csv_text("F"), "homework.csv", "2026-08-17", "2026-08-17", "Week 5")
+        self.assertEqual(sorted(p["week_number"] for p in app_server.DB.state()["periods"]), [2, 5])
+        self.assertEqual(app_server.DB.get_student_for_period(student["id"], week_2["id"])["homework_completed"], 1)
+
     def test_reports_stay_disabled_until_google_output_is_ready(self) -> None:
         app_server.import_mapped_table(
             values=[
@@ -1338,6 +1361,7 @@ class ImportSafetyTests(unittest.TestCase):
 class DatabaseReadinessTests(unittest.TestCase):
     def test_preview_can_show_low_confidence_routing_without_enabling_download(self) -> None:
         database = Mock()
+        database.get_period.return_value = {"id": "week", "week_number": None, "start_date": "2026-09-14", "end_date": "2026-09-20", "label": "Week"}
         database.get_student_for_period.return_value = {
             "id": "student",
             "class_id": "class",
@@ -1378,9 +1402,13 @@ class DatabaseReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             database = Database(Path(folder) / "brightline.db")
             first = database.ensure_period("2026-08-17", "2026-08-23", "Week 1")
-            second = database.ensure_period("2026-08-17", "2026-08-23", "Week 2")
+            second = database.ensure_period("2026-08-24", "2026-08-30", "Opening week", week_number=1)
             self.assertEqual(first["id"], second["id"])
             self.assertEqual(second["label"], "Week 1")
+            unnumbered = database.ensure_period("2026-09-07", "2026-09-13", "Autumn A")
+            again = database.ensure_period("2026-09-07", "2026-09-13", "Autumn B")
+            self.assertEqual(unnumbered["id"], again["id"])
+            self.assertEqual(again["label"], "Autumn A")
 
     def test_clear_data_preserves_google_connection_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -1556,8 +1584,9 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("showRoutingReview", source)
         self.assertIn("decision.confidence", source)
         self.assertIn("decision.signals", source)
-        self.assertIn("missing_test_score_warning", source)
-        self.assertIn("A Weekly Test score is stored", source)
+        # A stored score now shows its graph, so the old warning is gone.
+        self.assertNotIn("missing_test_score_warning", source)
+        self.assertNotIn("A Weekly Test score is stored", source)
 
     def test_routing_review_keeps_preview_available_but_blocks_download(self) -> None:
         root = Path(__file__).resolve().parent.parent
@@ -1603,7 +1632,32 @@ class FrontendContractTests(unittest.TestCase):
             )
         )
         self.assertFalse(app_server.local_request_context("malicious.example"))
+        self.assertFalse(
+            app_server.local_request_context("brightline.ngrok-free.app", "https://brightline.ngrok-free.app")
+        )
         self.assertTrue(app_server.is_json_content_type("application/json; charset=utf-8"))
+
+    def test_public_origin_allows_only_that_https_origin(self) -> None:
+        public = "brightline.ngrok-free.app"
+        with patch.dict(os.environ, {"BRIGHTLINE_PUBLIC_ORIGIN": f"https://{public}"}):
+            self.assertTrue(app_server.local_request_context(public))
+            self.assertTrue(
+                app_server.local_request_context(public, f"https://{public}", "same-origin")
+            )
+            self.assertFalse(app_server.local_request_context(public, f"http://{public}"))
+            self.assertFalse(app_server.local_request_context(public, "https://malicious.example"))
+            self.assertFalse(
+                app_server.local_request_context(public, f"https://{public}", "cross-site")
+            )
+            self.assertFalse(app_server.local_request_context("other.ngrok-free.app"))
+            self.assertFalse(app_server.local_request_context(public, allow_public=False))
+            self.assertTrue(
+                app_server.local_request_context("127.0.0.1:8000", "http://127.0.0.1:8000")
+            )
+        for invalid in ("http://brightline.ngrok-free.app", "https://brightline.ngrok-free.app/app"):
+            with patch.dict(os.environ, {"BRIGHTLINE_PUBLIC_ORIGIN": invalid}):
+                with self.assertRaises(RuntimeError):
+                    app_server.public_origin()
         self.assertFalse(app_server.is_json_content_type("text/plain"))
 
     def test_oauth_return_can_load_static_app_without_opening_cross_site_apis(self) -> None:

@@ -381,7 +381,8 @@ def _rgb(c, color, stroke=False):
 
 
 def _draw_chart(c, chart, student, height):
-    from backend.report_charts import draw_homework_status_chart, draw_weekly_test_chart
+    from backend.report_charts import (
+        draw_homework_status_chart, draw_weekly_test_chart, weekly_test_subtitle)
     from backend.report_engine import register_fonts
     box = fitz.Rect(chart["box"])
     name, class_name = str(student.get("name") or ""), str(student.get("class_name") or "")
@@ -395,7 +396,7 @@ def _draw_chart(c, chart, student, height):
         series = list(student.get("test_series") or [])
         draw_weekly_test_chart(
             c, *geometry, series, f"{name} (WT - {class_name})",
-            f"기간: {series[0].get('start_date') or ''} ~ {series[-1].get('end_date') or ''}",
+            weekly_test_subtitle(series, student.get("test_average")),
             font_name=register_fonts())
 
 
@@ -427,7 +428,12 @@ def generate_adaptive_pdf(student, template_path, output_path, mapping):
     # Never partially infer some panels while silently dropping other content.
     values=_mapped_values(student)
     parts=student.get("comments_by_section")
-    missing_test_feedback = parts is not None and not str(parts.get("weekly_test") or "").strip()
+    # The notice needs neither feedback nor a score for this week; a stored
+    # score without feedback keeps its graph and average.
+    has_week_score = any(exam.get("score") is not None for exam in student.get("exams") or [])
+    missing_test_feedback = (
+        parts is not None and not str(parts.get("weekly_test") or "").strip() and not has_week_score
+    )
     if missing_test_feedback:
         # Academy-requested reporting assumption, NOT an attendance inference
         # or an update to the student's imported score / source feedback.

@@ -89,7 +89,105 @@ class WeekDataRuleTests(unittest.TestCase):
         self.assertTrue(all(c["student_count"] == 6 for c in state["classes"]))
 
         shared = self.invoke("_import_shared_comment", {"period_id": week_3, "comment": "Week 3 homework."})
-        self.assertEqual(shared["summary"], "Homework comment applied to 2 students.")
+        self.assertEqual(shared["summary"], "과제이행도 comment applied to 2 students.")
+
+    def test_added_week_with_reused_dates_is_its_own_week(self):
+        # Week 1 already uses 2026-07-13..17; week identity is the number, not the dates.
+        reused = {"period_label": "Week 5", "period_start": "2026-07-13", "period_end": "2026-07-17"}
+        self.pdf(["엄현우", "", "다섯째 주 코멘트입니다."], **reused)
+        periods = {p["week_number"]: p for p in app.DB.state()["periods"]}
+        self.assertEqual(sorted(periods), [1, 5])
+        hyunwoo = self.student("엄현우")
+        self.assertEqual([e["comment"] for e in app.DB.get_exams(hyunwoo["id"], periods[5]["id"])],
+                         ["다섯째 주 코멘트입니다."])
+        self.assertEqual([e["comment"] for e in app.DB.get_exams(hyunwoo["id"], periods[1]["id"])], [""])
+
+    def test_added_week_with_existing_number_lands_in_that_week(self):
+        same_number = {"period_label": "Week 1", "period_start": "2026-08-03", "period_end": "2026-08-07"}
+        self.pdf(["엄현우", "", "첫 코멘트입니다."], **same_number)
+        self.assertEqual([p["week_number"] for p in app.DB.state()["periods"]], [1])
+        with self.assertRaises(IntegrationError) as raised:
+            self.pdf(["엄현우", "", "바뀐 코멘트입니다."], **same_number)
+        self.assertEqual(raised.exception.code, "replacement_confirmation_required")
+
+    def test_week_number_in_payload_must_be_positive_whole_number(self):
+        for bad in (0, -1, "two", 1.5):
+            with self.assertRaisesRegex(ValidationError, "Week number must be a whole number of 1 or more"):
+                app.period_from_payload({"week_number": bad, "period_start": "2026-08-03", "period_end": "2026-08-07"})
+        self.assertEqual(app.period_from_payload(
+            {"week_number": 3, "period_start": "2026-08-03", "period_end": "2026-08-07"})["week_number"], 3)
+        self.assertEqual(app.period_from_payload(
+            {"period_label": "Week 6", "period_start": "2026-08-03", "period_end": "2026-08-07"})["week_number"], 6)
+
+    def same_dates(self, number):
+        return {"period_label": f"Week {number}", "period_start": "2026-07-13", "period_end": "2026-07-17"}
+
+    def cumulative_weeks(self):
+        """Week 1 (fixture: 엄현우 75), then Weeks 2 and 4 on Week 1's dates."""
+        scores = {2: {"엄현우": 90, "June": 70}, 4: {"엄현우": 75, "엄하진": 50}}
+        for number, by_name in scores.items():
+            period = app.DB.ensure_period("2026-07-13", "2026-07-17", f"Week {number}")
+            for name, score in by_name.items():
+                app.DB.upsert_exam(self.student(name)["id"], self.class_id, {
+                    "label": f"Week {number}", "score": score, "max_score": 100,
+                    "source_name": "synthetic"}, period["id"])
+        return self.student("엄현우")["id"], self.period_named("Week 2"), self.period_named("Week 4")
+
+    def test_history_includes_only_weeks_up_to_chosen_number(self):
+        student_id, week_2, week_4 = self.cumulative_weeks()
+        _, series = app.weekly_test_history(self.class_id, student_id, week_2)
+        self.assertEqual([item["week_number"] for item in series], [1, 2])
+        _, series = app.weekly_test_history(self.class_id, student_id, week_4)
+        self.assertEqual([item["week_number"] for item in series], [1, 2, 4])
+        self.assertEqual([item["student"] for item in series], [75.0, 90.0, 75.0])
+        _, series = app.weekly_test_history(self.class_id, student_id, self.period_named("Week 1"))
+        self.assertEqual([item["week_number"] for item in series], [1])
+
+    def test_average_matches_hand_computed_value(self):
+        student_id, week_2, week_4 = self.cumulative_weeks()
+        payload = app.get_ready_student(student_id, week_4)
+        self.assertEqual(payload["test_average"], 80.0)
+        self.assertEqual(payload["test_weeks"], ["Week 1", "Week 2", "Week 4"])
+        self.assertEqual(app.get_ready_student(student_id, week_2)["test_average"], 82.5)
+
+    def test_week_without_student_score_is_left_out(self):
+        _, _, week_4 = self.cumulative_weeks()
+        payload = app.get_ready_student(self.student("엄하진")["id"], week_4)
+        self.assertEqual([item["student"] for item in payload["test_series"]], [None, None, 50.0])
+        self.assertEqual(payload["test_average"], 50.0)
+        self.assertEqual(payload["test_weeks"], ["Week 4"])
+
+    def test_no_scores_gives_no_average(self):
+        self.assertIsNone(app.cumulative_test_average([]))
+        self.assertIsNone(app.cumulative_test_average([{"student": None}]))
+        self.pdf(["엄하진", "", "점수 없는 코멘트입니다."], section="general", **self.same_dates(6))
+        payload = app.get_ready_student(self.student("엄하진")["id"], self.period_named("Week 6"))
+        self.assertIsNone(payload["test_average"])
+        self.assertEqual(payload["test_weeks"], [])
+
+    def test_unnumbered_week_keeps_date_rule(self):
+        student = self.student("엄현우")
+        for label, start, end, score in [("Spring A", "2026-06-01", "2026-06-05", 40),
+                                         ("Spring B", "2026-06-08", "2026-06-12", 60)]:
+            period = app.DB.ensure_period(start, end, label)
+            app.DB.upsert_exam(student["id"], self.class_id, {
+                "label": label, "score": score, "max_score": 100, "source_name": "synthetic"}, period["id"])
+        _, series = app.weekly_test_history(self.class_id, student["id"], self.period_named("Spring B"))
+        self.assertEqual([item["period_label"] for item in series], ["Spring A", "Spring B"])
+        self.assertEqual([item["week_number"] for item in series], [None, None])
+
+    def test_missed_test_notice_needs_neither_score_nor_comment(self):
+        guide = {"sections": [{"section": "weekly_test", "reliable": True}]}
+        rule = lambda **changes: app.missing_test_assumption(**{
+            "pdf_template_ready": True, "guide": guide, "weekly_test_text": "", "exams": [], **changes})
+        self.assertTrue(rule())
+        self.assertTrue(rule(exams=[{"score": None, "comment": "과제 코멘트"}]))
+        self.assertFalse(rule(exams=[{"score": 73, "max_score": 100}]))
+        self.assertFalse(rule(exams=[{"score": 0, "max_score": 100}]))
+        self.assertFalse(rule(weekly_test_text="피드백"))
+        self.assertFalse(rule(pdf_template_ready=False))
+        self.assertFalse(rule(guide={"sections": [{"section": "weekly_test", "reliable": False}]}))
+        self.assertFalse(rule(guide={}))
 
     def test_resolving_review_does_not_need_week_data(self):
         self.pdf(self.scored_exam(("총점: 9 / 21", "김지우 학생은 처음 보는 이름입니다."),

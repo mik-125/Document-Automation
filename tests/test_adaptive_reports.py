@@ -160,7 +160,7 @@ class AdaptiveReportTests(unittest.TestCase):
             root=Path(tmp);original=root/"original.pdf";make_original(original)
             student={"name":"Current Student","sample_content_guide":guide(),
                      "comments_by_section":{"homework":"HOMEWORK_OK","weekly_test":"","general":"Course notes. "*75},
-                     "homework":[],"exams":[{"label":"Week 1","score":90,"max_score":100}]}
+                     "homework":[],"exams":[{"label":"Week 1","score":None,"max_score":None}]}
             before=copy.deepcopy(student)
             output=root/"result.pdf"
             generate_adaptive_pdf(student,original,output,default_mapping(600,800,2))
@@ -338,6 +338,27 @@ class AcademyLayoutTests(unittest.TestCase):
         self.assertIn("기간: 2026-07-06 ~ 2026-07-17",text)
         self.assertIn("2026-07-15",text)
         self.assertIn("66.7",text)
+
+    def test_score_without_test_comment_shows_chart_and_average_not_notice(self):
+        weeks=[{"week_number":1,"period_label":"Week 1","start_date":"2026-07-13","end_date":"2026-07-17",
+                "student":73.0,"average":70.0,"highest":95.0,"lowest":40.0}]
+        student=korean_student(test_series=weeks,test_average=73.0,
+                               exams=[{"label":"Week 1","score":73,"max_score":100}],
+                               comments_by_section={"homework":"과제 완료.","weekly_test":"","general":""})
+        doc=self.render(student)
+        self.assertEqual(len(doc),1)
+        text=doc[0].get_text()
+        self.assertIn("학생점수",text)
+        self.assertIn("Week 1 · 평균 73%",text)
+        self.assertNotIn(squash(MISSING_TEST_FEEDBACK),squash(text))
+        self.assertFalse(student["report_fit"]["missing_test_feedback_assumption"])
+
+    def test_no_score_this_week_keeps_notice_even_with_earlier_scores(self):
+        student=korean_student(test_series=series(80.0),exams=[{"label":"Teacher comment","score":None}],
+                               comments_by_section={"homework":"과제 완료.","weekly_test":"","general":""})
+        text=self.render(student)[0].get_text()
+        self.assertNotIn("학생점수",text)
+        self.assertIn(squash(MISSING_TEST_FEEDBACK),squash(text))
 
     def test_missing_test_feedback_has_no_weekly_chart(self):
         student=korean_student(test_series=series(80.0,90.0),

@@ -35,7 +35,6 @@
         </nav>
 
         <div class="sidebar-bottom">
-          <button class="text-button" id="reset-data"><span>↻</span><b>Clear local data</b></button>
           <div class="privacy-note"><span>●</span><div><strong>Private on this Mac</strong><small>Credentials and student data stay out of Git.</small></div></div>
         </div>
       </aside>
@@ -45,36 +44,36 @@
           <button class="icon-button sidebar-open" id="sidebar-open" aria-label="Show sidebar">☰</button>
           <div class="crumb"><span id="page-kicker">REPORT INPUTS</span><strong id="page-title">Data Inbox</strong></div>
           <div class="top-actions">
-            <label class="period-selector">Reporting period<select id="global-period-select" aria-label="Active reporting period"><option value="">No period yet</option></select></label>
+            <label class="period-selector">Week<select id="global-period-select" aria-label="Active week"><option value="">No week yet</option></select></label>
             <span class="server-status"><i></i> Local service connected</span>
           </div>
         </header>
 
         <section class="page active" id="inbox">
           <div class="page-intro">
-            <div><span class="eyebrow">ONE RELIABLE PIPELINE</span><h1>Bring in this week’s report data</h1><p>Complete 1 and 2, then provide 3 or 4—or both. Each report needs homework + test scores, a 과제이행도 comment, and at least one weekly test or general comment.</p></div>
-            <button class="secondary-button" data-go="connections">Manage API connections</button>
+            <div><span class="eyebrow">ONE RELIABLE PIPELINE</span><h1>Bring in this week’s report data</h1><p>Start with the Google Sheet: it creates the week, classes, and students. Then add whichever comments you have. A student gets a report once the class template is ready and they have any data for the week; missing parts are left blank, never filled in.</p></div>
+            <button class="secondary-button" data-go="connections">Google connection</button>
           </div>
 
           <div class="source-grid" id="data-source-grid">
             <article class="source-card">
               <div class="source-card-head"><span class="source-icon assignment required">01</span><span class="status-pill" id="assignment-source-status">Start here</span></div>
-              <h2>Homework + test scores</h2><p>One Google Sheet for the class roster, homework marks, and weekly test scores.</p>
-              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="assignment">Upload</button></div>
+              <h2>과제이행도 + Weekly Test scores</h2><p>One Google Sheet with the class roster, daily 과제이행도 marks (A/B/F), and Weekly Test scores.</p>
+              <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="assignment">Import from Google Sheet</button></div>
             </article>
             <article class="source-card">
-              <div class="source-card-head"><span class="source-icon comments required">02</span><span class="status-pill neutral" id="homework_comment-source-status">Required</span></div>
-              <h2>과제이행도 comment</h2><p>Required. Upload a class PDF or write one comment for every student in the selected class and week. Appears beside the homework graph.</p>
+              <div class="source-card-head"><span class="source-icon comments required">02</span><span class="status-pill neutral" id="homework_comment-source-status">Not added</span></div>
+              <h2>과제이행도 comment</h2><p>Upload a class PDF or write one comment for every student in the class this week. Appears beside the 과제이행도 graph.</p>
               <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="homework_comment">Add comment</button></div>
             </article>
             <article class="source-card">
-              <div class="source-card-head"><span class="source-icon comments">03</span><span class="status-pill neutral" id="weekly_test_comment-source-status">Choose 3 or 4, or both</span></div>
-              <h2>Weekly test comment</h2><p>Upload one PDF with every student’s weekly test comment. Provide this, general comments, or both.</p>
+              <div class="source-card-head"><span class="source-icon comments">03</span><span class="status-pill neutral" id="weekly_test_comment-source-status">Not added</span></div>
+              <h2>Weekly test comment</h2><p>Upload one PDF with every student’s Weekly Test comment. Appears beside the Weekly Test graph.</p>
               <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="weekly_test_comment">Upload PDF</button></div>
             </article>
             <article class="source-card">
-              <div class="source-card-head"><span class="source-icon comments">04</span><span class="status-pill neutral" id="general_comment-source-status">Choose 3 or 4, or both</span></div>
-              <h2>General comment</h2><p>Upload one PDF with every student’s general comment. Provide this, weekly test comments, or both.</p>
+              <div class="source-card-head"><span class="source-icon comments">04</span><span class="status-pill neutral" id="general_comment-source-status">Not added</span></div>
+              <h2>General comment</h2><p>Upload one PDF with every student’s general comment. Appears in the teacher comment section.</p>
               <div class="source-actions"><button class="primary-button" type="button" data-upload-kind="general_comment">Upload PDF</button></div>
             </article>
           </div>
@@ -82,7 +81,7 @@
           <input type="file" id="comments-file-input" accept=".pdf,application/pdf" data-upload-file-kind="comments" hidden />
 
           <section class="section-block">
-            <div class="section-heading"><div><span class="eyebrow">READINESS BY CLASS</span><h2>Required inputs</h2><p>Green checks mean every imported student in that class has the required data. Students with complete inputs can generate reports while others remain incomplete.</p></div></div>
+            <div class="section-heading"><div><span class="eyebrow">THIS WEEK BY CLASS</span><h2>What has been added</h2><p>How many students in each class have each kind of data this week. A green check means every student has it. Nothing here is required: any student with data gets a report once the template is ready.</p></div></div>
             <div class="readiness-table" id="data-readiness"></div>
           </section>
 
@@ -100,7 +99,7 @@
 
         <section class="page" id="templates">
           <div class="page-intro">
-            <div><span class="eyebrow">COMPANY PDF TEMPLATES</span><h1>Map each company’s report layout</h1><p>Upload a clean PDF template, confirm where Brightline should place identity fields, graphs, and comments, then reuse that mapping for every student.</p></div>
+            <div><span class="eyebrow">CLASS REPORT TEMPLATES</span><h1>Set up each class’s report layout</h1><p>Upload a clean PDF template, confirm where Brightline should place identity fields, graphs, and comments, then reuse that mapping for every student.</p></div>
           </div>
 
           <input type="file" id="company-template-input" accept=".pdf,application/pdf" hidden />
@@ -115,14 +114,14 @@
 
         <section class="page" id="reports">
           <div class="page-intro">
-            <div><span class="eyebrow">GENERATE AND EXPORT</span><h1>Student reports by class</h1><p>Brightline places the matched student data, performance graphs, and teacher comments into the published company PDF template.</p></div>
+            <div><span class="eyebrow">GENERATE AND EXPORT</span><h1>Student reports by class</h1><p>Brightline places each student’s scores, graphs, and teacher comments into the class’s published template.</p></div>
             <button class="primary-button disabled" id="download-all" type="button">Download all ready ZIP</button>
           </div>
 
           <div class="report-control panel">
             <div class="report-selectors">
               <label>Class<select id="report-class-select"><option value="">Choose a class</option></select></label>
-              <label>Reporting period<select id="report-period-select"><option value="">Choose a period</option></select></label>
+              <label>Week<select id="report-period-select"><option value="">Choose a week</option></select></label>
             </div>
             <div class="report-checklist" id="report-checklist"></div>
             <div class="report-actions"><button class="secondary-button disabled" id="preview-report" type="button">Preview first ready student</button><button class="primary-button disabled" id="download-class-zip" type="button">Download class ZIP</button></div>
@@ -132,7 +131,7 @@
 
           <section class="section-block">
             <div class="section-heading"><div><span class="eyebrow">REPORT HISTORY</span><h2>Previously generated PDFs</h2><p>Every completed generation keeps a local PDF record and revision number.</p></div><span class="muted" id="report-history-count">0 reports</span></div>
-            <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Period</th><th>Revision</th><th>Generated</th><th></th></tr></thead><tbody id="report-history-table"></tbody></table></div>
+            <div class="table-card"><table><thead><tr><th>Student</th><th>Class</th><th>Week</th><th>Revision</th><th>Generated</th><th></th></tr></thead><tbody id="report-history-table"></tbody></table></div>
           </section>
         </section>
 
@@ -147,6 +146,11 @@
           <section class="connection-help section-block">
             <span class="eyebrow">SETUP CHECKLIST</span><h2>What you need from Google Cloud</h2>
             <ol><li>Configure the Google OAuth consent screen and add your account as a test user.</li><li>Create a Web application OAuth client with redirect URI <code>http://127.0.0.1:8000/api/google/oauth/callback</code>.</li><li>Save its JSON as <code>data/google-oauth-client.json</code> in your local Brightline folder. This private setup is remembered across restarts and excluded from Git. See the README for the one-time setup command.</li><li>Enable Google Sheets API, Google Docs API, and Google Drive API.</li><li>Click Connect Google account. Brightline creates a private <code>Brightline Reports</code> folder in My Drive.</li></ol>
+          </section>
+
+          <section class="danger-zone section-block">
+            <div><span class="eyebrow">LOCAL DATA</span><h2>Clear local data</h2><p>Permanently removes imported students, weeks, sample reports, and report history from this Mac. Google credentials and files already in Google Drive are kept. This cannot be undone.</p></div>
+            <button class="secondary-button danger-button" id="reset-data" type="button">Clear local data…</button>
           </section>
         </section>
       </main>

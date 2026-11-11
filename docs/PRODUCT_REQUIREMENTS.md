@@ -49,6 +49,15 @@ files. They must be considered when changing the application or reviewing a PR.
   `총점: X / Y` line is the Weekly Test score. Q scores are never summed.
 - Comments keep their paragraph breaks, date lines, and original characters
   (superscripts/subscripts). A comment imported into an explicit section stays there.
+- A week is identified by its week number (`Week N`, `WEEK N`, `N주차`). Dates are
+  descriptive and may repeat across weeks; a label without a number falls back to
+  matching by dates. One Sheet may hold several `WEEK N` blocks side by side (class,
+  student, optional grade/school, dated homework marks, one Weekly Test % column; the
+  class header may be blank). All blocks import in one all-or-nothing step, replacement
+  is confirmed once and names the affected weeks, and the Week selector is ignored for
+  such a Sheet. A block without a week heading or with a repeated number is an error.
+- A report for week N is cumulative: it uses the class's numbered weeks 1..N. A week
+  without an effective score for the student is omitted from the graph and the average.
 - Missing data never blocks an otherwise valid report. A week's roster is every
   student with Sheet data or any imported score/comment for that week; a rostered
   student needs only one piece of data. Missing parts are omitted or blank, never
@@ -61,9 +70,12 @@ files. They must be considered when changing the application or reviewing a PR.
   width below, then continues on generated pages built from the original template
   page with the template's own 위클리 테스트 heading bar and a full-width box.
 - An empty 선생님 코멘트 panel is hidden and the Weekly Test panel extends into it.
-- Graphs: 과제이행도 shows the week's daily A/B/F marks (X/blank = gap); 위클리 테스트
-  shows 학생점수, 평균, 최고점, 최저점 per week. Titles use the raw name and class with
-  `기간`. No data means no graph.
+- Graphs: 과제이행도 shows the week's daily A/B/F marks (X/blank = gap), titled with
+  the raw name and class and a `기간` line; 위클리 테스트 shows 학생점수, 평균, 최고점,
+  최저점 for week 1 up to the chosen week, each point labelled `Week N`. Its subtitle
+  is the range and the student's own average over the included weeks, for example
+  `Week 1 ~ Week 4 · 평균 84%` (one week: `Week 2 · 평균 84%`), to one decimal with a
+  trailing `.0` dropped. Unnumbered weeks keep date labels. No data means no graph.
 - Display-only: 성명 drops a leading `(ON)`, the class line drops `[...]` tags, `___`
   in the 과제이행도 comment becomes the student's name, and characters the font cannot
   draw use a plain look-alike. Stored data is unchanged.
@@ -74,9 +86,11 @@ files. They must be considered when changing the application or reviewing a PR.
 - 과제이행도 text may shrink to fit its panel with a 7-point safety floor; if the page rules still cannot be met, request review rather than clip or
   silently discard text. Preserve readable fonts and inspect rendered output.
 - Remove unused trailing blank-template pages from generated reports.
-- Missing appropriate Weekly Test feedback uses this academy-requested assumption:
-  the student missed the test, even if an imported score exists. Use the notice
-  below, omit the conflicting test graph, and fit the report on one page:
+- A student with neither Weekly Test feedback nor a Weekly Test score for the chosen
+  week uses this academy-requested assumption: the student missed the test. Use the
+  notice below, omit the test graph, and fit the report on one page. A student with
+  a score but no feedback is not a missed test: show the graph and average and leave
+  the feedback area blank.
 
   > 학생은 이번 위클리 테스트를 응시하지 않았기에 정확한 이해도 판단이 어렵습니다. 위클리 테스트를 나중에 한 번 풀어보시는 것을 추천드립니다.
 
@@ -89,6 +103,9 @@ files. They must be considered when changing the application or reviewing a PR.
   across restarts. Reuse the token automatically until the user disconnects or Google
   revokes it. If refresh fails, show exactly `Google connection expired. Reconnect.`
   and require a new connection. Configuration and tokens remain outside version control.
+- The first start after the week-number change rebuilds the weeks table once. It
+  writes `data/backups/brightline-before-week-number-<timestamp>.db` first and leaves
+  the database unchanged if any row count differs afterwards.
 - Before publishing changes, run the regression suite and the isolated empty-start
   test. Review the staged file list for uploads, secrets, and local configuration.
 - Test layout changes using synthetic documents as well as authorized local
