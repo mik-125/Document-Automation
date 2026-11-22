@@ -59,7 +59,7 @@ Cumulative reports: a report for week N uses the class's numbered weeks 1..N. A 
 
 Weekly Test score precedence: a Sheet score wins; otherwise a score PDF's own `총점: X / Y` line is used (percent = X / Y × 100). Q scores are never summed.
 
-Multi-student comment PDFs identify each student by a standalone name line, or by a score block (총점/Q-score lines, optional `Overall Feedback`) whose comment opens with `OOO 학생은`. Score blocks with no name, several names, or a non-opening name go to manual review.
+Multi-student comment PDFs identify each student by a standalone name line, or by a score block (총점/Q-score lines, optional `Overall Feedback`) whose comment opens with `OOO 학생은`. A PDF may use both formats. After a headed comment begins, a score block or a new paragraph introducing another student ends that comment. Score blocks with no name, several names, or a non-opening name go to manual review.
 
 Student matching should use a stable Student ID. Without one, accept only an exact, unambiguous name within the class, optionally narrowed by school or grade. Never guess identity.
 

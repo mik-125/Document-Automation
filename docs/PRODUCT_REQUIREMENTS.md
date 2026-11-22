@@ -43,7 +43,9 @@ files. They must be considered when changing the application or reviewing a PR.
   decisions in review. Low-confidence routing blocks report generation.
 - Multi-student comment PDFs may mark each student with a standalone name line,
   or with a score block (총점 and/or Q-score lines, optionally followed by
-  "Overall Feedback") whose comment opens with `OOO 학생은`. A score block whose
+  "Overall Feedback") whose comment opens with `OOO 학생은`. Both formats can
+  appear in one PDF. A new score block or a new paragraph introducing another
+  student ends the preceding headed comment. A score block whose
   comment names no student, names more than one, or does not open with the
   name goes to manual review. A Sheet score wins; otherwise a score block's own
   `총점: X / Y` line is the Weekly Test score. Q scores are never summed.

@@ -57,6 +57,45 @@ class CommentPdfParsingTests(unittest.TestCase):
         self.assertEqual(records[0]["comment"], "First student's comment.")
         self.assertEqual(records[1]["comment"], "Second student's comment.")
 
+    def test_scored_block_after_name_heading_stays_with_its_own_student(self):
+        headed = ["라마바", "", "라마바 학생은 잘했습니다."]
+        scored = ["총점: 18 / 21", "", "사아자 학생은 개념 정리가 잘 되어 있습니다."]
+        for pages in [[headed + [""] + scored], [headed, scored]]:
+            with self.subTest(pages=pages):
+                records = parse_comment_pdf(comments_pdf(pages), "Week 4", "comments.pdf")
+                self.assertEqual([record["name"] for record in records], ["라마바", "사아자"])
+                self.assertEqual(records[0]["comment"], headed[-1])
+                self.assertEqual(records[1]["comment"], scored[-1])
+                self.assertEqual((records[1]["score"], records[1]["max_score"]), (18, 21))
+
+    def test_q_score_block_after_name_heading_without_a_name_goes_to_review(self):
+        records = parse_comment_pdf(comments_pdf([[
+            "라마바", "", "라마바 학생은 잘했습니다.", "", "Q1 (Moles): 3 / 4", "",
+            "Overall Feedback", "", "이번 주에도 꾸준히 복습해 주세요.",
+        ]]), "Week 4", "comments.pdf")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["comment"], "라마바 학생은 잘했습니다.")
+        self.assertEqual(records[1]["review_reason"], "No student name was found in this comment")
+        self.assertIsNone(records[1]["score"])
+
+    def test_scored_block_after_name_heading_with_two_names_goes_to_review(self):
+        records = parse_comment_pdf(comments_pdf([[
+            "라마바", "", "라마바 학생은 잘했습니다.", "", "총점: 18 / 21", "",
+            "사아자 학생은 개념 정리가 잘 되어 있습니다.", "차카타 학생은 꾸준히 노력했습니다.",
+        ]]), "Week 4", "comments.pdf")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["comment"], "라마바 학생은 잘했습니다.")
+        self.assertEqual(records[1]["review_reason"], "This comment names more than one student")
+
+    def test_new_student_introduction_at_paragraph_start_ends_headed_comment(self):
+        headed = ["라마바", "", "라마바 학생은 잘했습니다."]
+        narrative = ["사아자 학생은 개념 정리가 잘 되어 있습니다."]
+        for pages in [[headed + ["", ""] + narrative], [headed, narrative]]:
+            with self.subTest(pages=pages):
+                records = parse_comment_pdf(comments_pdf(pages), "Week 4", "comments.pdf")
+                self.assertEqual([record["name"] for record in records], ["라마바", "사아자"])
+                self.assertEqual([record["comment"] for record in records], [headed[-1], narrative[0]])
+
     def test_continuation_and_heading_at_page_bottom(self):
         records = parse_comment_pdf(comments_pdf([
             ["Mark", "", "His comment starts here."],

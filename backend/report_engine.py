@@ -299,8 +299,11 @@ def _is_comment_score_line(line: str) -> bool:
 
 
 def _validate_comment_name(name: str, comment: str) -> None:
-    first_content = next((line for line in comment.splitlines()
-                          if line.strip() and not _is_comment_score_line(line)), "")
+    first_content = next((
+        line for line in comment.splitlines()
+        if line.strip() and not _is_comment_score_line(line)
+        and _collapse_spaces(line).casefold() != "overall feedback"
+    ), "")
     opening_name = _narrative_name(first_content)
     if opening_name and opening_name != name:
         raise ValidationError(
@@ -314,7 +317,16 @@ def _inline_comment_records(
 ) -> list[dict[str, Any]] | None:
     # Layout extraction keeps Korean words on their visual lines. Ordinary
     # extraction can put each word on a separate line, creating false headings.
-    lines = "\n\n".join(pages).splitlines()
+    lines: list[str] = []
+    page_starts: set[int] = set()
+    for page in pages:
+        page_lines = page.splitlines()
+        first_content = next((index for index, line in enumerate(page_lines) if line.strip()), None)
+        if first_content is not None:
+            page_starts.add(len(lines) + first_content)
+        lines.extend(page_lines)
+        lines.append("")
+    gap = _line_gap(pages)
     headings = []
     for index, line in enumerate(lines):
         if not line.strip():
@@ -337,16 +349,41 @@ def _inline_comment_records(
     records = []
     for offset, (start, name) in enumerate(headings):
         end = headings[offset + 1][0] if offset + 1 < len(headings) else len(lines)
-        raw_comment = "\n".join(lines[start + 1:end])
-        comment = _preserve_comment_sections(raw_comment)
-        if not comment:
-            raise ValidationError(f"No teacher comment could be extracted for {name}.")
-        _validate_comment_name(name, raw_comment)
-        records.append({
-            "name": name, "label": label, "score": None, "max_score": None,
-            "sections": [], "comment": comment, "source_name": source_name,
-        })
+        block_start = start + 1
+        has_feedback, blanks = False, 0
+        for index in range(block_start, end):
+            line = lines[index]
+            if not line.strip():
+                blanks += 1
+                continue
+            is_score = _is_comment_score_line(line)
+            opening_name = _narrative_name(line) if blanks > gap or index in page_starts else None
+            if has_feedback and is_score:
+                records.append(_headed_comment_record(name, lines[block_start:index], label, source_name))
+                records.extend(_scored_comment_records(
+                    [_collapse_spaces(item) for item in lines[index:end]], gap, label, source_name,
+                ))
+                break
+            if has_feedback and opening_name and opening_name != name:
+                records.append(_headed_comment_record(name, lines[block_start:index], label, source_name))
+                name, block_start = opening_name, index
+            has_feedback = has_feedback or (not is_score and _collapse_spaces(line).casefold() != "overall feedback")
+            blanks = 0
+        else:
+            records.append(_headed_comment_record(name, lines[block_start:end], label, source_name))
     return records
+
+
+def _headed_comment_record(name: str, lines: list[str], label: str, source_name: str) -> dict[str, Any]:
+    raw_comment = "\n".join(lines)
+    comment = _preserve_comment_sections(raw_comment)
+    if not comment:
+        raise ValidationError(f"No teacher comment could be extracted for {name}.")
+    _validate_comment_name(name, raw_comment)
+    return {
+        "name": name, "label": label, "score": None, "max_score": None,
+        "sections": [], "comment": comment, "source_name": source_name,
+    }
 
 
 def _scored_narrative_records(
@@ -373,6 +410,12 @@ def _scored_narrative_records(
     first = next((index for index, line in enumerate(lines) if line), None)
     if len(totals) < 2 or totals[0] != first:
         return None
+    return _scored_comment_records(lines, _line_gap(pages), label, source_name)
+
+
+def _scored_comment_records(
+    lines: list[str], gap: int, label: str, source_name: str,
+) -> list[dict[str, Any]]:
     # A score run after comment text starts a new block even if its 총점 line is
     # missing, so two students' comments are never merged into one record.
     starts, previous = [], ""
@@ -382,7 +425,6 @@ def _scored_narrative_records(
         if _is_comment_score_line(line) and not (previous and _is_comment_score_line(previous)):
             starts.append(index)
         previous = line
-    gap = _line_gap(pages)
     records = []
     for number, start in enumerate(starts, 1):
         end = starts[number] if number < len(starts) else len(lines)
