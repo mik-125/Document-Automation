@@ -466,12 +466,7 @@ def _render_adaptive_pdf(student, doc, output_path, mapping, guide, panels):
     frames=_frames(doc,mapping,guide,panels)
     values=_mapped_values(student)
     parts=student.get("comments_by_section")
-    # The notice needs neither feedback nor a score for this week; a stored
-    # score without feedback keeps its graph and average.
-    has_week_score = any(exam.get("score") is not None for exam in student.get("exams") or [])
-    missing_test_feedback = (
-        parts is not None and not str(parts.get("weekly_test") or "").strip() and not has_week_score
-    )
+    missing_test_feedback = bool(student.get("missing_test_feedback_assumption"))
     if missing_test_feedback:
         # Academy-requested reporting assumption, NOT an attendance inference
         # or an update to the student's imported score / source feedback.

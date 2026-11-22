@@ -785,6 +785,9 @@ for (const homework of [false, true]) for (const weekly of [false, true]) for (c
 }
 assert.equal(context.reportReason({ready: false, template_ready: true, output_ready: true}), "No data for this week");
 assert.equal(context.reportReason({ready: true, template_ready: false}), "Template missing");
+const incomplete = {ready: true, template_ready: true, output_ready: true, weekly_test_comment_ready: false};
+assert.doesNotMatch(context.reportReason({...incomplete, missing_test_feedback_assumption: false}), /no test feedback/);
+assert.match(context.reportReason({...incomplete, missing_test_feedback_assumption: true}), /no test feedback/);
 '''
         subprocess.run([node, "-e", script], cwd=(Path(__file__).resolve().parent.parent / "frontend"),
                        check=True, capture_output=True, text=True)

@@ -96,7 +96,7 @@ For a ready, published PDF template whose completed-sample analysis reliably ide
 - Replace the Weekly Test narrative with: `학생은 이번 위클리 테스트를 응시하지 않았기에 정확한 이해도 판단이 어렵습니다. 위클리 테스트를 나중에 한 번 풀어보시는 것을 추천드립니다.`
 - Suppress the Weekly Test graph and fit the report on one page.
 - Do not alter stored scores, source comments, or claim verified attendance.
-- Apply the same condition in `backend/server.py` (`missing_test_assumption`) and in the renderer (`backend/adaptive_reports.py`).
+- Decide the notice in `backend/server.py` (`missing_test_assumption`). Readiness and the PDF renderer use that decision.
 - This exception does not apply to Google Docs or PDF templates without the required sample evidence.
 
 ## Architecture map

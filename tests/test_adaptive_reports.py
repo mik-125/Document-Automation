@@ -159,6 +159,7 @@ class AdaptiveReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);original=root/"original.pdf";make_original(original)
             student={"name":"Current Student","sample_content_guide":guide(),
+                     "missing_test_feedback_assumption":True,
                      "comments_by_section":{"homework":"HOMEWORK_OK","weekly_test":"","general":"Course notes. "*75},
                      "homework":[],"exams":[{"label":"Week 1","score":None,"max_score":None}]}
             before=copy.deepcopy(student)
@@ -353,8 +354,20 @@ class AcademyLayoutTests(unittest.TestCase):
         self.assertNotIn(squash(MISSING_TEST_FEEDBACK),squash(text))
         self.assertFalse(student["report_fit"]["missing_test_feedback_assumption"])
 
+    def test_unreliable_test_section_does_not_turn_a_missing_score_into_a_notice(self):
+        guide = korean_guide()
+        next(section for section in guide["sections"] if section["section"] == "weekly_test")["reliable"] = False
+        student = korean_student(
+            sample_content_guide=guide, missing_test_feedback_assumption=False,
+            comments_by_section={"homework": "과제 완료.", "weekly_test": "", "general": ""},
+        )
+        text = self.render(student)[0].get_text()
+        self.assertNotIn(squash(MISSING_TEST_FEEDBACK), squash(text))
+        self.assertFalse(student["report_fit"]["missing_test_feedback_assumption"])
+
     def test_no_score_this_week_keeps_notice_even_with_earlier_scores(self):
         student=korean_student(test_series=series(80.0),exams=[{"label":"Teacher comment","score":None}],
+                               missing_test_feedback_assumption=True,
                                comments_by_section={"homework":"과제 완료.","weekly_test":"","general":""})
         text=self.render(student)[0].get_text()
         self.assertNotIn("학생점수",text)
@@ -362,6 +375,7 @@ class AcademyLayoutTests(unittest.TestCase):
 
     def test_missing_test_feedback_has_no_weekly_chart(self):
         student=korean_student(test_series=series(80.0,90.0),
+                               missing_test_feedback_assumption=True,
                                comments_by_section={"homework":"과제 완료.","weekly_test":"","general":""})
         doc=self.render(student)
         self.assertEqual(len(doc),1)
