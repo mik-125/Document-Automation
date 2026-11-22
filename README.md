@@ -76,7 +76,7 @@ Each class uses one of these.
 
 Upload the class's **blank** report PDF, review how Brightline mapped its sections, and **publish** the mapping. Only published mappings are used to generate reports; saving a draft doesn't activate it.
 
-You can also upload **completed sample reports** for the class. Brightline uses them only to learn the content structure (which headings exist, and what goes in which section). A sample is never used as a background and never supplies names, scores, or wording. Check what Brightline picked up under **View analysis**.
+Upload at least one **completed sample report** for the class with readable section headings. The blank original needs recognizable 과제이행도, 위클리 테스트, and 선생님 코멘트 panels. Brightline shows a review message when it cannot use either input. The sample guides content placement. The blank original supplies the page artwork, and each student's own data supplies their name, scores, and comments. Check the sample under **View analysis**.
 
 ### Option B: Google Docs template
 

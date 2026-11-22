@@ -490,9 +490,9 @@ function renderTemplates() {
     const activeVersionNote = pdf?.status !== "published" && pdf?.active_version
       ? ` · Version ${pdf.active_version} remains active`
       : "";
-    const pdfSummary = pdf
+    const pdfSummary = (pdf && template.error) || (pdf
       ? `Original design · Version ${pdf.version} · ${pdf.page_count} page${pdf.page_count === 1 ? "" : "s"} · ${pdf.layout_review_required ? "Review original PDF mapping" : pdf.status === "published" ? "Published" : "Mapping confirmation required"}${activeVersionNote}`
-      : "Upload the class’s blank report PDF before generating reports.";
+      : "Upload the class’s blank report PDF before generating reports.");
     const pdfActions = `<button class="table-action" type="button" data-template-pdf-upload="${classItem.id}">${pdf ? "Upload new version" : "Upload PDF template"}</button>${pdf ? `<button class="table-action" type="button" data-template-pdf-map="${classItem.id}">${pdf.status === "published" ? "Review mapping" : "Confirm mapping"}</button><a class="table-action" href="${escapeHtml(pdf.preview_url)}" target="_blank" rel="noopener">Open PDF</a><button class="table-action danger" type="button" data-template-pdf-disconnect="${classItem.id}">Remove</button>` : ""}`;
     return `<tr><td class="template-class-cell"><strong>${escapeHtml(classItem.name)}</strong><small>${escapeHtml(classItem.teacher || "Teacher not set")}</small></td><td class="template-sample-cell"><div class="template-output-stack"><div class="template-sample-layout"><div class="template-sample-summary"><strong>${escapeHtml(pdf?.name || "No template yet")}</strong><small>${escapeHtml(pdfSummary)}</small></div><div class="template-sample-actions">${pdfActions}</div></div><div class="template-sample-layout template-example-layout"><div class="template-sample-summary"><strong>${exampleCount ? `${exampleCount} completed sample${exampleCount === 1 ? "" : "s"}` : "No completed sample"}</strong><small>${escapeHtml(sampleSummary)}</small></div><div class="template-sample-actions"><button class="table-action" type="button" data-template-example="${classItem.id}">Upload sample report</button>${exampleCount ? `<button class="table-action" type="button" data-template-analysis="${classItem.id}">View analysis</button>` : ""}</div></div></div></td></tr>`;
   }).join("");
@@ -500,6 +500,7 @@ function renderTemplates() {
 
 // Missing pieces are shown for information only; they never block generation.
 function reportReason(student) {
+  if (!student.template_ready && student.template_error) return student.template_error;
   if (student.routing_review_required) return "Comment routing review required";
   if (!student.ready) return "No data for this week";
   if (!student.template_ready) return "Template missing";

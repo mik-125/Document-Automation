@@ -21,6 +21,10 @@ files. They must be considered when changing the application or reviewing a PR.
 
 - The original blank template is authoritative for layout, structure, section
   placement, design, and page artwork. A completed sample must not override it.
+- Uploaded PDF reports require a published original with detectable homework,
+  Weekly Test, and teacher comment panels, plus a completed sample with at least
+  one readable section heading. Readiness and generation surface the same review
+  reason when an input cannot be used.
 - Completed samples explain what kind of content belongs in each section. Analyze
   section meanings, text location, fonts and sizes, graph type/location where
   supported by evidence, and variation across samples/pages for that class.

@@ -75,13 +75,48 @@ def _body_font(observations):
     return register_fonts()
 
 
-def _frames(doc, mapping, guide):
+def _require_sample(guide):
+    from backend.report_engine import ValidationError
+
+    if not guide.get("sections"):
+        raise ValidationError("Upload a completed sample report for this class with readable section headings.")
+
+
+def _template_panels(doc):
+    from backend.report_engine import ValidationError
+
+    if not doc.is_pdf or doc.needs_pass or not len(doc):
+        raise ValidationError("The published class PDF template could not be read.")
+    panels = {number: labeled_panels(page) for number, page in enumerate(doc) if not page.rotation}
+    detected = {panel["section"] for page_panels in panels.values() for panel in page_panels}
+    if not SECTION_REGIONS.keys() <= detected:
+        raise ValidationError(
+            "Brightline could not find the required panels on this template. "
+            "Upload a blank original with readable 과제이행도, 위클리 테스트, and 선생님 코멘트 panels."
+        )
+    return panels
+
+
+def _open_template(template_path):
+    from backend.report_engine import ValidationError
+
+    try:
+        return fitz.open(template_path)
+    except (OSError, RuntimeError) as exc:
+        raise ValidationError("The published class PDF template could not be read.") from exc
+
+
+def validate_adaptive_template(template_path, guide):
+    _require_sample(guide)
+    with _open_template(template_path) as doc:
+        _template_panels(doc)
+
+
+def _frames(doc, mapping, guide, panels_by_page):
     frames = []
     regions = {r["key"]:r for r in mapping.get("regions",[])}
-    for number,page in enumerate(doc):
-        if page.rotation:
-            continue
-        panels = labeled_panels(page)
+    for number, panels in panels_by_page.items():
+        page = doc[number]
         drawings = page.get_drawings()
         for panel in panels:
             section = panel["section"]
@@ -417,15 +452,18 @@ def _weekly_continuation_page(background_bytes, source_index, layout):
 
 
 def generate_adaptive_pdf(student, template_path, output_path, mapping):
-    """Return False for unsupported original geometry, allowing mapped fallback."""
+    """Render a student report using the original PDF and completed sample."""
+    guide = student.get("sample_content_guide") or {}
+    _require_sample(guide)
+    with _open_template(template_path) as doc:
+        return _render_adaptive_pdf(student, doc, output_path, mapping, guide, _template_panels(doc))
+
+
+def _render_adaptive_pdf(student, doc, output_path, mapping, guide, panels):
     from backend.report_engine import (_mapped_values, _draw_lines,
                                _fit_mapped_text, INK, register_fonts)
-    guide=student.get("sample_content_guide") or {}
-    if not guide.get("sections"):return False
     register_fonts()
-    doc=fitz.open(template_path)
-    frames=_frames(doc,mapping,guide)
-    # Never partially infer some panels while silently dropping other content.
+    frames=_frames(doc,mapping,guide,panels)
     values=_mapped_values(student)
     parts=student.get("comments_by_section")
     # The notice needs neither feedback nor a score for this week; a stored
@@ -438,10 +476,6 @@ def generate_adaptive_pdf(student, template_path, output_path, mapping):
         # Academy-requested reporting assumption, NOT an attendance inference
         # or an update to the student's imported score / source feedback.
         values["weekly_test_summary"] = MISSING_TEST_FEEDBACK
-    needed={s for s,k in SECTION_REGIONS.items() if values.get(k)}
-    if not needed <= {f["section"] for f in frames}:
-        doc.close()
-        return False
     # A sample-aware comment box contains teacher wording, not an extra English
     # numeric summary that the sample did not contain. Charts retain numeric data.
     for section,key in SECTION_REGIONS.items():
@@ -485,7 +519,6 @@ def generate_adaptive_pdf(student, template_path, output_path, mapping):
         if replacements[i] or (hidden and hidden["page"]==i):
             page.apply_redactions(images=0,graphics=0)
     background_bytes=doc.tobytes()
-    doc.close()
     writer=PdfWriter()
     # Retain readers and isolate each source page: merging overlays can mutate
     # shared PDF streams/resources even when a PageObject is deep-copied.

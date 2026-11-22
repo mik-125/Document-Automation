@@ -82,7 +82,9 @@ class WeekDataRuleTests(unittest.TestCase):
                         "google_sheets": {"status": "disconnected", "account_name": ""}}
         app.DB.select_class_period(self.class_id, week_3)
         with patch.object(app, "google_connection_state", return_value=google_state), \
-                patch.object(app.DB, "get_class_template_version", return_value={"ready": True}):
+                patch.object(app.DB, "get_class_template_version", return_value={"ready": True}), \
+                patch.object(app, "published_pdf_template_path"), \
+                patch.object(app, "validate_adaptive_template"):
             state = app.app_state()
         self.assertEqual({s["name"] for s in state["students"]}, {"엄현우", "엄하진"})
         self.assertTrue(all(s["report_ready"] for s in state["students"]))

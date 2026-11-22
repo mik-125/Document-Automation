@@ -176,7 +176,7 @@ class SampleContentTests(unittest.TestCase):
             payload=server.get_ready_student('student','week')
             self.assertFalse(payload['missing_test_feedback_assumption'])
 
-    def test_different_sample_design_cannot_change_original_pdf_or_mapped_positions(self):
+    def test_different_sample_design_cannot_change_original_pdf_or_panel_positions(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             sample = root / "sample.pdf"
@@ -189,16 +189,24 @@ class SampleContentTests(unittest.TestCase):
             c.rect(15, 15, 570, 770)
             c.setFont("Helvetica-Bold", 16)
             c.drawString(40, 760, "ORIGINAL DESIGN")
+            for title, y in [("Homework", 685), ("Weekly Test", 425)]:
+                c.drawString(40, y, title)
+                c.rect(35, y - 190, 530, 180)
             c.showPage()
             c.setPageSize((500, 700))
+            c.setFont("Helvetica-Bold", 16)
             c.drawString(40, 660, "ORIGINAL SECOND PAGE")
+            c.drawString(40, 610, "General comments")
+            c.rect(35, 540, 430, 60)
             c.save()
             original_bytes = template.read_bytes()
             student = {"name": "New Student", "class_name": "New Class", "period_label": "Week 2",
+                       "sample_content_guide": guide,
                        "homework": [], "homework_percent": 100, "homework_completed": 1,
                        "exams": [{"score": 8, "max_score": 10}],
                        "comments_by_section": organize_comments([{
-                           "comment": "Homework\nHOMEWORK_CURRENT\nWeekly Test\nTEST_CURRENT\nGeneral comments\nGENERAL_CURRENT"
+                           "comment": "Homework\nHOMEWORK_CURRENT\nWeekly Test\nTEST_CURRENT\n"
+                                      "General comments\nGENERAL_CURRENT\n\nReview the lesson and explain the result."
                        }], guide)["sections"]}
             mapping = original_mapping()
             mapping_before = copy.deepcopy(mapping)
@@ -220,8 +228,11 @@ class SampleContentTests(unittest.TestCase):
                     if marker in text:
                         positions[marker] = tm[5] + cm[5]
             reader.pages[0].extract_text(visitor_text=visit)
-            self.assertEqual(set(positions), {"HOMEWORK_CURRENT", "TEST_CURRENT", "GENERAL_CURRENT"})
-            self.assertEqual(len(set(positions.values())), 3)
+            self.assertEqual(set(positions), {"HOMEWORK_CURRENT", "TEST_CURRENT"})
+            self.assertTrue(495 < positions["HOMEWORK_CURRENT"] < 675)
+            self.assertTrue(235 < positions["TEST_CURRENT"] < 415)
+            reader.pages[1].extract_text(visitor_text=visit)
+            self.assertTrue(540 < positions["GENERAL_CURRENT"] < 600)
             self.assertEqual(template.read_bytes(), original_bytes)
             self.assertEqual(mapping, mapping_before)
 

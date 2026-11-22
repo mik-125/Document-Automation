@@ -46,6 +46,7 @@ from backend.integrations import (
     report_replacements,
     suggest_mapping,
 )
+from backend.adaptive_reports import validate_adaptive_template
 from backend.report_engine import (
     ValidationError,
     generate_student_pdf,
@@ -598,9 +599,17 @@ def app_state() -> dict[str, Any]:
         )
         layout_review = bool(active_pdf_template and
                              (active_pdf_template.get("mapping") or {}).get("layout") == "royal_ib_weekly")
-        pdf_ready = bool(active_pdf_template and active_pdf_template.get("ready") and not layout_review)
         examples = class_example_manifest(class_item["id"])
         content_guides[class_item["id"]] = merge_content_guides(examples)
+        pdf_error = ""
+        if active_pdf_template:
+            try:
+                validate_adaptive_template(
+                    published_pdf_template_path(active_pdf_template), content_guides[class_item["id"]],
+                )
+            except ValidationError as exc:
+                pdf_error = str(exc)
+        pdf_ready = bool(active_pdf_template and not pdf_error)
         example_profile = example_analysis_profile(examples)
         missing = list(template.get("missing_required") or [])
         invalid = list(template.get("invalid_placeholders") or [])
@@ -677,8 +686,7 @@ def app_state() -> dict[str, Any]:
             "example_profile": example_profile,
             "last_tested_at": str(template.get("last_tested_at") or ""),
             "error": str(
-                ("Review and publish the original PDF mapping; the previous layout replaced the uploaded design."
-                 if layout_review else "") or template.get("error")
+                pdf_error or template.get("error")
                 or (
                     "Retest this template with the connected Google account."
                     if template.get("document_id") and not account_verified
@@ -696,6 +704,7 @@ def app_state() -> dict[str, Any]:
         student["template_ready"] = bool(
             template_lookup.get(student["class_id"], {}).get("ready")
         )
+        student["template_error"] = template_lookup.get(student["class_id"], {}).get("error", "")
         student["report_ready"] = bool(student.get("ready") and student["template_ready"])
         output_mode = str(template_lookup.get(student["class_id"], {}).get("output_mode") or "")
         student["output_mode"] = output_mode
@@ -2085,13 +2094,8 @@ def generate_report(
     output = REPORT_DIR / period_folder / f"{student_id}-{uuid.uuid4().hex[:8]}.pdf"
     if DB.get_class_template_version(student["class_id"]) and not pdf_template:
         raise ValidationError("Review and publish the original PDF template mapping before generating reports.")
-    if pdf_template and pdf_template.get("ready"):
-        if (pdf_template.get("mapping") or {}).get("layout") == "royal_ib_weekly":
-            raise ValidationError("Review and publish the original PDF mapping. The old replacement layout cannot override your template design.")
-        template_path = Path(str(pdf_template.get("source_pdf_path") or "")).resolve()
-        template_root = PDF_TEMPLATE_DIR.resolve()
-        if template_root not in template_path.parents or not template_path.is_file():
-            raise ValidationError("The published class PDF template is unavailable.")
+    if pdf_template:
+        template_path = published_pdf_template_path(pdf_template)
         generate_student_pdf(
             student,
             template_path,
@@ -2151,6 +2155,15 @@ def generate_report(
     return output
 
 
+def published_pdf_template_path(pdf_template: dict[str, Any]) -> Path:
+    if (pdf_template.get("mapping") or {}).get("layout") == "royal_ib_weekly":
+        raise ValidationError("Review and publish the original PDF mapping. The old replacement layout cannot override your template design.")
+    path = Path(str(pdf_template.get("source_pdf_path") or "")).resolve()
+    if PDF_TEMPLATE_DIR.resolve() not in path.parents or not path.is_file():
+        raise ValidationError("The published class PDF template is unavailable.")
+    return path
+
+
 def generate_zip(class_id: str | None = None) -> tuple[Path | None, dict[str, Any], str]:
     state = app_state()
     selected_class = None
@@ -2164,6 +2177,9 @@ def generate_zip(class_id: str | None = None) -> tuple[Path | None, dict[str, An
         if class_id is None or student["class_id"] == class_id
     ]
     if not any(student.get("report_ready") for student in students):
+        reasons = {student.get("template_error") for student in students}
+        if len(reasons) == 1 and (reason := reasons.pop()):
+            raise ValidationError(reason)
         raise ValidationError("There are no report-ready students in this selection.")
     archive_name = safe_filename(
         selected_class["name"] if selected_class else "all-class-reports", "class-reports"
@@ -2191,7 +2207,7 @@ def generate_zip(class_id: str | None = None) -> tuple[Path | None, dict[str, An
                         "class_name": student["class_name"],
                         "period_id": student.get("period_id") or "",
                         "period_label": student.get("period_label") or "",
-                        "reason": (
+                        "reason": student.get("template_error") or (
                             "Report is not ready: " + ", ".join(missing) + "."
                             if missing
                             else "Report readiness requirements were not met."

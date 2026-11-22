@@ -48,7 +48,7 @@ The browser upload workflow does not accept CSV. Mapped CSV and the legacy Royal
 1. Connect Google and import homework plus Weekly Test scores from one Google Sheet. This creates reporting periods, classes, and students. Blank reimported scores preserve existing scores; zero is a valid score. A Sheet may hold several `WEEK N` blocks side by side; all are imported in one all-or-nothing step and the Week selector is ignored for such a Sheet.
 2. Add the 과제이행도 comment for the same class and period through a searchable individual PDF or a shared class comment. In a shared comment, a `___` placeholder is printed as the student's display name.
 3. Import searchable Weekly Test comments, general comments, or both. Each PDF represents exactly one class. A Weekly Test or general PDF may go into a week that has no Sheet data yet (for example a new week from "+ Add week"). Unknown or ambiguous students must go to manual review.
-4. Configure each class with either an original blank PDF whose mapping is reviewed and published, or a Google Docs template containing all required placeholders.
+4. Configure each class with either an original blank PDF whose mapping is reviewed and published plus a usable completed sample, or a Google Docs template containing all required placeholders.
 5. Resolve unmatched comments, preview at least one report, then download individual reports or a class ZIP. Ready students may generate while classmates remain incomplete.
 
 A week's roster is every student with Sheet data or any imported score/comment in that week. Missing data never blocks an otherwise valid report: a rostered student is ready when the class template is ready and the student has at least one of homework entries, a 과제이행도 comment, a Weekly Test comment, a general comment, or a Weekly Test score. Missing pieces are omitted or left blank, never invented or replaced by generated text.
@@ -72,6 +72,7 @@ Student matching should use a stable Student ID. Without one, accept only an exa
 - Evaluate every class and report format independently. Do not generalize headings, fonts, charts, routing, or layouts from one subject.
 - This is searchable-PDF parsing and local evidence-based routing, not OCR or general semantic AI. Ambiguous or unsupported content requires review instead of guessing.
 - Only a published PDF mapping drives report generation. Saving a draft does not activate it. Publishing is a local configuration action, not public transmission.
+- An uploaded PDF can generate reports only when Brightline detects all three required panels on the original and finds at least one readable section heading in the class's completed samples. Show the same review reason in readiness and generation.
 - Google Docs templates are an alternative to PDF templates. Required placeholders are `student_name`, `class_name`, `reporting_week`, `assignment_summary`, `weekly_test_summary`, and `teacher_comment`. Optional supported placeholders are `student_id`, `grade_or_year`, `school`, `assignment_percent`, and `weekly_test_score`. Placeholders inside drawings or images are unsupported.
 
 ## PDF fitting and pagination rules
@@ -112,7 +113,7 @@ For a ready, published PDF template whose completed-sample analysis reliably ide
 - `backend/report_charts.py` and `weekly_report.py`: charts and fallback report rendering.
 - `frontend/index.html`, `styles.css`, and `app.js`: dependency-free browser UI with no build step.
 - `tests/`: Python `unittest` backend and frontend-contract tests.
-- `assets/royal-ib-report-template.pdf`: bundled two-page fillable binary template.
+- `assets/royal-ib-report-template.pdf`: legacy two-page fillable asset without the labeled panels required for report generation.
 
 ## Implementation and security rules
 

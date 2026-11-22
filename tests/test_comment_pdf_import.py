@@ -25,6 +25,7 @@ from backend.report_engine import (
     parse_shared_comment_pdf,
     register_fonts,
 )
+from backend.template_mapping import default_mapping
 
 
 def comments_pdf(pages: list[list[str]]) -> bytes:
@@ -457,6 +458,33 @@ class CommentPdfImportTests(unittest.TestCase):
             google.assert_not_called()
         self.assertEqual(app_server.DB.state()["reports"], [])
 
+    def test_published_pdf_requires_a_sample_and_detectable_panels(self):
+        template_root = Path(self.folder.name)
+        original = template_root / "unlabeled.pdf"
+        original.write_bytes(comments_pdf([["Synthetic original without labeled panels"]]))
+        mapping = default_mapping(595, 842)
+        template = app_server.DB.create_template_version(
+            class_id=self.class_id, name="Synthetic original", source_pdf_path=original,
+            source_sha256="", page_width=595, page_height=842, page_count=1, mapping=mapping,
+        )
+        app_server.DB.update_template_mapping(template["id"], mapping, publish=True)
+        for guide, reason in (
+            ({}, "Upload a completed sample report for this class"),
+            ({"sections": [{"section": "weekly_test"}]}, "could not find the required panels"),
+        ):
+            with self.subTest(reason=reason), \
+                    patch.object(app_server, "PDF_TEMPLATE_DIR", template_root), \
+                    patch.object(app_server, "merge_content_guides", return_value=guide):
+                state = app_server.app_state()
+                self.assertFalse(state["class_templates"][0]["ready"])
+                self.assertIn(reason, state["class_templates"][0]["error"])
+                student = state["students"][0]
+                self.assertFalse(student["report_ready"])
+                self.assertIn(reason, student["template_error"])
+                with self.assertRaisesRegex(ValidationError, reason) as failure:
+                    app_server.generate_report(student["id"], self.period_id, archive=False)
+                self.assertEqual(app_server.error_status(failure.exception), 400)
+
     def test_zip_uses_real_readiness_and_missing_comments_do_not_block(self):
         self.upload(["Mark", "", "Mark's saved comment.", "", "Unknown", "",
                      "No report for this name.", "", "김민준", "", "An uncertain comment."])
@@ -471,6 +499,8 @@ class CommentPdfImportTests(unittest.TestCase):
         }
         with patch.object(app_server, "google_connection_state", return_value=google_state), \
                 patch.object(app_server.DB, "get_class_template_version", return_value={"ready": True}), \
+                patch.object(app_server, "published_pdf_template_path", return_value=report), \
+                patch.object(app_server, "validate_adaptive_template"), \
                 patch.object(app_server, "generate_report", return_value=report) as generate, \
                 patch.object(app_server, "EXPORT_DIR", output / "exports"):
             # Class/week roster and student readiness are computed from the real database.
