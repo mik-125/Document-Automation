@@ -57,6 +57,8 @@ Week identity: a week is identified by its week number (`Week N`, `WEEK N`, `N�
 
 Cumulative reports: a report for week N uses the class's numbered weeks 1..N. A week in which the student has no effective score is omitted from the graph and from the average, never drawn as zero.
 
+The upload window defaults to the highest saved week number and remembers a week the user explicitly picks in the current browser session. The PDF chart subtitle rounds the average to one decimal place, with ties rounded up and trailing `.0` omitted.
+
 Weekly Test score precedence: a Sheet score wins; otherwise a score PDF's own `총점: X / Y` line is used (percent = X / Y × 100). Q scores are never summed.
 
 Multi-student comment PDFs identify each student by a standalone name line, or by a score block (총점/Q-score lines, optional `Overall Feedback`) whose comment opens with `OOO 학생은`. A PDF may use both formats. After a headed comment begins, a score block or a new paragraph introducing another student ends that comment. Score blocks with no name, several names, or a non-opening name go to manual review.
@@ -126,7 +128,7 @@ For a ready, published PDF template whose completed-sample analysis reliably ide
 - Serve only the explicit frontend allowlist and controlled report downloads. Never expose arbitrary filesystem paths.
 - Escape every untrusted value rendered through `innerHTML`; prefer `textContent` for plain text.
 - Preserve accessible labels, centralized modal scroll locking, bounded progressive previews, loading guards, and contained table scrolling.
-- The development server is loopback-only. Preserve allowed-host, same-origin, cross-site, and bind restrictions. Do not expose it to a LAN or public internet without an explicitly approved authenticated-HTTPS design.
+- The server accepts only loopback addresses. Preserve allowed-host, same-origin, cross-site, and bind restrictions. Public tunnels are unsupported.
 - Optional Basic authentication is an extra localhost layer, not a replacement for HTTPS or authorization.
 - Never log or return OAuth codes, client secrets, refresh tokens, authorization headers, credential responses, student comments, or report contents.
 - Store OAuth configuration and tokens only in ignored local files with restrictive permissions. Reject service-account JSON as an OAuth web client.

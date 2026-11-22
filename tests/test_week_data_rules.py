@@ -155,7 +155,7 @@ class WeekDataRuleTests(unittest.TestCase):
     def test_week_without_student_score_is_left_out(self):
         _, _, week_4 = self.cumulative_weeks()
         payload = app.get_ready_student(self.student("엄하진")["id"], week_4)
-        self.assertEqual([item["student"] for item in payload["test_series"]], [None, None, 50.0])
+        self.assertEqual([item["student"] for item in payload["test_series"]], [50.0])
         self.assertEqual(payload["test_average"], 50.0)
         self.assertEqual(payload["test_weeks"], ["Week 4"])
 

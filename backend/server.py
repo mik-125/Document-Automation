@@ -164,35 +164,7 @@ def report_zip_member_name(student: dict[str, Any]) -> str:
     ) + ".pdf"
 
 
-def public_origin() -> tuple[str, int] | None:
-    """The one authenticated-HTTPS origin (such as an ngrok tunnel) allowed besides loopback."""
-    value = os.environ.get("BRIGHTLINE_PUBLIC_ORIGIN", "").strip()
-    if not value:
-        return None
-    try:
-        parts = urllib.parse.urlsplit(value)
-        port = parts.port or 443
-    except ValueError:
-        parts, port = None, 0
-    if (
-        not parts
-        or parts.scheme != "https"
-        or not parts.hostname
-        or parts.username
-        or parts.password
-        or parts.path.strip("/")
-        or parts.query
-        or parts.fragment
-    ):
-        raise RuntimeError(
-            "BRIGHTLINE_PUBLIC_ORIGIN must be an https origin such as https://name.ngrok-free.app"
-        )
-    return parts.hostname.casefold(), port
-
-
-def local_request_context(
-    host: str, origin: str = "", fetch_site: str = "", *, allow_public: bool = True
-) -> bool:
+def local_request_context(host: str, origin: str = "", fetch_site: str = "") -> bool:
     if fetch_site.casefold() == "cross-site":
         return False
     try:
@@ -206,20 +178,15 @@ def local_request_context(
             or host_parts.fragment
         ):
             return False
-        public = public_origin() if allow_public else None
-        if public and host_name == public[0] and host_parts.port in (None, public[1]):
-            scheme, default_port, host_port = "https", 443, public[1]
-        elif host_name in LOOPBACK_HOSTS:
-            scheme, default_port, host_port = "http", 80, host_parts.port or 80
-        else:
+        if host_name not in LOOPBACK_HOSTS:
             return False
         if not origin:
             return True
         origin_parts = urllib.parse.urlsplit(origin)
         origin_name = (origin_parts.hostname or "").casefold()
-        if origin_parts.scheme != scheme or origin_name != host_name:
+        if origin_parts.scheme != "http" or origin_name != host_name:
             return False
-        return (origin_parts.port or default_port) == host_port
+        return (origin_parts.port or 80) == (host_parts.port or 80)
     except ValueError:
         return False
 
@@ -2003,7 +1970,7 @@ def weekly_test_history(
             percent = _score_percent(scored[-1]) if scored else None
             if percent is not None:
                 percents[owner] = percent
-        if not percents:
+        if student_id not in percents:
             continue
         values = list(percents.values())
         first = period["row"]
@@ -2012,7 +1979,7 @@ def weekly_test_history(
             "week_number": first["week_number"],
             "start_date": first["start_date"],
             "end_date": first["end_date"],
-            "student": percents.get(student_id),
+            "student": percents[student_id],
             "average": sum(values) / len(values),
             "highest": max(values),
             "lowest": min(values),
@@ -2037,10 +2004,7 @@ def get_ready_student(
         student["class_id"], student_id, student["period_id"]
     )
     payload["test_average"] = cumulative_test_average(payload["test_series"])
-    payload["test_weeks"] = [
-        str(item["period_label"]) for item in payload["test_series"]
-        if item.get("student") is not None
-    ]
+    payload["test_weeks"] = [str(item["period_label"]) for item in payload["test_series"]]
     guide = merge_content_guides(class_example_manifest(student["class_id"]))
     organized = organize_comments(exams, guide)
     payload["comments_by_section"] = organized["sections"]
@@ -2388,7 +2352,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = self._path()
         if path == "/api/google/oauth/callback":
-            if not local_request_context(self.headers.get("Host", ""), allow_public=False):
+            if not local_request_context(self.headers.get("Host", "")):
                 self._send_json({"error": "Request host is not allowed."}, HTTPStatus.FORBIDDEN)
                 return
             try:
@@ -3271,7 +3235,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "message": (
-                        "Template mapping published and ready for reports."
+                        "Template mapping published."
                         if published
                         else "Template mapping saved as a draft."
                     ),
@@ -3448,19 +3412,12 @@ class AppHandler(BaseHTTPRequestHandler):
 
 def run(host: str = "127.0.0.1", port: int = 8000) -> None:
     if host not in LOOPBACK_HOSTS:
-        raise RuntimeError(
-            "This MVP is local-only. Put it behind authenticated HTTPS before sharing it."
-        )
-    public = public_origin()
+        raise RuntimeError("Brightline can listen only on a loopback address.")
     server = ThreadingHTTPServer((host, port), AppHandler)
     restore_google_connection()
     print(f"Brightline Reports: http://{host}:{port}")
-    if public:
-        print(f"Also accepting https://{public[0]} (it must sit behind authenticated HTTPS).")
     if os.environ.get("BRIGHTLINE_PASSWORD"):
         print("Password protection is enabled.")
-    else:
-        print("Local-only mode: set BRIGHTLINE_PASSWORD before sharing this service.")
     print("Student data stays in the ignored local data directory. Press Ctrl+C to stop.")
     try:
         server.serve_forever()

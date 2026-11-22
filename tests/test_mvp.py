@@ -1636,28 +1636,6 @@ class FrontendContractTests(unittest.TestCase):
             app_server.local_request_context("brightline.ngrok-free.app", "https://brightline.ngrok-free.app")
         )
         self.assertTrue(app_server.is_json_content_type("application/json; charset=utf-8"))
-
-    def test_public_origin_allows_only_that_https_origin(self) -> None:
-        public = "brightline.ngrok-free.app"
-        with patch.dict(os.environ, {"BRIGHTLINE_PUBLIC_ORIGIN": f"https://{public}"}):
-            self.assertTrue(app_server.local_request_context(public))
-            self.assertTrue(
-                app_server.local_request_context(public, f"https://{public}", "same-origin")
-            )
-            self.assertFalse(app_server.local_request_context(public, f"http://{public}"))
-            self.assertFalse(app_server.local_request_context(public, "https://malicious.example"))
-            self.assertFalse(
-                app_server.local_request_context(public, f"https://{public}", "cross-site")
-            )
-            self.assertFalse(app_server.local_request_context("other.ngrok-free.app"))
-            self.assertFalse(app_server.local_request_context(public, allow_public=False))
-            self.assertTrue(
-                app_server.local_request_context("127.0.0.1:8000", "http://127.0.0.1:8000")
-            )
-        for invalid in ("http://brightline.ngrok-free.app", "https://brightline.ngrok-free.app/app"):
-            with patch.dict(os.environ, {"BRIGHTLINE_PUBLIC_ORIGIN": invalid}):
-                with self.assertRaises(RuntimeError):
-                    app_server.public_origin()
         self.assertFalse(app_server.is_json_content_type("text/plain"))
 
     def test_oauth_return_can_load_static_app_without_opening_cross_site_apis(self) -> None:

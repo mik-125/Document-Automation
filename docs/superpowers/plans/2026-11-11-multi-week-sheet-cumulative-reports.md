@@ -15,7 +15,6 @@
 - Read `AGENTS.md` first; its rules apply to every task.
 - Tests use synthetic data and a temporary `BRIGHTLINE_DATA_DIR`. Never run tests, migrations or imports against the repository's `data/` directory.
 - No real student names, class names, IDs or scores in code, tests, docs or commit messages.
-- Do not touch the uncommitted `BRIGHTLINE_PUBLIC_ORIGIN` change in `backend/server.py` and `tests/test_mvp.py`; do not stage, revert or reformat it.
 - Do not commit unless the maintainer has said to. Where a task says "Checkpoint", run the listed tests and stop; commit only with that permission, staging only the files the task names.
 - No new dependencies.
 - Teacher wording is never generated: a missing narrative stays blank.

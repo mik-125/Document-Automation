@@ -17,6 +17,8 @@ files. They must be considered when changing the application or reviewing a PR.
   databases, uploaded files, generated student reports, credentials, tokens, or
   machine-specific settings. Preserve existing local uploads during Git operations.
 
+Brightline serves the app only over loopback. Public tunnels are unsupported.
+
 ## Two distinct report inputs for each class
 
 - The original blank template is authoritative for layout, structure, section
@@ -67,6 +69,9 @@ files. They must be considered when changing the application or reviewing a PR.
   such a Sheet. A block without a week heading or with a repeated number is an error.
 - A report for week N is cumulative: it uses the class's numbered weeks 1..N. A week
   without an effective score for the student is omitted from the graph and the average.
+- The upload window defaults to the highest saved week number and remembers an explicit
+  week selection for the browser session. The chart subtitle rounds the student average
+  to one decimal place, with ties rounded up and trailing `.0` omitted.
 - Missing data never blocks an otherwise valid report. A week's roster is every
   student with Sheet data or any imported score/comment for that week; a rostered
   student needs only one piece of data. Missing parts are omitted or blank, never

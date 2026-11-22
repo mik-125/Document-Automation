@@ -661,6 +661,41 @@ context.uploadDraftPeriods = [];
 assert.equal(vm.runInNewContext("nextWeekNumber()", context), 8);
 """)
 
+    def test_upload_defaults_to_highest_week_unless_user_picked_a_week(self) -> None:
+        self.run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync("app.js", "utf8");
+const functions = [
+  ["normalizedPeriodLabel", "matchingSavedPeriod"], ["openUploadModal", "addUploadWeek"],
+  ["closeModal", "emptyState"],
+].map(([start, end]) => source.slice(source.indexOf(`function ${start}(`), source.indexOf(`function ${end}(`)));
+const periods = [
+  {id: "w1", label: "Week 1", week_number: 1},
+  {id: "w4", label: "Week 4", week_number: 4},
+  {id: "w3", label: "Week 3", week_number: 3},
+];
+const element = {classList: {add() {}}, className: "", innerHTML: ""};
+const context = {
+  state: {periods, selected_period_id: "w1"}, uploadDraftPeriods: [], lastUploadPeriodKey: "",
+  UPLOAD_COPY: {weekly_test_comment: {}},
+  periodById: id => periods.find(period => period.id === id),
+  reconcileUploadDraftPeriods() {}, captureUploadFields() {}, persistUploadDraftPeriods() {},
+  renderUploadModal() {}, unlockPageScroll() {}, $: () => element,
+};
+vm.runInNewContext(functions.join("\n"), context);
+context.openUploadModal("weekly_test_comment");
+assert.equal(context.uploadSession.periodKey, "w4");
+context.closeModal();
+assert.equal(context.lastUploadPeriodKey, "");
+context.lastUploadPeriodKey = "w3";
+context.openUploadModal("weekly_test_comment");
+assert.equal(context.uploadSession.periodKey, "w3");
+context.closeModal();
+assert.equal(context.lastUploadPeriodKey, "w3");
+""")
+
     def test_staged_google_sheet_shows_preview_without_mapping_or_date_fields(self) -> None:
         editor = self.section("uploadStageEditor", "stagedSourceRow")
         google_preview = re.search(

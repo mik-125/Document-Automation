@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import unicodedata
 from collections import Counter
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 from reportlab.lib.colors import HexColor
@@ -273,7 +274,8 @@ def weekly_test_subtitle(series: list[dict[str, Any]], average: float | None) ->
         span = f"기간: {first.get('start_date') or ''} ~ {last.get('end_date') or ''}"
     if average is None:
         return span
-    return f"{span} · 평균 {round(float(average), 1):g}%"
+    rounded = Decimal(str(average)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return f"{span} · 평균 {format(rounded, '.1f').removesuffix('.0')}%"
 
 
 def draw_weekly_test_chart(c: Any, x: float, y: float, width: float, height: float,

@@ -152,7 +152,6 @@ when feedback is missing, so `README.md`, `docs/PRODUCT_REQUIREMENTS.md` and
 
 - Comment PDF parsing, template mapping, sample analysis and pagination.
 - Google Docs template output; it gains no average or cumulative graph.
-- The uncommitted `BRIGHTLINE_PUBLIC_ORIGIN` change in the working tree.
 - Layout glitches noted during the earlier run (school name overflow, score
   label overlap).
 

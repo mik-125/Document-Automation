@@ -31,7 +31,7 @@ let pendingPdfTemplateClass = "";
 let generationBusy = false;
 let uploadSession = null;
 const UPLOAD_DRAFT_PERIODS_KEY = "brightline.uploadDraftPeriods.v1";
-const UPLOAD_LAST_PERIOD_KEY = "brightline.uploadLastPeriod.v1";
+const UPLOAD_LAST_PERIOD_KEY = "brightline.uploadLastPeriod.v2";
 
 function readUploadDraftPeriods() {
   try {
@@ -371,7 +371,6 @@ function openModal(html) {
 function closeModal() {
   if (uploadSession) {
     captureUploadFields();
-    if (uploadSession.periodKey) lastUploadPeriodKey = uploadSession.periodKey;
     persistUploadDraftPeriods();
   }
   uploadSession = null;
@@ -954,7 +953,9 @@ function openUploadModal(kind) {
     uploadDraftPeriods.push(createDraftWeek());
     persistUploadDraftPeriods();
   }
-  const existingPeriod = periodById(state.selected_period_id) || state.periods[0];
+  const newestWeek = state.periods.reduce((newest, period) =>
+    weekNumberOf(period) > weekNumberOf(newest) ? period : newest, null);
+  const existingPeriod = newestWeek || periodById(state.selected_period_id) || state.periods[0];
   const availablePeriods = [...state.periods, ...uploadDraftPeriods];
   const preferredPeriod = availablePeriods.find(period => period.id === lastUploadPeriodKey);
   uploadSession = {
@@ -1136,9 +1137,11 @@ async function saveUpload(confirmed = false) {
       const savedPeriod = matchingSavedPeriod(target);
       const draftIndex = uploadDraftPeriods.findIndex(period => period.id === target.id);
       if (draftIndex >= 0) uploadDraftPeriods.splice(draftIndex, 1);
-      if (savedPeriod) session.periodKey = savedPeriod.id;
+      if (savedPeriod) {
+        session.periodKey = savedPeriod.id;
+        if (lastUploadPeriodKey === target.id) lastUploadPeriodKey = savedPeriod.id;
+      }
     }
-    lastUploadPeriodKey = session.periodKey || lastUploadPeriodKey;
     reconcileUploadDraftPeriods();
     closeModal();
     render();

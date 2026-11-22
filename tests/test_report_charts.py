@@ -169,7 +169,8 @@ class AcademyChartTests(unittest.TestCase):
     def test_subtitle_formats(self):
         week = self.week
         self.assertEqual(weekly_test_subtitle([week(1), week(2), week(4)], 84.0), "Week 1 ~ Week 4 · 평균 84%")
-        self.assertEqual(weekly_test_subtitle([week(2)], 84.25), "Week 2 · 평균 84.2%")
+        self.assertEqual(weekly_test_subtitle([week(2)], 84.25), "Week 2 · 평균 84.3%")
+        self.assertEqual(weekly_test_subtitle([week(2)], 81.25), "Week 2 · 평균 81.3%")
         self.assertEqual(weekly_test_subtitle([week(1), week(2)], 79.96), "Week 1 ~ Week 2 · 평균 80%")
         self.assertEqual(weekly_test_subtitle([week(1), week(2)], None), "Week 1 ~ Week 2")
         legacy = {"week_number": None, "period_label": "Summer", "start_date": "2026-07-13",
