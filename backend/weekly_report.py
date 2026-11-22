@@ -10,12 +10,12 @@ from reportlab.lib.colors import HexColor, white
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 from reportlab.platypus import Paragraph
 
 from backend.comment_sections import report_comment_sections, split_comment_sections
 from backend.report_charts import draw_homework_chart, draw_test_chart
+from backend.report_engine import register_korean_font
 
 GREEN = HexColor("#00B451")
 INK = HexColor("#111111")
@@ -122,9 +122,8 @@ def generate_weekly_report(student: dict[str, Any], output: Path, *, font: str,
                            font_size: float = 10) -> Path:
     # Prefer a regular sans-serif Korean font close to the supplied sample.
     body_path = Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
-    if body_path.is_file():
-        if "BrightlineBody" not in pdfmetrics.getRegisteredFontNames():
-            pdfmetrics.registerFont(TTFont("BrightlineBody", str(body_path)))
+    if ("BrightlineBody" in pdfmetrics.getRegisteredFontNames()
+            or register_korean_font("BrightlineBody", body_path)):
         font = "BrightlineBody"
     exams = student.get("exams", [])
     if "comments_by_section" in student or any("comment_section" in exam for exam in exams):

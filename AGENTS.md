@@ -114,6 +114,7 @@ For a ready, published PDF template whose completed-sample analysis reliably ide
 - `frontend/index.html`, `styles.css`, and `app.js`: dependency-free browser UI with no build step.
 - `tests/`: Python `unittest` backend and frontend-contract tests.
 - `assets/royal-ib-report-template.pdf`: legacy two-page fillable asset without the labeled panels required for report generation.
+- `assets/fonts/`: bundled NanumGothic and its SIL Open Font License. Report fonts must support Hangul. A missing Korean font blocks PDF generation and is reported by `/api/health`.
 
 ## Implementation and security rules
 

@@ -31,6 +31,9 @@ files. They must be considered when changing the application or reviewing a PR.
 - Preserve the individual teacher's wording. Organize source passages into the
   appropriate sections without rewriting, inventing, losing, or duplicating them.
   Never copy a sample student's feedback, identity, or results into another report.
+- PDF generation requires a Korean-capable font. Prefer the Mac system fonts
+  when available and use bundled NanumGothic otherwise. Report missing font
+  support in `/api/health` and before generating a PDF.
 - Evaluate each class independently. An ESS example is not a universal template
   or routing convention. Different subjects can have different section semantics,
   fonts, layouts, graphs, and feedback styles.

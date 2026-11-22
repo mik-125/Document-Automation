@@ -57,6 +57,7 @@ from backend.report_engine import (
     parse_date_label,
     parse_comment_pdf,
     parse_shared_comment_pdf,
+    register_fonts,
     student_payload,
 )
 from backend.template_mapping import default_mapping, validate_mapping
@@ -2404,7 +2405,15 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/api/health":
-                self._send_json({"ok": True})
+                try:
+                    register_fonts()
+                except ValidationError as exc:
+                    self._send_json(
+                        {"ok": False, "korean_font_ready": False, "error": str(exc)},
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                else:
+                    self._send_json({"ok": True, "korean_font_ready": True})
                 return
             if path == "/api/state":
                 self._send_json(app_state())

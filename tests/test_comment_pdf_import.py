@@ -10,6 +10,8 @@ import unittest
 import zipfile
 from unittest.mock import patch
 
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen import canvas
 
 _SERVER_DATA = tempfile.TemporaryDirectory()
@@ -28,11 +30,11 @@ from backend.report_engine import (
 from backend.template_mapping import default_mapping
 
 
-def comments_pdf(pages: list[list[str]]) -> bytes:
+def comments_pdf(pages: list[list[str]], *, font: str | None = None) -> bytes:
     output = io.BytesIO()
     pdf = canvas.Canvas(output)
     for lines in pages:
-        pdf.setFont(register_fonts(), 12)
+        pdf.setFont(font or register_fonts(), 12)
         for index, line in enumerate(lines):
             pdf.drawString(60, 760 - index * 24, line)
         pdf.showPage()
@@ -200,10 +202,13 @@ class CommentPdfParsingTests(unittest.TestCase):
                          [(18, 21), (12, 21)])
 
     def test_paragraphs_dates_and_superscripts_are_preserved(self):
+        # A teacher PDF can use a different font and encode glyphs the report font lacks.
+        source_font = "HYSMyeongJo-Medium"
+        pdfmetrics.registerFont(UnicodeCIDFont(source_font))
         records = parse_comment_pdf(comments_pdf([
             ["총점: 8 / 10", "", "", "엄현우 학생은 Na⁺와 O²⁻를 비교했습니다.", "CaCO₃ 계산도 했습니다.",
              "", "", "Q1에서는 잘했습니다.", "", "", "총점: 7 / 10", "", "", "엄하진 학생은 성실합니다."],
-        ]), "Week 1", "comments.pdf")
+        ], font=source_font), "Week 1", "comments.pdf")
         self.assertEqual(records[0]["comment"],
                          "엄현우 학생은 Na⁺와 O²⁻를 비교했습니다. CaCO₃ 계산도 했습니다.\n\nQ1에서는 잘했습니다.")
         shared = parse_shared_comment_pdf(comments_pdf([

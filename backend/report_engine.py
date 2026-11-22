@@ -15,7 +15,7 @@ from typing import Any
 from pypdf import PdfReader
 from reportlab.lib.colors import Color, HexColor, white
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase.ttfonts import TTFont, TTFError
 from reportlab.pdfgen import canvas
 
 from backend.comment_sections import report_comment_sections
@@ -39,6 +39,7 @@ FONT_CANDIDATES = (
     Path("/System/Library/Fonts/Supplemental/AppleGothic.ttf"),
     Path("/System/Library/Fonts/Supplemental/NotoSansGothic-Regular.ttf"),
     Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+    Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NanumGothic-Regular.ttf",
 )
 APP_FONT = "Helvetica"
 
@@ -52,15 +53,23 @@ def register_fonts() -> str:
     if APP_FONT != "Helvetica":
         return APP_FONT
     for path in FONT_CANDIDATES:
-        if not path.exists():
-            continue
-        try:
-            pdfmetrics.registerFont(TTFont("RoyalIBUnicode", str(path)))
+        if register_korean_font("RoyalIBUnicode", path):
             APP_FONT = "RoyalIBUnicode"
             return APP_FONT
-        except Exception:
-            continue
-    return APP_FONT
+    raise ValidationError("No Korean font found. Restore the bundled NanumGothic font in assets/fonts and retry.")
+
+
+def register_korean_font(name: str, path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        font = TTFont(name, str(path))
+        if not font.face.charToGlyph.get(ord("가")):
+            return False
+        pdfmetrics.registerFont(font)
+        return True
+    except (OSError, TTFError, ValueError):
+        return False
 
 
 def normalize_spaces(value: str) -> str:

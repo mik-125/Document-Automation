@@ -18,6 +18,8 @@ python3 -m venv .venv
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
+Brightline uses the Mac’s Korean fonts when available and includes [NanumGothic](assets/fonts/OFL.txt) for other machines. Keep `assets/fonts/` with the application to render Korean in PDFs.
+
 A fresh install is empty: no classes, students, scores, comments, templates, or reports. To import scores you need a Google connection, so do the Google setup below next.
 
 ## Google setup (one time)

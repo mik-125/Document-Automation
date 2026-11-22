@@ -1,13 +1,44 @@
 import io
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from pypdf import PdfReader
+import reportlab
+from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
 from backend.report_charts import (draw_homework_chart, draw_homework_status_chart, draw_test_chart,
                                    draw_weekly_test_chart, homework_points, test_points,
                                    weekly_test_subtitle)
-from backend.report_engine import register_fonts
+from backend import report_engine
+from backend.report_engine import ValidationError, generate_student_pdf, register_fonts
+
+
+class KoreanFontTests(unittest.TestCase):
+    def test_english_only_font_is_rejected_before_generation(self):
+        latin_font = Path(reportlab.__file__).parent / "fonts" / "Vera.ttf"
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(report_engine, "APP_FONT", "Helvetica"), \
+                patch.object(report_engine, "FONT_CANDIDATES", (latin_font,)):
+            output = Path(directory) / "result.pdf"
+            with self.assertRaisesRegex(ValidationError, "No Korean font found"):
+                generate_student_pdf({}, Path("unused.pdf"), output, {"layout": "royal_ib_weekly"})
+            self.assertFalse(output.exists())
+
+    def test_bundled_font_round_trips_korean_without_system_fonts(self):
+        bundled = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NanumGothic-Regular.ttf"
+        with patch.object(report_engine, "APP_FONT", "Helvetica"), \
+                patch.object(report_engine, "FONT_CANDIDATES", (bundled,)), \
+                patch.dict(pdfmetrics._fonts), patch.dict(pdfmetrics._dynFaceNames):
+            pdfmetrics._fonts.pop("RoyalIBUnicode", None)
+            output = io.BytesIO()
+            report = canvas.Canvas(output)
+            report.setFont(register_fonts(), 12)
+            report.drawString(20, 750, "과제이행도 · 위클리 테스트")
+            report.save()
+            self.assertIn("과제이행도 · 위클리 테스트", PdfReader(output).pages[0].extract_text())
 
 
 class ReportChartTests(unittest.TestCase):
